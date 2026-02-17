@@ -1,0 +1,31 @@
+seed: 42
+
+d2:
+  # Start by verifying the training pipeline using an existing SeqFormer config,
+  # then replace it with your LVVIS/WSOVVIS config.
+  config_file: "projects/SeqFormer/configs/ytvis_2019/seqformer_ytvis_2019.yaml"
+
+  # Detectron2-style override list:
+  #   ["KEY1", "VALUE1", "KEY2", "VALUE2", ...]
+  # Example:
+  #   - "SOLVER.BASE_LR"
+  #   - 0.0001
+  #   - "SOLVER.IMS_PER_BATCH"
+  #   - 8
+  opts: []
+
+  resume: false
+  eval_only: false
+
+dist:
+  # Single-machine multi-GPU
+  num_gpus: 8
+  num_machines: 1
+  machine_rank: 0
+  dist_url: "auto"
+
+project:
+  # Modules to import before building cfg (useful for dataset registration and custom meta-arch).
+  # Example:
+  #   - "wsovvis.data.lvvis_register"
+  imports: []

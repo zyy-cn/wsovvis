@@ -1,0 +1,39 @@
+# Core experiment management
+sacred==0.8.5
+
+# General utilities
+numpy>=1.23
+scipy>=1.10
+pandas>=2.0
+pyyaml>=6.0
+tqdm>=4.65
+opencv-python>=4.8
+matplotlib>=3.7
+tensorboard>=2.14
+
+# Common vision / deep learning utilities
+einops>=0.7
+timm>=0.9
+cloudpickle>=2.2
+omegaconf>=2.3
+fvcore>=0.1.5
+iopath>=0.1.9
+
+# Geometry / masks
+shapely==1.8.5.post1
+
+# Open-vocabulary text encoder tooling (CLIP)
+open-clip-torch>=2.20
+ftfy>=6.1
+regex>=2023.12.25
+
+# Optimal transport / Sinkhorn (for attribution modules)
+geomloss>=0.2.6
+pot>=0.9.3
+
+# COCO API fork for YouTube-VIS/LV-VIS style evaluation
+# git+https://github.com/youtubevos/cocoapi.git#egg=pycocotools&subdirectory=PythonAPI
+
+# NOTE:
+# - Do NOT pin torch/torchvision here; install the correct CUDA wheel explicitly (see README).
+# - Detectron2 is often installed via VNext (editable install) or compiled from source; see README.
