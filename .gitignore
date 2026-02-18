@@ -1,4 +1,7 @@
 model/
 .idea/
+.git/
 *.zip
-third_party/
+build/
+CutLER/
+dinov2/

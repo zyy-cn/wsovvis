@@ -299,6 +299,7 @@ def _main_worker(*args):
         DetectionCheckpointer(model, save_dir=d2_cfg.OUTPUT_DIR).resume_or_load(
             d2_cfg.MODEL.WEIGHTS, resume=cfg_dict.get("resume", False)
         )
+
         res = Trainer.test(d2_cfg, model)
         return res
 
