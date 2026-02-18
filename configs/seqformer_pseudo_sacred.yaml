@@ -15,6 +15,10 @@ d2_opts:
   - ("lvvis_gt_val_agnostic",)
   - MODEL.SeqFormer.NUM_CLASSES
   - 1
+  - MODEL.SeqFormer.MULTI_CLS_ON
+  - False
+  - MODEL.WEIGHTS
+  - "/home/zyy/code/wsovvis/runs/wsovvis_seqformer/1/d2/model_0000499.pth"
 
 # Dataset paths (update to your local layout)
 data:
