@@ -1,7 +1,7 @@
 # Minimal sacred config for SeqFormer fitting on pseudo tubes (class-agnostic)
 
 # Base detectron2/VNext config (SeqFormer)
-d2_cfg_path: third_party/VNext/projects/SeqFormer/configs/base_ytvis.yaml
+d2_cfg_path: third_party/VNext/projects/SeqFormer/configs/vnext_dinov2_ytvis.yaml
 
 # Optional Detectron2 config overrides as a flat list.
 # Example:
@@ -13,11 +13,8 @@ d2_opts:
   - ("lvvis_pseudo_train",)
   - DATASETS.TEST
   - ("lvvis_gt_val_agnostic",)
-  - MODEL.SEM_SEG_HEAD.NUM_CLASSES
+  - MODEL.SeqFormer.NUM_CLASSES
   - 1
-  - "MODEL.WEIGHTS"
-  - "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
-
 
 # Dataset paths (update to your local layout)
 data:

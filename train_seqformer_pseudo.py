@@ -29,6 +29,22 @@ from sacred.observers import FileStorageObserver
 
 ex = Experiment("wsovvis_seqformer")
 
+from detectron2.config import CfgNode as CN
+
+import wsovvis.modeling.backbone.dinov2_backbone
+
+def add_dinov2_config(cfg):
+    # 只在不存在时添加，避免重复覆盖
+    if not hasattr(cfg.MODEL, "DINOV2"):
+        cfg.MODEL.DINOV2 = CN()
+    cfg.MODEL.DINOV2.MODEL_NAME = "dinov2_vitb14"
+    cfg.MODEL.DINOV2.DINO_DIM = 768
+    cfg.MODEL.DINOV2.OUT_CHANNELS = 256
+    cfg.MODEL.DINOV2.OUT_FEATURES = ["res2", "res3", "res4", "res5"]
+    cfg.MODEL.DINOV2.FREEZE = True
+    cfg.MODEL.DINOV2.REPO_PATH = ""
+    cfg.MODEL.DINOV2.WEIGHTS = ""
+
 
 def _get_file_storage(_run, default_root: str) -> str:
     """Sacred CLI supports `-F <dir>` / `--file_storage <dir>`.
@@ -138,6 +154,7 @@ def _setup_cfg(
     # add SeqFormer config
     from detectron2.projects.seqformer import add_seqformer_config
 
+    add_dinov2_config(cfg)
     add_seqformer_config(cfg)
     cfg.merge_from_file(d2_cfg_path)
     if d2_opts:
