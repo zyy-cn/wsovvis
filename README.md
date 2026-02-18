@@ -1,373 +1,243 @@
-# Installation & End-to-End Pipeline (from scratch)
+# WS-OVVIS (LV-VIS) — VideoCutLER pseudo tubes → SeqFormer training
 
-This README is **purely installation + pipeline instructions**. It consolidates all setup/compat issues encountered in this project (CUDA/toolchain mismatches, Detectron2 project modules missing in VNext, Pillow incompatibilities, etc.) and provides a reproducible path to:
+This repo provides a **reproducible minimal pipeline** to:
 
-1) Build the environment (CUDA 11.8 stack)  
-2) Install third-party deps (VNext, CutLER/VideoCutLER)  
-3) Patch VNext so VideoCutLER can run (DeepLab / PointRend modules + Pillow fix)  
-4) Generate LV-VIS tube masks (PNG only) with **4 GPUs**  
-5) Convert mask PNGs to **tube JSON**  
-6) (Optional) Run WS-OVVIS training with multi-GPU (DDP) + Sacred FileStorageObserver
+1. Run **VideoCutLER** to generate per-video `mask_*.png` pseudo masks
+2. Convert masks into **YTVIS/LV-VIS-style JSON** tubes
+3. Train **SeqFormer (VNext/Detectron2)** on pseudo tubes using **DDP + Sacred**
+4. Evaluate on **LV-VIS ground-truth masks** with a **class-agnostic** JSON
+
+> This stage is **class-agnostic (1 class)** by design: pseudo tubes do not contain reliable category labels yet.
+> Once you add tube→category attribution, you can switch to standard LV-VIS multi-class evaluation.
 
 ---
 
-## 0. System prerequisites
+## 0) Repository + third_party status (important)
 
-Tested assumptions (match your current setup):
+This pipeline depends on two third-party components:
 
-- Linux x86_64 (Ubuntu 20.04/22.04)
-- NVIDIA driver supports **CUDA 11.8** runtime
-- You have / can install **CUDA Toolkit 11.8** (`nvcc` from 11.8 is required to compile CUDA ops)
-- GCC/G++ >= 9 recommended
-- `conda` (Miniconda/Anaconda)
+- `third_party/CutLER` (VideoCutLER)
+- `third_party/VNext` (Detectron2 fork + SeqFormer project)
 
-Install system packages (Ubuntu):
+Make sure you clone with submodules (or otherwise place the correct code under `third_party/`):
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  git wget curl unzip \
-  build-essential cmake pkg-config \
-  ninja-build \
-  ffmpeg \
-  libgl1 libglib2.0-0 \
-  libgeos-dev
+git clone --recursive <YOUR_REPO_URL> wsovvis
+cd wsovvis
+git submodule update --init --recursive
 ```
 
-Why `libgeos-dev`: Shapely can error with:
-`OSError: Could not find library geos_c ...`
+### Required patches already tracked in GitHub
+To reproduce, you **must** use a repo revision where the following third_party file contains the safety fix for “0 instances” videos (otherwise VideoCutLER may crash and stop a GPU worker):
+
+- `third_party/CutLER/videocutler/demo_video/demo_masks_only.py`
+
+You said you already backed up the file; for reproduction, simply ensure your checkout matches the GitHub version used by this README.
 
 ---
 
-## 1. Create a clean conda environment
+## 1) Environment
+
+### 1.1 Create conda env
 
 ```bash
 conda create -n wsovvis python=3.10 -y
 conda activate wsovvis
-
-python -m pip install -U pip setuptools wheel
+python -m pip install -U pip wheel
+# Sacred currently imports pkg_resources; pin setuptools to keep pkg_resources available
+python -m pip install -U "setuptools<81"
+python -c "import pkg_resources; print('pkg_resources OK')"
 ```
 
----
-
-## 2. Install PyTorch (CUDA 11.8)
-
-**Install PyTorch first** (this avoids build-isolation errors like "No module named torch" when installing editable packages).
-
-Example (official PyTorch index for cu118):
+### 1.2 Install PyTorch (example: CUDA 11.8)
 
 ```bash
-python -m pip install --index-url https://download.pytorch.org/whl/cu118 \
-  torch==2.7.1+cu118 torchvision==0.22.1+cu118 torchaudio==2.7.1+cu118
+python -m pip install --index-url https://download.pytorch.org/whl/cu118   torch torchvision torchaudio
 ```
 
-Sanity check:
+> Use a PyTorch build that matches your CUDA runtime/driver.
 
-```bash
-python - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("cuda available:", torch.cuda.is_available())
-print("torch cuda:", torch.version.cuda)
-PY
-```
-
-> IMPORTANT: CUDA version mismatch can break Detectron2 builds.  
-> Error you saw previously:
-> `The detected CUDA version (12.2) mismatches the version that was used to compile PyTorch (11.8).`
->
-> Fix: ensure `nvcc` points to CUDA **11.8** when compiling ops:
->
-> ```bash
-> which nvcc
-> nvcc --version
-> ```
->
-> If you have multiple CUDA toolkits, force CUDA 11.8:
-> ```bash
-> export CUDA_HOME=/usr/local/cuda-11.8
-> export PATH=$CUDA_HOME/bin:$PATH
-> export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-> ```
-
----
-
-## 3. Install core Python requirements (order matters)
-
-Install NumPy early (prevents `pycocotools` build failing with `No module named numpy`):
-
-```bash
-python -m pip install "numpy<2.5" cython
-```
-
-Then install remaining deps:
+### 1.3 Install Python dependencies
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-If you still see `geos_c` issues (Shapely), either:
-- keep `libgeos-dev` installed (apt), or
-- prefer conda-forge:
-  ```bash
-  conda install -c conda-forge geos shapely -y
-  ```
-
 ---
 
-## 4. Clone third-party repos
+## 2) Install / expose third_party code
 
-From your project root `~/code/wsovvis`:
+You need both `CutLER` and `VNext` on `PYTHONPATH`.
+
+From repo root:
 
 ```bash
-mkdir -p third_party
+export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:$PYTHONPATH"
 ```
 
-### 4.1 CutLER / VideoCutLER
+If your `VNext` fork requires building detectron2 CUDA ops, follow `third_party/VNext/INSTALL.md`.
+
+### Optional: patch VNext so VideoCutLER runs
+Some VNext layouts miss Detectron2 project stubs (e.g., DeepLab / PointRend) that VideoCutLER expects.
+If you see import errors like `detectron2.projects.deeplab` / `point_rend`, run:
 
 ```bash
-git clone --recursive https://github.com/facebookresearch/CutLER.git third_party/CutLER
-python -m pip install -r third_party/CutLER/videocutler/requirements.txt
-```
-
-### 4.2 VNext
-
-```bash
-git clone https://github.com/FoundationVision/VNext.git third_party/VNext
-python -m pip install -r third_party/VNext/requirements.txt
-
-# IMPORTANT: avoid build isolation so torch is visible during editable build
-python -m pip install -e third_party/VNext --no-build-isolation
+python tools/patch_vnext_for_videocutler.py --vnext_root third_party/VNext
 ```
 
 ---
 
-## 5. Fix VNext ↔ VideoCutLER conflicts (one-command patch)
+## 3) Dataset layout (LV-VIS)
 
-### 5.1 What conflicts exist (and what this patch fixes)
-
-In your environment, `detectron2` is imported from:
-
-```
-third_party/VNext/detectron2
-```
-
-However, VideoCutLER / Mask2Former expects Detectron2 "projects" modules that are **not shipped** in VNext's Detectron2 fork by default:
-
-- `detectron2.projects.deeplab`
-- `detectron2.projects.point_rend`
-  - plus `detectron2.projects.point_rend.point_features`
-
-Also, VNext Detectron2 may contain Pillow-incompatible usage:
-
-- `Image.LINEAR` does not exist in Pillow>=10 (you have Pillow 12), causing:
-  `AttributeError: module 'PIL.Image' has no attribute 'LINEAR'`
-
-**This project provides an offline patch tool** that:
-- injects minimal DeepLab + PointRend files into `third_party/VNext/projects/`
-- updates `third_party/VNext/detectron2/projects/__init__.py` so the projects loader can find them
-- patches `Image.LINEAR` → `Image.BILINEAR` for Pillow>=10
-
-### 5.2 Apply the patch
-
-```bash
-cd ~/code/wsovvis
-chmod +x tools/patch_vnext_for_videocutler
-./tools/patch_vnext_for_videocutler --wsovvis-root ~/code/wsovvis
-```
-
-Verify:
-
-```bash
-python - <<'PY'
-from detectron2.projects.deeplab import add_deeplab_config
-from detectron2.projects.point_rend import ColorAugSSDTransform
-from detectron2.projects.point_rend.point_features import point_sample
-print("OK imports")
-PY
-```
-
----
-
-## 6. Build CUDA ops for VideoCutLER (Mask2Former ms_deform_attn)
-
-Required for transformer-based VIS models.
-
-```bash
-cd ~/code/wsovvis/third_party/CutLER/videocutler/mask2former/modeling/pixel_decoder/ops
-rm -rf build/
-sh make.sh
-```
-
-You should see a `.so` built/installed, e.g.
-`MultiScaleDeformableAttention.cpython-310-x86_64-linux-gnu.so`
-
-Warnings about deprecated APIs are OK.
-
----
-
-## 7. Run VideoCutLER demo (single video smoke test)
-
-LV-VIS layout (**do not merge train/val**):
+Expected layout:
 
 ```
 data/LV-VIS/
   train/JPEGImages/<video_id>/*.jpg
   val/JPEGImages/<video_id>/*.jpg
+  annotations/
+    lvvis_val.json
 ```
-
-Example:
-
-```bash
-cd ~/code/wsovvis/third_party/CutLER/videocutler
-
-VID=00000
-python demo_video/demo_masks_only.py \
-  --config-file configs/imagenet_video/video_mask2former_R50_cls_agnostic.yaml \
-  --input ~/code/wsovvis/data/LV-VIS/train/JPEGImages/${VID}/*.jpg \
-  --output ~/code/wsovvis/outputs/videocutler_smoke/${VID} \
-  --save-masks True \
-  --confidence-threshold 0.6 \
-  --opts MODEL.WEIGHTS pretrain/videocutler_m2f_rn50.pth
-```
-
-The demo may also output per-frame `.jpg` visualizations.  
-Next step runs in parallel and **deletes jpg/mp4**, keeping only mask PNGs.
 
 ---
 
-## 8. 4-GPU parallel tube generation (PNG-only)
+## 4) Step A — Generate pseudo masks (PNG tubes) with VideoCutLER
 
-Run:
+This repo includes a 4-GPU launcher script:
 
 ```bash
-cd ~/code/wsovvis
 bash scripts/run_videocutler_4gpu_png_only.sh train
-# or:
-bash scripts/run_videocutler_4gpu_png_only.sh val
 ```
 
 Outputs:
 
+- masks: `outputs/videocutler_lvvis_png/train/masks/<video_id>/mask_*.png`
+- logs:  `outputs/videocutler_lvvis_png/train/logs/gpu*.log`
+
+Environment variables:
+
+- `WSOVVIS_ROOT` (default: `$HOME/code/wsovvis`)
+- `CONF` confidence threshold (default 0.6)
+
+Example:
+
+```bash
+WSOVVIS_ROOT=$PWD CONF=0.6 bash scripts/run_videocutler_4gpu_png_only.sh train
 ```
-outputs/videocutler_lvvis_png/<split>/masks/<video_id>/mask_*.png
-outputs/videocutler_lvvis_png/<split>/logs/gpu*.log
+
+> Some videos may produce **0 instances** (no mask PNGs). This is normal and will be handled in Step B.
+
+---
+
+## 5) Step B — Convert mask PNGs → standard YTVIS JSON
+
+Convert pseudo masks to a **tube JSON** (videos + per-instance segmentations/bboxes/areas):
+
+```bash
+python tools/convert_videocutler_png_to_json.py   --mask_root outputs/videocutler_lvvis_png/train/masks   --img_root  data/LV-VIS/train/JPEGImages   --out_json  outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json   --split_name train
+```
+
+### Skipping bad/empty videos (recommended)
+Use these options to skip problematic cases:
+
+- `--skip_list <txt>`: one `video_id` per line
+- `--min_masks N` (default 3): skip if mask PNG count < N
+- `--min_coverage X` (default 0.2): skip if (#mask_png / #frames) < X
+- `--skip_report <path>`: write skip report JSON (default: `<out_json>.skipped.json`)
+
+Example (more permissive):
+
+```bash
+python tools/convert_videocutler_png_to_json.py   --mask_root outputs/videocutler_lvvis_png/train/masks   --img_root  data/LV-VIS/train/JPEGImages   --out_json  outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json   --split_name train   --min_masks 1 --min_coverage 0.0
 ```
 
 ---
 
-## 9. Convert mask PNGs → tube JSON
+## 6) Step C — Create class-agnostic LV-VIS GT JSON (for evaluation)
 
-Train:
+Convert LV-VIS GT to a single category (id=1, name=`object`):
 
 ```bash
-python tools/convert_videocutler_png_to_json.py \
-  --mask_root outputs/videocutler_lvvis_png/train/masks \
-  --out_json outputs/videocutler_lvvis_png/train/videocutler_tubes_train.json \
-  --split_name train
+python tools/make_class_agnostic_ytvis_json.py   --in_json  data/LV-VIS/annotations/lvvis_val.json   --out_json data/LV-VIS/annotations/lvvis_val_agnostic.json   --category_id 1 --category_name object
 ```
 
-Val:
+---
+
+## 7) Step D — Train SeqFormer on pseudo tubes (DDP + Sacred)
+
+### 7.1 Configure `configs/seqformer_pseudo_sacred.yaml`
+
+Key fields you must set:
+
+- `d2_cfg_path`: use a config that exists in your VNext checkout, e.g.:
+
+  - `third_party/VNext/projects/SeqFormer/configs/base_ytvis.yaml`
+  - or `third_party/VNext/projects/SeqFormer/configs/large_model/swin_ytvis.yaml`
+
+- `data.*` paths:
+  - `train_json`: pseudo tube JSON from Step B
+  - `train_img_root`: LV-VIS train frames root
+  - `val_json`: class-agnostic LV-VIS val JSON from Step C
+  - `val_img_root`: LV-VIS val frames root
+
+- **Dataset names** (important for VNext SeqFormer):
+  - Set `train_name` and `val_name` to start with `ytvis_` (e.g., `ytvis_wsovvis_pseudo_train`)
+  - This makes VNext’s SeqFormer `train_net.py` select the YTVIS mapper.
+
+### 7.2 Weights (important)
+Some SeqFormer configs refer to a local weight path (e.g. `weights/d2_seqformer_pretrain_r50.pth`) that may not exist.
+Two reproducible options:
+
+**Option A (recommended): override to Detectron2’s ImageNet R50 backbone (auto-download)**
+
+Add to `d2_opts`:
+
+```yaml
+d2_opts:
+  - MODEL.WEIGHTS
+  - "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+```
+
+**Option B: provide the weight file on disk**
+
+Put the expected checkpoint at the path in your config (e.g. `weights/d2_seqformer_pretrain_r50.pth`).
+
+### 7.3 Run training
 
 ```bash
-python tools/convert_videocutler_png_to_json.py \
-  --mask_root outputs/videocutler_lvvis_png/val/masks \
-  --out_json outputs/videocutler_lvvis_png/val/videocutler_tubes_val.json \
-  --split_name val
+python train_seqformer_pseudo.py with configs/seqformer_pseudo_sacred.yaml -F runs/wsovvis_seqformer -c no
 ```
 
 Notes:
-- The converter treats each distinct integer ID in `mask_*.png` as one track-id.
-- If IDs are not consistent across frames, tracks will be fragmented (you can add an IoU linker later).
+- `-F runs/...` enables Sacred `FileStorageObserver`
+- `-c no` disables Sacred stdout capture (recommended for DDP stability)
 
 ---
 
-## 10. (Optional) WS-OVVIS training (Detectron2 DDP + Sacred)
+## 8) Eval-only
 
-If your entrypoint is `train_wsovvis.py` (Detectron2 trainer + Sacred), run DDP via torchrun:
+In `configs/seqformer_pseudo_sacred.yaml` set:
 
-```bash
-cd ~/code/wsovvis
-torchrun --nproc_per_node=4 train_wsovvis.py with configs/wsovvis_sacred.yaml
+```yaml
+eval_only: true
+resume: true
 ```
 
-### Sacred FileStorageObserver
-Use local file storage:
-
-```
-runs/
-  <run_id>/
-    config.json
-    metrics.json
-    ...
-```
-
-In code:
-
-```python
-from sacred.observers import FileStorageObserver
-ex.observers.append(FileStorageObserver("runs"))
-```
+Then run the same command as training.
 
 ---
 
-## 11. Recommended directory layout
+## 9) Outputs
 
-```
-wsovvis/
-  data/
-    LV-VIS/
-      train/JPEGImages/<video_id>/*.jpg
-      val/JPEGImages/<video_id>/*.jpg
-  third_party/
-    VNext/
-    CutLER/
-  outputs/
-    videocutler_lvvis_png/
-      train/masks/<video_id>/mask_*.png
-      train/logs/gpu*.log
-      val/...
-  runs/                 # Sacred FileStorageObserver
-  tools/
-    patch_vnext_for_videocutler   # executable (offline patch)
-    convert_videocutler_png_to_json.py
-  scripts/
-    run_videocutler_4gpu_png_only.sh
-```
+- Sacred runs: `runs/wsovvis_seqformer/<run_id>/`
+- Detectron2 output: under the run folder (see logs for `OUTPUT_DIR`)
 
 ---
 
-## 12. Troubleshooting (consolidated)
+## 10) Common failure modes (quick checks)
 
-### A) `OSError: Could not find library geos_c`
-Install GEOS:
-```bash
-sudo apt-get install -y libgeos-dev
-# or:
-conda install -c conda-forge geos shapely -y
-```
+1) **No `mask_*.png` in some videos**: OK — Step B will skip them (see skip report).
+2) **SeqFormer config path not found**: confirm `d2_cfg_path` points to an existing YAML under `third_party/VNext/projects/SeqFormer/configs/`.
+3) **Weights path not found**: use Option A (`detectron2://...`) or put the file at the expected path.
+4) **Dataset mapper crashes**: ensure dataset names start with `ytvis_` and your loader outputs per-frame `annotations` with `bbox_mode`.
 
-### B) `ModuleNotFoundError: No module named numpy` when building pycocotools
-Install numpy first:
-```bash
-python -m pip install "numpy<2.5"
-```
-
-### C) `ModuleNotFoundError: No module named torch` during `pip install -e ...`
-Install torch first, and use:
-```bash
-python -m pip install -e third_party/VNext --no-build-isolation
-```
-
-### D) `AttributeError: PIL.Image has no attribute LINEAR`
-Run the patch tool:
-```bash
-./tools/patch_vnext_for_videocutler --wsovvis-root ~/code/wsovvis
-```
-
-### E) Detectron2 build fails with CUDA mismatch (12.x vs 11.8)
-Ensure `nvcc --version` is 11.8 when building ops, set `CUDA_HOME` to 11.8.
-
----
-
-# End

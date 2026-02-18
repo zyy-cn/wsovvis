@@ -10,6 +10,8 @@ tqdm>=4.65
 opencv-python>=4.8
 matplotlib>=3.7
 tensorboard>=2.14
+setuptools<82
+
 
 # Common vision / deep learning utilities
 einops>=0.7

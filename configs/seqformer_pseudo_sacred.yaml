@@ -1,0 +1,47 @@
+# Minimal sacred config for SeqFormer fitting on pseudo tubes (class-agnostic)
+
+# Base detectron2/VNext config (SeqFormer)
+d2_cfg_path: third_party/VNext/projects/SeqFormer/configs/base_ytvis.yaml
+
+# Optional Detectron2 config overrides as a flat list.
+# Example:
+#   d2_opts:
+#     - SOLVER.IMS_PER_BATCH
+#     - "4"
+d2_opts:
+  - DATASETS.TRAIN
+  - ("lvvis_pseudo_train",)
+  - DATASETS.TEST
+  - ("lvvis_gt_val_agnostic",)
+  - MODEL.SEM_SEG_HEAD.NUM_CLASSES
+  - 1
+  - "MODEL.WEIGHTS"
+  - "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+
+
+# Dataset paths (update to your local layout)
+data:
+  # train pseudo tube json (must include videos.file_names/height/width)
+  train_name: ytvis_wsovvis_pseudo_train
+  train_json: outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json
+  train_img_root: data/LV-VIS/train/JPEGImages
+
+  # class-agnostic LV-VIS GT json for evaluation
+  val_name: ytvis_lvvis_val_agnostic
+  val_json: data/LV-VIS/annotations/lvvis_val_agnostic.json
+  val_img_root: data/LV-VIS/val/JPEGImages
+
+  # class-agnostic
+  num_classes: 1
+
+# Runtime
+output_root: runs/wsovvis_seqformer
+seed: 42
+resume: false
+eval_only: false
+
+# DDP
+num_gpus: 4
+num_machines: 1
+machine_rank: 0
+dist_url: tcp://127.0.0.1:29500
