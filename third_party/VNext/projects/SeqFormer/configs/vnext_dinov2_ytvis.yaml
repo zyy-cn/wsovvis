@@ -1,0 +1,21 @@
+_BASE_: "base_ytvis.yaml"
+
+MODEL:
+  BACKBONE:
+    NAME: "DINOv2PseudoFPN"
+  WEIGHTS: ""
+  RESNETS:
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+
+  DINOV2:
+    MODEL_NAME: "dinov2_vitl14"
+    DINO_DIM: 1024
+    OUT_CHANNELS: 256
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+    FREEZE: True
+    REPO_PATH: "third_party/dinov2"
+    WEIGHTS: "weights/DINOv2/dinov2_vitl14_pretrain.pth"
+
+SOLVER:
+  BACKBONE_MULTIPLIER: 0.0
+  IMS_PER_BATCH: 16
