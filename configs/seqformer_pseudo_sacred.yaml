@@ -10,9 +10,9 @@ d2_cfg_path: third_party/VNext/projects/SeqFormer/configs/vnext_dinov2_ytvis.yam
 #     - "4"
 d2_opts:
   - DATASETS.TRAIN
-  - ("lvvis_pseudo_train",)
+  - ("ytvis_wsovvis_lvvis_pseudo_train",)
   - DATASETS.TEST
-  - ("lvvis_gt_val_agnostic",)
+  - ("ytvis_wsovvis_lvvis_val_agnostic",)
   - MODEL.SeqFormer.NUM_CLASSES
   - 1
   - MODEL.SeqFormer.MULTI_CLS_ON
@@ -23,12 +23,12 @@ d2_opts:
 # Dataset paths (update to your local layout)
 data:
   # train pseudo tube json (must include videos.file_names/height/width)
-  train_name: ytvis_wsovvis_pseudo_train
+  train_name: ytvis_wsovvis_lvvis_pseudo_train
   train_json: outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json
   train_img_root: data/LV-VIS/train/JPEGImages
 
   # class-agnostic LV-VIS GT json for evaluation
-  val_name: ytvis_lvvis_val_agnostic
+  val_name: ytvis_wsovvis_lvvis_val_agnostic
   val_json: data/LV-VIS/annotations/lvvis_val_agnostic.json
   val_img_root: data/LV-VIS/val/JPEGImages
 

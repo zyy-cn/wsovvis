@@ -161,22 +161,17 @@ def load_ytvis_json(json_file: str, image_root: str, dataset_name: Optional[str]
     return dataset_dicts
 
 
-def register_ytvis_like_dataset(
-    name: str,
-    json_file: str,
-    image_root: str,
-    evaluator_type: str = "ytvis",
-):
-    """Register a YTVIS-style dataset for SeqFormer.
+def register_ytvis_like_dataset(name, json_file, image_root, evaluator_type="ytvis"):
+    from detectron2.data import DatasetCatalog, MetadataCatalog
 
-    This is intentionally minimal to reduce coupling with VNext internals.
-    """
+    if name not in DatasetCatalog.list():
+        DatasetCatalog.register(
+            name, lambda jf=json_file, ir=image_root, dn=name: load_ytvis_json(jf, ir, dn)
+        )
+    else:
+        print(f"[wsovvis] WARNING: dataset '{name}' already registered; overwrite metadata.")
 
-    # Avoid re-registration when using multi-process launch.
-    if name in DatasetCatalog.list():
-        return
-
-    DatasetCatalog.register(name, lambda jf=json_file, ir=image_root, dn=name: load_ytvis_json(jf, ir, dn))
+    # ✅ 永远写 metadata（关键）
     MetadataCatalog.get(name).set(
         json_file=json_file,
         image_root=image_root,

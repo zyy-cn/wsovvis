@@ -2,7 +2,7 @@
 sacred==0.8.5
 
 # General utilities
-numpy>=1.23
+numpy<1.24
 scipy>=1.10
 pandas>=2.0
 pyyaml>=6.0
