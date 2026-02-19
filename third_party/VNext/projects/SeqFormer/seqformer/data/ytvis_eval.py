@@ -166,8 +166,40 @@ class YTVISEvaluator(DatasetEvaluator):
             with PathManager.open(file_path, "w") as f:
                 f.write(json.dumps(predictions))
                 f.flush()
+        if not self._do_evaluation:
+            self._logger.info("No GT annotations found; skip evaluation and only save predictions.")
+            return
 
-        self._logger.info("Annotations are not available for evaluation.")
+        # numpy>=2.0 兼容（pycocotools ytvoseval 里常用 np.float / np.int）
+        import numpy as np
+        if not hasattr(np, "float"):
+            np.float = float
+        if not hasattr(np, "int"):
+            np.int = int
+        if not hasattr(np, "bool"):
+            np.bool = bool
+
+        if hasattr(self._metadata, "thing_dataset_id_to_contiguous_id"):
+            reverse_id_map = {v: k for k, v in self._metadata.thing_dataset_id_to_contiguous_id.items()}
+            for r in predictions:
+                cid = int(r["category_id"])
+                r["category_id"] = int(reverse_id_map.get(cid, cid))
+            with PathManager.open(file_path, "w") as f:
+                f.write(json.dumps(predictions))
+
+        from pycocotools.ytvoseval import YTVOSeval
+
+        ytvis_dt = self._ytvis_api.loadRes(file_path)
+        ytvis_eval = YTVOSeval(self._ytvis_api, ytvis_dt, iouType="segm")
+
+        ytvis_eval.evaluate()
+        ytvis_eval.accumulate()
+        ytvis_eval.summarize()
+
+        stats = ytvis_eval.stats
+        names = ["AP","AP50","AP75","APs","APm","APl","AR1","AR10","AR100","ARs","ARm","ARl"]
+        self._results["segm"] = {k: float(v * 100.0) for k, v in zip(names, stats)}
+        self._logger.info("YT-VIS evaluation done.")
         return
 
 
