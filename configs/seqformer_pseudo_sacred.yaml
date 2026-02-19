@@ -15,8 +15,8 @@ d2_opts:
   - ("ytvis_wsovvis_lvvis_val_agnostic",)
   - MODEL.SeqFormer.NUM_CLASSES
   - 1
-  - TEST.EVAL_PERIOD
-  - 200
+#  - TEST.EVAL_PERIOD
+#  - 5000
   - MODEL.SeqFormer.MULTI_CLS_ON
   - False
   - MODEL.WEIGHTS

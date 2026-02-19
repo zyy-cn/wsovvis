@@ -91,6 +91,23 @@ python -m pip install --index-url https://download.pytorch.org/whl/cu118 torch t
 python -m pip install -r requirements.txt
 ```
 
+
+### 1.4 Notes on evaluation dependencies (YTVIS / LV-VIS)
+
+This repo uses **YTVIS-style** evaluation (via `pycocotools.ytvos` / `pycocotools.ytvoseval`) when ground-truth annotations are available.
+
+Common pitfalls:
+
+- **NumPy compatibility (`np.float` error):** some YTVIS/YTVOS forks still use `np.float` (removed in NumPy ≥ 1.24).
+  - Recommended: keep `numpy<1.24` (already pinned in `requirements.txt`).
+  - If you must use newer NumPy, apply a small compatibility patch (see `patches/vnext_ytvis_eval_enable_eval.patch` which includes a safe NumPy shim).
+
+- **Evaluator behaviour:** the SeqFormer evaluator will:
+  - always **dump predictions** to `.../inference/results.json`;
+  - compute metrics **only if** the dataset metadata provides a valid `json_file` and the JSON contains an `annotations` field (see §10 “Evaluation / metrics”).
+
+
+
 If you see `ModuleNotFoundError: pycocotools`, install it:
 ```bash
 python -m pip install pycocotools
@@ -281,6 +298,20 @@ python train_seqformer_pseudo.py with configs/seqformer_pseudo_sacred.yaml -F ru
 ```
 
 Notes:
+- **Evaluation interval:** set `TEST.EVAL_PERIOD` (in iterations) in Detectron2 config to run eval during training.
+- **Checkpoint interval:** set `SOLVER.CHECKPOINT_PERIOD` (in iterations) to control how often checkpoints are saved.
+
+With Sacred, the cleanest way is to edit `d2_opts` in `configs/seqformer_pseudo_sacred.yaml`, e.g.:
+
+```yaml
+d2_opts:
+  - TEST.EVAL_PERIOD
+  - 2000
+  - SOLVER.CHECKPOINT_PERIOD
+  - 2000
+```
+
+(Use `0` to disable periodic evaluation.)
 - `-F runs/...` enables Sacred `FileStorageObserver`
 - `-c no` disables Sacred stdout capture (recommended for DDP stability)
 
@@ -302,12 +333,63 @@ Then run the same command as training.
 
 - Sacred runs: `runs/wsovvis_seqformer/<run_id>/`
 - Detectron2 output: under the run folder (see logs for `OUTPUT_DIR`)
+- SeqFormer evaluator predictions: `runs/.../d2/inference/results.json`
 
 ---
 
 ## 10) Common failure modes (quick checks)
 
 ### Data / preprocessing
+
+
+### Evaluation / metrics
+
+#### 1) Evaluator prints `Annotations are not available for evaluation.`
+
+This means **metric computation is disabled**, usually because:
+
+- `MetadataCatalog.get(DATASETS.TEST[0]).json_file` is missing / wrong path; or
+- the JSON file exists but does **not** contain the `annotations` field (common when using an “images-only” JSON).
+
+**Quick sanity check (temporary debug snippet)**  
+Add this near **`build_evaluator(...)`** in `train_seqformer_pseudo.py`:
+
+```python
+from detectron2.data import DatasetCatalog, MetadataCatalog
+import os
+
+test_name = d2_cfg.DATASETS.TEST[0]
+meta = MetadataCatalog.get(test_name)
+
+print("[DBG] test_name =", test_name)
+print("[DBG] meta.json_file =", getattr(meta, "json_file", None))
+print("[DBG] json exists =", os.path.exists(getattr(meta, "json_file", "")))
+
+ds = DatasetCatalog.get(test_name)
+print("[DBG] dataset len =", len(ds))
+print("[DBG] record[0] keys =", list(ds[0].keys()))
+print("[DBG] has annotations key =", "annotations" in ds[0])
+if "annotations" in ds[0]:
+    print("[DBG] len(record[0]['annotations']) =", len(ds[0]["annotations"]))
+```
+
+Expected output should show `json exists = True` and `has annotations key = True`.
+
+#### 2) `NameError: name 'ytvis_results' is not defined`
+
+You are likely on a partially-modified SeqFormer evaluator.  
+Apply the patch `patches/vnext_ytvis_eval_enable_eval.patch` (included in this reply) to restore a consistent evaluator implementation.
+
+#### 3) NumPy error from `ytvoseval.py` such as `AttributeError: module 'numpy' has no attribute 'float'`
+
+Either:
+- keep `numpy<1.24` (recommended); or
+- apply the patch above (it adds a backward-compatible NumPy shim before calling YTVIS evaluation).
+
+#### 4) Warnings like `destroy_process_group() was not called` or Sacred `tee_stdout.wait timeout`
+
+These are **usually secondary effects** after an exception in one worker (DDP teardown). Fix the root error first; the warnings typically disappear.
+
 1) **No `mask_*.png` in some videos**: OK — Step B will skip them (see skip report).
 2) **JSON conversion errors**: check `pycocotools` install; validate PNG id format.
 
