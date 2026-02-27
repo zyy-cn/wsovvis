@@ -8,7 +8,7 @@ weights/
 data/
 runs/
 codex/
-__pycache__
+__pycache__/
 
 weights
 data
