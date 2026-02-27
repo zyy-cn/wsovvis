@@ -24,8 +24,8 @@ def _load_json(path: Path) -> dict:
 
 
 def _validate_protocol_args(protocol: str, missing_rate: float, min_labels_per_clip: int) -> None:
-    if protocol != "uniform":
-        raise ValueError("Unsupported protocol. v1 supports 'uniform' only.")
+    if protocol not in {"uniform", "long_tail"}:
+        raise ValueError("Unsupported protocol. v2 supports 'uniform' and 'long_tail' only.")
     if missing_rate < 0.0 or missing_rate > 1.0:
         raise ValueError("Invalid --missing-rate. Expected a float in [0, 1].")
     if min_labels_per_clip < 0:
@@ -77,8 +77,9 @@ def _extract_categories(categories: Sequence[dict]) -> Dict[int, str]:
 
 def _build_full_labelsets(
     annotations: Sequence[dict], known_video_ids: set, known_category_ids: set
-) -> Dict[int, set]:
+) -> tuple[Dict[int, set], Dict[int, int]]:
     labels_by_video: Dict[int, set] = {}
+    class_annotation_counts: Dict[int, int] = {cid: 0 for cid in known_category_ids}
     for i, ann in enumerate(annotations):
         if not isinstance(ann, dict):
             raise ValueError(f"Malformed input JSON: annotations[{i}] must be an object.")
@@ -93,7 +94,8 @@ def _build_full_labelsets(
                 f"Invalid annotation at annotations[{i}]: unknown category_id {cid}."
             )
         labels_by_video.setdefault(vid, set()).add(cid)
-    return labels_by_video
+        class_annotation_counts[cid] = class_annotation_counts.get(cid, 0) + 1
+    return labels_by_video, class_annotation_counts
 
 
 def _sample_observed_labelset(full_ids: List[int], missing_rate: float, min_labels_per_clip: int, rng: random.Random) -> List[int]:
@@ -103,6 +105,44 @@ def _sample_observed_labelset(full_ids: List[int], missing_rate: float, min_labe
     if num_keep == 0:
         return []
     return sorted(rng.sample(full_ids, k=num_keep))
+
+
+def _build_long_tail_drop_probs(
+    category_ids: Sequence[int], class_annotation_counts: Dict[int, int], missing_rate: float
+) -> Dict[int, float]:
+    if not category_ids:
+        return {}
+    freq_values = [class_annotation_counts.get(cid, 0) for cid in category_ids]
+    max_freq = max(freq_values)
+    min_freq = min(freq_values)
+    drop_probs: Dict[int, float] = {}
+    for cid in category_ids:
+        freq = class_annotation_counts.get(cid, 0)
+        if max_freq == min_freq:
+            rarity = 0.0
+        else:
+            rarity = (max_freq - freq) / (max_freq - min_freq)
+        drop_prob = min(1.0, max(0.0, missing_rate * (0.5 + rarity)))
+        drop_probs[cid] = drop_prob
+    return drop_probs
+
+
+def _sample_observed_labelset_long_tail(
+    full_ids: List[int],
+    drop_probs: Dict[int, float],
+    min_labels_per_clip: int,
+    rng: random.Random,
+) -> List[int]:
+    if not full_ids:
+        return []
+    observed = [cid for cid in full_ids if rng.random() >= drop_probs.get(cid, 0.0)]
+    target_keep = min(len(full_ids), max(min_labels_per_clip, 0))
+    if len(observed) < target_keep:
+        observed_set = set(observed)
+        dropped = [cid for cid in full_ids if cid not in observed_set]
+        dropped.sort(key=lambda cid: (drop_probs.get(cid, 0.0), cid))
+        observed.extend(dropped[: target_keep - len(observed)])
+    return sorted(observed)
 
 
 def build_outputs(
@@ -122,15 +162,34 @@ def build_outputs(
 
     video_id_to_name = _extract_video_info(videos)
     category_id_to_name = _extract_categories(categories)
-    labels_by_video = _build_full_labelsets(
+    labels_by_video, class_annotation_counts = _build_full_labelsets(
         annotations, set(video_id_to_name.keys()), set(category_id_to_name.keys())
+    )
+    class_full_occurrence_counts = {cid: 0 for cid in category_id_to_name.keys()}
+    for label_set in labels_by_video.values():
+        for cid in label_set:
+            class_full_occurrence_counts[cid] = class_full_occurrence_counts.get(cid, 0) + 1
+    long_tail_drop_probs = _build_long_tail_drop_probs(
+        sorted(category_id_to_name.keys()), class_annotation_counts, missing_rate
     )
 
     rng = random.Random(seed)
     clips = []
+    class_observed_occurrence_counts = {cid: 0 for cid in category_id_to_name.keys()}
     for video_id in sorted(video_id_to_name.keys()):
         full_ids = sorted(labels_by_video.get(video_id, set()))
-        observed_ids = _sample_observed_labelset(full_ids, missing_rate, min_labels_per_clip, rng)
+        if protocol == "uniform":
+            observed_ids = _sample_observed_labelset(
+                full_ids, missing_rate, min_labels_per_clip, rng
+            )
+        else:
+            observed_ids = _sample_observed_labelset_long_tail(
+                full_ids, long_tail_drop_probs, min_labels_per_clip, rng
+            )
+        for cid in observed_ids:
+            class_observed_occurrence_counts[cid] = (
+                class_observed_occurrence_counts.get(cid, 0) + 1
+            )
         clip = {
             "video_id": video_id,
             "label_set_full_ids": full_ids,
@@ -152,6 +211,9 @@ def build_outputs(
         if denom_nonempty > 0
         else 0.0
     )
+    nonempty_missing_counts = [
+        (c["num_full"] - c["num_observed"]) for c in clips if c["num_full"] > 0
+    ]
 
     main_output = {
         "version": VERSION,
@@ -179,6 +241,59 @@ def build_outputs(
             "avg_num_full_labels_per_clip": (total_full / len(clips)) if clips else 0.0,
             "avg_num_observed_labels_per_clip": (total_observed / len(clips)) if clips else 0.0,
             "overall_missing_ratio_empirical": empirical_missing,
+        },
+        "protocol_metadata": {
+            "protocol_name": protocol,
+            "drop_rule": (
+                "uniform_fixed_k_keep"
+                if protocol == "uniform"
+                else "rarity_weighted_linear_from_annotation_count"
+            ),
+            "frequency_count_basis": (
+                "annotation_count" if protocol == "long_tail" else "none"
+            ),
+            "long_tail_params": (
+                {
+                    "drop_prob_formula": "min(1.0, missing_rate * (0.5 + rarity))",
+                    "rarity_formula": "(max_freq - class_freq) / (max_freq - min_freq)",
+                }
+                if protocol == "long_tail"
+                else {}
+            ),
+        },
+        "class_stats": {
+            str(cid): {
+                "annotation_count": class_annotation_counts.get(cid, 0),
+                "full_occurrence_count": class_full_occurrence_counts.get(cid, 0),
+                "observed_occurrence_count": class_observed_occurrence_counts.get(cid, 0),
+                "observed_rate": (
+                    (
+                        class_observed_occurrence_counts.get(cid, 0)
+                        / class_full_occurrence_counts.get(cid, 0)
+                    )
+                    if class_full_occurrence_counts.get(cid, 0) > 0
+                    else 0.0
+                ),
+                "drop_prob": (
+                    long_tail_drop_probs.get(cid, missing_rate)
+                    if protocol == "long_tail"
+                    else missing_rate
+                ),
+            }
+            for cid in sorted(category_id_to_name.keys())
+        },
+        "missing_count_stats": {
+            "min_missing_per_nonempty_clip": (
+                min(nonempty_missing_counts) if nonempty_missing_counts else 0
+            ),
+            "max_missing_per_nonempty_clip": (
+                max(nonempty_missing_counts) if nonempty_missing_counts else 0
+            ),
+            "mean_missing_per_nonempty_clip": (
+                (sum(nonempty_missing_counts) / len(nonempty_missing_counts))
+                if nonempty_missing_counts
+                else 0.0
+            ),
         },
         "integrity_checks": {
             "all_observed_subset_of_full": all(
