@@ -46,6 +46,10 @@ def _run_builder(
     )
 
 
+def _combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    return f"{result.stderr}\n{result.stdout}".lower()
+
+
 def test_deterministic_output_and_all_videos_included(tmp_path: Path):
     input_payload = {
         "videos": [
@@ -173,3 +177,108 @@ def test_fails_fast_on_unknown_video_or_category(tmp_path: Path):
     )
     assert result_cat.returncode != 0
     assert "unknown category_id" in result_cat.stderr or "unknown category_id" in result_cat.stdout
+
+
+def test_rejects_missing_rate_below_zero(tmp_path: Path):
+    input_payload = {"videos": [], "categories": [], "annotations": []}
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(input_payload), encoding="utf-8")
+
+    result = _run_builder(
+        input_json,
+        tmp_path / "out.json",
+        tmp_path / "manifest.json",
+        missing_rate=-0.1,
+        seed=0,
+    )
+    assert result.returncode != 0
+    assert "missing-rate" in _combined_output(result)
+
+
+def test_rejects_missing_rate_above_one(tmp_path: Path):
+    input_payload = {"videos": [], "categories": [], "annotations": []}
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(input_payload), encoding="utf-8")
+
+    result = _run_builder(
+        input_json,
+        tmp_path / "out.json",
+        tmp_path / "manifest.json",
+        missing_rate=1.2,
+        seed=0,
+    )
+    assert result.returncode != 0
+    assert "missing-rate" in _combined_output(result)
+
+
+def test_rejects_unsupported_protocol(tmp_path: Path):
+    input_payload = {"videos": [], "categories": [], "annotations": []}
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(input_payload), encoding="utf-8")
+
+    result = _run_builder(
+        input_json,
+        tmp_path / "out.json",
+        tmp_path / "manifest.json",
+        missing_rate=0.5,
+        seed=0,
+        protocol="foo",
+    )
+    assert result.returncode != 0
+    assert "unsupported protocol" in _combined_output(result)
+
+
+def test_rejects_missing_top_level_annotations(tmp_path: Path):
+    input_payload = {"videos": [], "categories": []}
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(input_payload), encoding="utf-8")
+
+    result = _run_builder(
+        input_json,
+        tmp_path / "out.json",
+        tmp_path / "manifest.json",
+        missing_rate=0.5,
+        seed=0,
+    )
+    assert result.returncode != 0
+    assert "annotations" in _combined_output(result)
+
+
+def test_rejects_annotation_missing_video_id(tmp_path: Path):
+    input_payload = {
+        "videos": [{"id": 1, "name": "v1"}],
+        "categories": [{"id": 10, "name": "a"}],
+        "annotations": [{"category_id": 10}],
+    }
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(input_payload), encoding="utf-8")
+
+    result = _run_builder(
+        input_json,
+        tmp_path / "out.json",
+        tmp_path / "manifest.json",
+        missing_rate=0.5,
+        seed=0,
+    )
+    assert result.returncode != 0
+    assert "video_id" in _combined_output(result)
+
+
+def test_rejects_annotation_missing_category_id(tmp_path: Path):
+    input_payload = {
+        "videos": [{"id": 1, "name": "v1"}],
+        "categories": [{"id": 10, "name": "a"}],
+        "annotations": [{"video_id": 1}],
+    }
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(input_payload), encoding="utf-8")
+
+    result = _run_builder(
+        input_json,
+        tmp_path / "out.json",
+        tmp_path / "manifest.json",
+        missing_rate=0.5,
+        seed=0,
+    )
+    assert result.returncode != 0
+    assert "category_id" in _combined_output(result)
