@@ -3,6 +3,9 @@ model/
 .git/
 *.zip
 build/
-CutLER/
-dinov2/
+third_party/CutLER/
+third_party/dinov2/
+weights/
+data/
+runs/
 codex/
