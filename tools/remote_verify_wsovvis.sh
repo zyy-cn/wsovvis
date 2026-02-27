@@ -111,16 +111,30 @@ echo "env-cmd    : $env_cmd"
 echo "cmd        : $verify_cmd"
 echo "============================"
 
+encode_b64() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+repo_dir_b64=$(encode_b64 "$repo_dir")
+branch_b64=$(encode_b64 "$branch")
+clone_url_b64=$(encode_b64 "$clone_url")
+env_cmd_b64=$(encode_b64 "$env_cmd")
+verify_cmd_b64=$(encode_b64 "$verify_cmd")
+
 set +e
-ssh "$remote" bash -s -- "$repo_dir" "$branch" "$clone_url" "$env_cmd" "$verify_cmd" "$keep_untracked" <<'REMOTE_BLOCK'
+ssh "$remote" bash -s -- "$repo_dir_b64" "$branch_b64" "$clone_url_b64" "$env_cmd_b64" "$verify_cmd_b64" "$keep_untracked" <<'REMOTE_BLOCK'
 set -euo pipefail
 
-repo_dir="$1"
-branch="$2"
-clone_url="$3"
-env_cmd="$4"
-verify_cmd="$5"
-keep_untracked="$6"
+decode_b64() {
+  printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -d
+}
+
+repo_dir="$(decode_b64 "$1")"
+branch="$(decode_b64 "$2")"
+clone_url="$(decode_b64 "$3")"
+env_cmd="$(decode_b64 "$4")"
+verify_cmd="$(decode_b64 "$5")"
+keep_untracked="${6-0}"
 
 if [[ -e "$repo_dir" && ! -d "$repo_dir" ]]; then
   echo "ERROR: repo-dir exists but is not a directory: $repo_dir" >&2
