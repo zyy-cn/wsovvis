@@ -6,6 +6,7 @@ This addendum resolves or explicitly scopes the field-source gaps identified fro
 Scope is limited to D1-D4 decisions for real run15-style inputs and alignment with:
 - `docs/contracts/stageb_track_feature_export_v1/bridge_from_stageb_outputs_v1.md`
 - `docs/contracts/stageb_track_feature_export_v1/bridge_from_stageb_outputs_v1_field_bindings_real_stageb_run15.md`
+- `docs/contracts/stageb_track_feature_export_v1/stageb_feature_export_enablement_contract_v1.md` (upstream artifact contract that resolves D3 blocker path)
 
 This addendum is doc-only and MUST NOT redefine frozen P3.1a/P3.1b bridge/export semantics.
 
