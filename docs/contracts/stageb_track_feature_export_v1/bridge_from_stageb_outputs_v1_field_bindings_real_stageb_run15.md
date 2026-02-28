@@ -11,6 +11,7 @@ It refines concrete source paths/keys against:
 - `docs/contracts/stageb_track_feature_export_v1/schema_track_feature_export_v1.md`
 
 It does **not** redefine frozen bridge semantics. This is inspection + mapping only.
+Gap-resolution decisions for D1-D4 are documented in `docs/contracts/stageb_track_feature_export_v1/bridge_gap_resolution_for_real_stageb_to_bridge_input_v1.md`.
 
 ## 2) Sample provenance context
 
