@@ -20,6 +20,7 @@ cloudpickle>=2.2
 omegaconf>=2.3
 fvcore>=0.1.5
 iopath>=0.1.9
+pytest
 
 # Geometry / masks
 shapely==1.8.5.post1

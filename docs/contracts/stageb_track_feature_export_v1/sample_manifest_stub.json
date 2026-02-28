@@ -1,0 +1,46 @@
+{
+  "schema_name": "stage_b_track_feature_export",
+  "schema_version": "1.0.0",
+  "split": "train",
+  "embedding_dim": 256,
+  "embedding_dtype": "float32",
+  "embedding_pooling": "track_pooled",
+  "embedding_normalization": "l2",
+  "producer": {
+    "stage_b_checkpoint_id": "<required>",
+    "stage_b_checkpoint_hash": "<required>",
+    "stage_b_config_ref": "<required>",
+    "stage_b_config_hash": "<required>",
+    "pseudo_tube_manifest_id": "<required>",
+    "pseudo_tube_manifest_hash": "<required>",
+    "split": "train",
+    "extraction_settings": {
+      "frame_sampling_rule": "<required>",
+      "pooling_rule": "<required>",
+      "min_track_length": 1
+    }
+  },
+  "videos": [
+    {
+      "video_id": "vid_000001",
+      "status": "processed_with_tracks",
+      "num_tracks": 3,
+      "track_metadata_path": "videos/vid_000001/track_metadata.v1.json",
+      "track_arrays_path": "videos/vid_000001/track_arrays.v1.npz"
+    },
+    {
+      "video_id": "vid_000002",
+      "status": "processed_zero_tracks",
+      "num_tracks": 0,
+      "track_metadata_path": "videos/vid_000002/track_metadata.v1.json",
+      "track_arrays_path": "videos/vid_000002/track_arrays.v1.npz"
+    },
+    {
+      "video_id": "vid_000003",
+      "status": "failed",
+      "num_tracks": 0,
+      "track_metadata_path": null,
+      "track_arrays_path": null
+    }
+  ]
+}
