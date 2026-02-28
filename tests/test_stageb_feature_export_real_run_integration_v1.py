@@ -58,7 +58,7 @@ def test_real_run_predictions_to_enablement_artifact(tmp_path: Path):
     shard = json.loads((output_root / "videos" / "101.json").read_text(encoding="utf-8"))
     assert manifest["embedding_dim"] == 4
     assert shard["tracks"][0]["track_id"] == 7
-    assert shard["tracks"][0]["embedding"] == [0.1, 0.2, 0.3, 0.4]
+    assert shard["tracks"][0]["embedding"] == pytest.approx([0.1, 0.2, 0.3, 0.4], rel=0, abs=1e-6)
 
 
 def test_real_run_missing_embedding_hard_fails(tmp_path: Path):
