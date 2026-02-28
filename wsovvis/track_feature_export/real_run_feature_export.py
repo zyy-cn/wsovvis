@@ -30,6 +30,43 @@ def _resolve_path(repo_root: Path, raw_path: str) -> Path:
     return repo_root / path
 
 
+def _extract_model_weights_from_d2_opts(d2_opts: Sequence[str]) -> str | None:
+    values = list(d2_opts)
+    for i in range(len(values) - 1):
+        if values[i] == "MODEL.WEIGHTS":
+            return str(values[i + 1])
+    return None
+
+
+def _resolve_checkpoint_ref_and_path(run_root: Path, repo_root: Path, d2_opts: Sequence[str]) -> tuple[str, Path]:
+    last_ckpt = run_root / "d2" / "last_checkpoint"
+    if last_ckpt.exists():
+        checkpoint_ref = last_ckpt.read_text(encoding="utf-8").strip()
+        if checkpoint_ref:
+            checkpoint_path = run_root / "d2" / checkpoint_ref
+            if checkpoint_path.exists():
+                return f"d2/{checkpoint_ref}", checkpoint_path
+            raise ExportContractError(
+                f"feature_export_input field 'stageb_checkpoint_ref': checkpoint not found at {checkpoint_path}"
+            )
+
+    opt_weight = _extract_model_weights_from_d2_opts(d2_opts)
+    if opt_weight:
+        checkpoint_path = _resolve_path(repo_root, opt_weight)
+        if checkpoint_path.exists():
+            return str(opt_weight), checkpoint_path
+
+    candidates = sorted((run_root / "d2").glob("model*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if candidates:
+        checkpoint_path = candidates[0]
+        return str(checkpoint_path.relative_to(run_root)), checkpoint_path
+
+    raise ExportContractError(
+        "feature_export_input field 'stageb_checkpoint_ref': unable to resolve checkpoint from "
+        "d2/last_checkpoint, d2_opts MODEL.WEIGHTS, or run-root model*.pth"
+    )
+
+
 def _as_list(value: Any) -> List[Any]:
     if isinstance(value, list):
         return value
@@ -120,12 +157,11 @@ def export_feature_enablement_from_real_run(
         embedding_normalization=embedding_normalization,
     )
 
-    checkpoint_ref = (run_root / "d2" / "last_checkpoint").read_text(encoding="utf-8").strip()
-    if not checkpoint_ref:
-        raise ExportContractError("feature_export_input field 'stageb_checkpoint_ref': empty last_checkpoint")
-    checkpoint_path = run_root / "d2" / checkpoint_ref
-    if not checkpoint_path.exists():
-        raise ExportContractError(f"feature_export_input field 'stageb_checkpoint_ref': checkpoint not found at {checkpoint_path}")
+    checkpoint_ref, checkpoint_path = _resolve_checkpoint_ref_and_path(
+        run_root=run_root,
+        repo_root=repo_root,
+        d2_opts=d2_opts,
+    )
 
     config_path = run_root / "config.json"
     pseudo_path = _resolve_path(repo_root, pseudo_tube_manifest_path)
@@ -140,7 +176,7 @@ def export_feature_enablement_from_real_run(
         "split": split,
         "embedding_dim": len(first_embedding),
         "embedding_normalization": embedding_normalization,
-        "stageb_checkpoint_ref": f"d2/{checkpoint_ref}",
+        "stageb_checkpoint_ref": checkpoint_ref,
         "stageb_checkpoint_hash": _sha256_file(checkpoint_path),
         "stageb_config_ref": "config.json",
         "stageb_config_hash": _sha256_file(config_path),
