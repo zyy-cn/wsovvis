@@ -14,6 +14,15 @@ This repo provides a reproducible minimal pipeline to:
 
 ---
 
+
+## Current project status
+
+- **Protocol tooling (P1 v2) completed:** `tools/build_wsovvis_labelset_protocol.py` now supports `--protocol long_tail` (in addition to `uniform`) with richer manifest statistics.
+- **Canonical validation:** `gpu4090d` remote runner passed `python -m pytest -q tests/test_build_wsovvis_labelset_protocol.py` (**13 passed**) after syncing the target commit.
+- Detailed progress log: [`docs/PROJECT_PROGRESS.md`](docs/PROJECT_PROGRESS.md)
+
+---
+
 ## 0) Repository + `third_party` status (important)
 
 This pipeline depends on third-party components under `third_party/`:
