@@ -141,14 +141,14 @@ Decision: pooling rule is `DEFAULT_FOR_V1` (`mean_over_active_frames`).
 - If mode is `l2`, apply after pooling and before final dtype cast writeout.
 - Zero vector under `l2`: keep zero vector unchanged (do not divide by zero).
 
-Decision: normalization mode selection is `OPEN`; handling rule is `FROZEN`.
+Decision (`DEFAULT_FOR_V1`): if upstream does not declare normalization, adapter default is `none`; handling rule is `FROZEN`.
 
 ### 6.4 dtype / NaN / Inf handling
 - Final exported per-track embedding must be finite `float32`.
 - Cast sequence: source numeric -> intermediate float -> normalization (if any) -> `float32`.
 - NaN/Inf handling default: reject affected track as invalid; do not silently clip/replace.
 
-Decision: reject-on-nonfinite is `DEFAULT_FOR_V1` (alternative repair policy is `OPEN`).
+Decision (`DEFAULT_FOR_V1`): reject-only on non-finite embeddings (no repair/clip/replace).
 
 ## 7) Deterministic Video Status Classification
 Classification precedence is deterministic and must be applied in order:
@@ -184,7 +184,7 @@ Decision: `DEFAULT_FOR_V1`.
 
 ### 8.4 Duplicate handling
 - Duplicate video IDs in split domain source: hard-fail.
-- Duplicate Stage B result records for same video: hard-fail unless one is explicitly marked superseded by upstream provenance (currently `OPEN`; v1 default hard-fail).
+- Duplicate Stage B result records for same video: hard-fail by default in v1 (no implicit supersession selection).
 - Duplicate track IDs within a video after mapping: hard-fail.
 
 ### 8.5 Ordering prior to producer handoff
@@ -336,9 +336,6 @@ Resulting status outcomes:
 
 ## 13) Explicit Unresolved Decisions
 - `OPEN`: exact concrete Stage B key paths/artifact filenames for each abstract placeholder.
-- `OPEN`: final default for `embedding_normalization` (`none` vs `l2`) when not explicitly provided by Stage B runtime config.
-- `OPEN`: whether non-finite embedding repair (clip/replace) is allowed instead of reject-on-nonfinite.
-- `OPEN`: policy for duplicate Stage B results when one appears retry/supersession-related.
 - `OPEN`: whether future bridge version may coerce mixed-type track IDs to a canonical type.
 
 ## 14) Implementation Readiness Notes for Future Tier 2 Adapter
@@ -346,9 +343,9 @@ This bridge spec is intended to be sufficient for adapter implementation without
 - producer-input required field coverage
 - status classification precedence
 - split reconciliation and provenance fail-fast behavior
-- track feature pooling/casting baseline defaults and explicit `OPEN` items
+- track feature pooling/casting baseline defaults
 
-Pre-P3.1b freeze advisory (`DEFAULT_FOR_V1`):
-- Freeze default `embedding_normalization` when absent upstream (`none` vs `l2`).
-- Freeze duplicate Stage B result supersession policy (default hard-fail vs explicit supersession metadata allowance).
-- Freeze non-finite embedding policy (reject-only vs any repair mode).
+P3.1b frozen defaults now in force (`DEFAULT_FOR_V1`):
+- Upstream-unspecified normalization defaults to `none`.
+- Duplicate Stage B results hard-fail (no implicit supersession).
+- Non-finite embedding policy is reject-only (no repair).
