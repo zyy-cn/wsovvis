@@ -21,6 +21,7 @@ import os
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from sacred import Experiment
@@ -88,6 +89,13 @@ def _default_cfg():
     seed = 42
     resume = False
     eval_only = False
+    feature_export = {
+        "enabled": False,
+        "split": "val",
+        "embedding_normalization": "none",
+        "emit_video_index": True,
+        "overwrite": False,
+    }
 
     # distributed
     num_gpus = 1
@@ -301,6 +309,24 @@ def _main_worker(*args):
         )
 
         res = Trainer.test(d2_cfg, model)
+        feature_export_cfg = cfg_dict.get("feature_export", {}) or {}
+        if feature_export_cfg.get("enabled", False):
+            from wsovvis.track_feature_export import export_feature_enablement_from_real_run
+
+            repo_root = Path(__file__).resolve().parent
+            run_root = Path(cfg_dict["output_dir"]).resolve().parent
+            output_path = export_feature_enablement_from_real_run(
+                run_root=run_root,
+                repo_root=repo_root,
+                split=str(feature_export_cfg.get("split", "val")),
+                pseudo_tube_manifest_path=str(cfg_dict["data"]["train_json"]),
+                d2_cfg_ref=str(cfg_dict["d2_cfg_path"]),
+                d2_opts=cfg_dict.get("d2_opts", []),
+                embedding_normalization=str(feature_export_cfg.get("embedding_normalization", "none")),
+                overwrite=bool(feature_export_cfg.get("overwrite", False)),
+                emit_video_index=bool(feature_export_cfg.get("emit_video_index", True)),
+            )
+            print(f"[feature_export_v1] emitted: {output_path}")
         return res
 
     trainer = Trainer(d2_cfg)
@@ -317,6 +343,7 @@ def run(
     seed,
     resume,
     eval_only,
+    feature_export,
     num_gpus,
     num_machines,
     machine_rank,
@@ -338,6 +365,7 @@ def run(
         "seed": seed,
         "resume": resume,
         "eval_only": eval_only,
+        "feature_export": feature_export,
     }
 
     # Write cfg_dict to disk and expose via env var so worker processes can load it

@@ -223,6 +223,14 @@ def instances_to_coco_json_video(inputs, outputs):
     scores = outputs["pred_scores"]
     labels = outputs["pred_labels"]
     masks = outputs["pred_masks"]
+    track_ids = outputs.get("pred_track_ids")
+    embeddings = outputs.get("pred_embeddings")
+    embedding_normalization = outputs.get("pred_embedding_normalization")
+
+    if track_ids is not None and len(track_ids) != len(scores):
+        raise ValueError("pred_track_ids length must match pred_scores length")
+    if embeddings is not None and len(embeddings) != len(scores):
+        raise ValueError("pred_embeddings length must match pred_scores length")
 
     ytvis_results = []
     for instance_id, (s, l, m) in enumerate(zip(scores, labels, masks)):
@@ -239,6 +247,20 @@ def instances_to_coco_json_video(inputs, outputs):
             "category_id": l,
             "segmentations": segms,
         }
+        if track_ids is not None:
+            res["track_id"] = int(track_ids[instance_id])
+        if embeddings is not None:
+            res["embedding"] = embeddings[instance_id]
+            res["embedding_normalization"] = embedding_normalization or "none"
+
+        # Derive light temporal support metadata from predicted masks.
+        frame_activity = np.array([np.asarray(frame_mask).any() for frame_mask in m], dtype=np.bool_)
+        active_indices = np.where(frame_activity)[0]
+        if active_indices.size > 0:
+            res["start_frame_idx"] = int(active_indices.min())
+            res["end_frame_idx"] = int(active_indices.max())
+            res["num_active_frames"] = int(active_indices.size)
+
         ytvis_results.append(res)
 
     return ytvis_results

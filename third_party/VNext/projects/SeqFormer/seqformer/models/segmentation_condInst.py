@@ -347,6 +347,8 @@ class CondInst_segm(nn.Module):
         outputs['pred_logits'] = outputs_class[-1]
         outputs['pred_boxes'] = outputs_coord[-1]
         outputs['pred_masks'] = outputs_mask[-1][0]
+        # Expose final decoder query embeddings for deterministic track-feature export binding.
+        outputs['pred_query_embeddings'] = hs[-1].detach()
 
         return outputs
 
@@ -738,4 +740,3 @@ class MLP(nn.Module):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
-

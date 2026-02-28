@@ -385,6 +385,9 @@ class SeqFormer(nn.Module):
         # results = []
 
         logits = outputs['pred_logits'][0]
+        query_embeddings = outputs.get("pred_query_embeddings")
+        if query_embeddings is not None:
+            query_embeddings = query_embeddings[0]
         output_mask = outputs['pred_masks'][0]
         output_boxes = outputs['pred_boxes'][0]
         output_h, output_w = output_mask.shape[-2:]
@@ -400,8 +403,18 @@ class SeqFormer(nn.Module):
                 scores = valid_logits[is_above_thres]
                 labels = is_above_thres[1]
                 pred_masks = pred_masks[is_above_thres[0]]
+                selected_ids = [indices10[int(i)] for i in is_above_thres[0].tolist()]
+                if query_embeddings is not None:
+                    selected_embeddings = query_embeddings[selected_ids]
+                else:
+                    selected_embeddings = None
             else:
                 scores, labels = valid_logits.max(-1)
+                selected_ids = indices10
+                if query_embeddings is not None:
+                    selected_embeddings = query_embeddings[selected_ids]
+                else:
+                    selected_embeddings = None
 
             pred_masks = pred_masks[:,:,:image_sizes[0],:image_sizes[1]] 
             pred_masks = F.interpolate(pred_masks, size=(ori_size[0], ori_size[1]), mode='nearest')
@@ -411,15 +424,22 @@ class SeqFormer(nn.Module):
             out_scores = scores.tolist()
             out_labels = labels.tolist()
             out_masks = [m for m in masks.cpu()]
+            out_track_ids = list(selected_ids)
+            out_embeddings = selected_embeddings.detach().cpu().tolist() if selected_embeddings is not None else None
         else:
             out_scores = []
             out_labels = []
             out_masks = []
+            out_track_ids = []
+            out_embeddings = []
         video_output = {
             "image_size": ori_size,
             "pred_scores": out_scores,
             "pred_labels": out_labels,
             "pred_masks": out_masks,
+            "pred_track_ids": out_track_ids,
+            "pred_embeddings": out_embeddings,
+            "pred_embedding_normalization": "none",
         }
 
         return video_output
@@ -442,5 +462,4 @@ class SeqFormer(nn.Module):
                     images.append(self.normalizer(video["image"][idx].to(self.device)))
             images = ImageList.from_tensors(images)
         return images
-
 
