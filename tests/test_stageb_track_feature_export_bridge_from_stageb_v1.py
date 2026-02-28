@@ -140,6 +140,13 @@ def test_default_normalization_missing_upstream_is_none(tmp_path: Path):
     assert np.array_equal(embeddings, expected)
 
 
+def test_invalid_embedding_normalization_hard_fails():
+    payload = _base_bridge_payload()
+    payload["embedding_normalization"] = "unit"
+    with pytest.raises(ExportContractError, match="embedding_normalization"):
+        convert_stageb_bridge_input_to_task_input_v1(payload)
+
+
 def test_explicit_l2_normalization_path(tmp_path: Path):
     payload = _base_bridge_payload()
     payload["embedding_normalization"] = "l2"
