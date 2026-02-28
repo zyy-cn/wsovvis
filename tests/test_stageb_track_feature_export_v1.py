@@ -142,7 +142,11 @@ def test_validator_catches_row_alignment_and_count_mismatch(tmp_path: Path):
     build_track_feature_export_v1(_base_input(), out_root)
 
     npz_path = out_root / "videos" / "vid_b" / "track_arrays.v1.npz"
-    np.savez(npz_path, embeddings=np.ones((1, 4), dtype=np.float32), track_row_index=np.array([0], dtype=np.int64))
+    np.savez(
+        npz_path,
+        embeddings=np.ones((1, 4), dtype=np.float32),
+        track_row_index=np.array([0, 1], dtype=np.int64),
+    )
 
     with pytest.raises(ExportContractError, match="embeddings.shape\\[0\\].*num_tracks"):
         validate_track_feature_export_v1(split_root=out_root)
@@ -283,6 +287,8 @@ def test_validator_fails_on_noncanonical_track_order(tmp_path: Path):
     meta_path = out_root / "videos" / "vid_b" / "track_metadata.v1.json"
     meta = _read_json(meta_path)
     meta["tracks"] = list(reversed(meta["tracks"]))
+    for idx, track in enumerate(meta["tracks"]):
+        track["row_index"] = idx
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
     with pytest.raises(ExportContractError, match="must be sorted"):
