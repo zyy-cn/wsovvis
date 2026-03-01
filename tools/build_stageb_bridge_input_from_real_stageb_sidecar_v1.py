@@ -52,8 +52,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--join-summary-json",
         type=Path,
+        dest="summary_json",
         required=False,
-        help="Optional output path for join/mismatch summary counters JSON",
+        help="Optional output path for QA/join summary counters JSON",
+    )
+    parser.add_argument(
+        "--qa-summary-json",
+        type=Path,
+        dest="summary_json",
+        required=False,
+        help="Alias of --join-summary-json. Optional output path for QA summary JSON",
     )
     return parser.parse_args()
 
@@ -68,13 +76,15 @@ def main() -> int:
             inference_root=args.inference_root,
             config_json_path=args.config_json,
             sample_video_limit=args.sample_video_limit,
-            summary_json_path=args.join_summary_json,
+            summary_json_path=args.summary_json,
         )
     except ExportContractError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
     print(f"Wrote normalized bridge-input JSON: {args.output_json}")
+    if args.summary_json is not None:
+        print(f"Wrote QA summary JSON: {args.summary_json}")
     print(json.dumps(summary, sort_keys=True))
     return 0
 

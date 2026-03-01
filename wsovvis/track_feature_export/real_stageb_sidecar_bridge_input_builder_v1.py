@@ -8,11 +8,21 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .v1_core import ExportContractError
 
 _ALLOWED_RUNTIME = {"success", "failed"}
+_QA_SUMMARY_SCHEMA_VERSION = "p3_1c2_real_stageb_bridge_qa_v1"
 _MARKER_TO_RUNTIME = {
     "completed": "success",
     "failed": "failed",
     "unknown": "failed",
 }
+_DROP_REASONS = (
+    "non_finite_embedding",
+    "missing_required_field",
+    "invalid_track_id",
+    "invalid_temporal_range",
+    "invalid_objectness",
+    "embedding_dim_mismatch",
+    "other",
+)
 
 
 def _err(field_path: str, rule_summary: str) -> ExportContractError:
@@ -235,8 +245,10 @@ def _merge_track(
     sidecar_track: Dict[str, Any],
     prediction_track: Dict[str, Any],
     embedding_dim: int,
-) -> Tuple[Optional[Dict[str, Any]], bool]:
+) -> Tuple[Optional[Dict[str, Any]], str]:
     track_id = sidecar_track.get("track_id")
+    if not (_is_int(track_id) or (isinstance(track_id, str) and track_id)):
+        return None, "invalid_track_id"
 
     start_frame_idx = sidecar_track.get("start_frame_idx", prediction_track.get("start_frame_idx"))
     end_frame_idx = sidecar_track.get("end_frame_idx", prediction_track.get("end_frame_idx"))
@@ -244,21 +256,25 @@ def _merge_track(
     objectness_score = sidecar_track.get("objectness_score", prediction_track.get("score"))
     embedding = sidecar_track.get("embedding")
 
+    if start_frame_idx is None or end_frame_idx is None or num_active_frames is None or objectness_score is None or embedding is None:
+        return None, "missing_required_field"
     if not (_is_int(start_frame_idx) and start_frame_idx >= 0):
-        return None, False
+        return None, "invalid_temporal_range"
     if not (_is_int(end_frame_idx) and end_frame_idx >= start_frame_idx):
-        return None, False
+        return None, "invalid_temporal_range"
     if not (_is_int(num_active_frames) and num_active_frames > 0):
-        return None, False
+        return None, "invalid_temporal_range"
     if not _is_finite_number(objectness_score):
-        return None, False
+        return None, "invalid_objectness"
     if not (isinstance(embedding, list) and len(embedding) == embedding_dim):
-        return None, False
+        if isinstance(embedding, list):
+            return None, "embedding_dim_mismatch"
+        return None, "missing_required_field"
 
     cast_embedding: List[float] = []
-    for e_idx, value in enumerate(embedding):
+    for value in embedding:
         if not _is_finite_number(value):
-            return None, True
+            return None, "non_finite_embedding"
         cast_embedding.append(float(value))
 
     return {
@@ -268,7 +284,7 @@ def _merge_track(
         "num_active_frames": int(num_active_frames),
         "objectness_score": float(objectness_score),
         "embedding": cast_embedding,
-    }, False
+    }, ""
 
 
 def _sort_track_key(track: Dict[str, Any]) -> Tuple[int, int, int, str]:
@@ -364,20 +380,40 @@ def build_normalized_bridge_input_from_real_stageb_sidecar(
 
     dropped_tracks = 0
     non_finite_rejects = 0
-    total_join_pairs = len(sidecar_keys)
+    drop_reason_counts: Dict[str, int] = {reason: 0 for reason in _DROP_REASONS}
+    dropped_by_video: Dict[str, int] = {video_id: 0 for video_id in split_domain_ids}
+    drop_reason_counts_by_video: Dict[str, Dict[str, int]] = {
+        video_id: {reason: 0 for reason in _DROP_REASONS} for video_id in split_domain_ids
+    }
+
+    prediction_track_count_by_video: Dict[str, int] = {video_id: 0 for video_id in split_domain_ids}
+    sidecar_track_count_by_video: Dict[str, int] = {video_id: 0 for video_id in split_domain_ids}
+    matched_track_count_by_video: Dict[str, int] = {video_id: 0 for video_id in split_domain_ids}
+    for video_id, _ in prediction_keys:
+        prediction_track_count_by_video[video_id] += 1
+    for video_id, _ in sidecar_keys:
+        sidecar_track_count_by_video[video_id] += 1
+    matched_keys = sidecar_keys & prediction_keys
+    for video_id, _ in matched_keys:
+        matched_track_count_by_video[video_id] += 1
+    total_join_pairs = len(matched_keys)
 
     by_video_tracks: Dict[str, List[Dict[str, Any]]] = {video_id: [] for video_id in split_domain_ids}
     for video_id, track_id in sorted(sidecar_keys, key=lambda k: (k[0], str(k[1]))):
         sidecar_track = sidecar_tracks_by_key[(video_id, track_id)]
         prediction_track = prediction_tracks_by_key[(video_id, track_id)]
-        merged, non_finite = _merge_track(
+        merged, drop_reason = _merge_track(
             sidecar_track=sidecar_track,
             prediction_track=prediction_track,
             embedding_dim=int(embedding_dim),
         )
         if merged is None:
             dropped_tracks += 1
-            if non_finite:
+            reason_key = drop_reason if drop_reason in drop_reason_counts else "other"
+            drop_reason_counts[reason_key] += 1
+            drop_reason_counts_by_video[video_id][reason_key] += 1
+            dropped_by_video[video_id] += 1
+            if reason_key == "non_finite_embedding":
                 non_finite_rejects += 1
             continue
 
@@ -409,6 +445,14 @@ def build_normalized_bridge_input_from_real_stageb_sidecar(
             }
         )
 
+    runtime_success_count = sum(1 for r in stageb_video_results if r["runtime_status"] == "success")
+    runtime_failed_count = sum(1 for r in stageb_video_results if r["runtime_status"] == "failed")
+    processed_zero_tracks_count = sum(
+        1 for r in stageb_video_results if r["runtime_status"] == "success" and len(r["tracks"]) == 0
+    )
+    stageb_video_results_emitted = len(sidecar_runtime_status)
+    unprocessed_estimate_count = len(split_domain_ids) - stageb_video_results_emitted
+
     producer = {
         "stage_b_checkpoint_id": manifest.get("stageb_checkpoint_ref"),
         "stage_b_checkpoint_hash": manifest.get("stageb_checkpoint_hash"),
@@ -435,8 +479,33 @@ def build_normalized_bridge_input_from_real_stageb_sidecar(
         "stageb_video_results": stageb_video_results,
     }
 
+    per_video_rows: List[Dict[str, Any]] = []
+    for result in stageb_video_results:
+        video_id = result["video_id"]
+        row = {
+            "video_id": video_id,
+            "runtime_status": result["runtime_status"],
+            "input_track_count_prediction": prediction_track_count_by_video[video_id],
+            "input_track_count_sidecar": sidecar_track_count_by_video[video_id],
+            "matched_track_count": matched_track_count_by_video[video_id],
+            "dropped_track_count": dropped_by_video[video_id],
+            "drop_reason_counts": drop_reason_counts_by_video[video_id],
+            "final_track_count": len(result["tracks"]),
+            "is_zero_tracks": bool(result["runtime_status"] == "success" and len(result["tracks"]) == 0),
+        }
+        per_video_rows.append(row)
+
+    run_root_str = str(run_root) if run_root is not None else None
     summary: Dict[str, Any] = {
+        "qa_summary_schema_version": _QA_SUMMARY_SCHEMA_VERSION,
         "split": split,
+        "run_identity": {
+            "run_root": run_root_str,
+            "inference_root": str(inference_root),
+            "sidecar_root": str(sidecar_root),
+            "config_json_path": str(config_json_path),
+            "sample_video_limit": sample_video_limit,
+        },
         "prediction_source_path": prediction_source_path,
         "sidecar_root": str(sidecar_root),
         "sample_video_limit": sample_video_limit,
@@ -450,12 +519,39 @@ def build_normalized_bridge_input_from_real_stageb_sidecar(
             "prediction_missing_sidecar": len(missing_sidecar),
             "sidecar_missing_prediction": len(missing_prediction),
         },
+        "join": {
+            "prediction_tracks_total": len(prediction_keys),
+            "sidecar_tracks_total": len(sidecar_keys),
+            "matched_tracks_total": total_join_pairs,
+            "missing_sidecar_counterparts": len(missing_sidecar),
+            "missing_prediction_counterparts": len(missing_prediction),
+            "extra_prediction_tracks": len(missing_sidecar),
+            "extra_sidecar_tracks": len(missing_prediction),
+            "duplicate_prediction_keys": prediction_duplicates,
+            "duplicate_sidecar_keys": sidecar_duplicates,
+        },
         "dropped_tracks": dropped_tracks,
         "non_finite_rejects": non_finite_rejects,
-        "runtime_status_counts": {
-            "success": sum(1 for r in stageb_video_results if r["runtime_status"] == "success"),
-            "failed": sum(1 for r in stageb_video_results if r["runtime_status"] == "failed"),
+        "drop": {
+            "total": dropped_tracks,
+            "by_reason": drop_reason_counts,
         },
+        "runtime_status_counts": {
+            "success": runtime_success_count,
+            "failed": runtime_failed_count,
+        },
+        "runtime_status": {
+            "success_videos": runtime_success_count,
+            "failed_videos": runtime_failed_count,
+        },
+        "video_results": {
+            "total_split_domain_videos": len(split_domain_ids),
+            "with_stageb_result": stageb_video_results_emitted,
+            "without_stageb_result": unprocessed_estimate_count,
+            "processed_zero_tracks_count": processed_zero_tracks_count,
+            "unprocessed_estimate_count": unprocessed_estimate_count,
+        },
+        "per_video_rows": per_video_rows,
     }
 
     return payload, summary

@@ -155,6 +155,21 @@ def test_builder_happy_path_and_runtime_domain(tmp_path: Path):
     assert summary["total_join_pairs"] == 2
     assert summary["missing_counterparts"]["prediction_missing_sidecar"] == 0
     assert summary["missing_counterparts"]["sidecar_missing_prediction"] == 0
+    assert summary["qa_summary_schema_version"] == "p3_1c2_real_stageb_bridge_qa_v1"
+    assert summary["join"]["matched_tracks_total"] == 2
+    assert summary["join"]["prediction_tracks_total"] == 2
+    assert summary["join"]["sidecar_tracks_total"] == 2
+    assert summary["runtime_status"]["success_videos"] == 1
+    assert summary["runtime_status"]["failed_videos"] == 2
+    assert summary["video_results"]["total_split_domain_videos"] == 3
+    assert summary["video_results"]["with_stageb_result"] == 2
+    assert summary["video_results"]["without_stageb_result"] == 1
+    assert summary["video_results"]["processed_zero_tracks_count"] == 0
+    assert summary["video_results"]["unprocessed_estimate_count"] == 1
+    assert [row["video_id"] for row in summary["per_video_rows"]] == ["0", "1", "2"]
+    assert summary["per_video_rows"][0]["input_track_count_sidecar"] == 1
+    assert summary["per_video_rows"][0]["input_track_count_prediction"] == 1
+    assert summary["per_video_rows"][2]["input_track_count_sidecar"] == 0
 
 
 def test_duplicate_join_key_hard_fails(tmp_path: Path):
@@ -228,6 +243,13 @@ def test_non_finite_embedding_rejected_and_dropped(tmp_path: Path):
     assert result0["tracks"] == []
     assert summary["dropped_tracks"] == 1
     assert summary["non_finite_rejects"] == 1
+    assert summary["drop"]["total"] == 1
+    assert summary["drop"]["by_reason"]["non_finite_embedding"] == 1
+    assert summary["drop"]["by_reason"]["missing_required_field"] == 0
+    row0 = [row for row in summary["per_video_rows"] if row["video_id"] == "0"][0]
+    assert row0["dropped_track_count"] == 1
+    assert row0["drop_reason_counts"]["non_finite_embedding"] == 1
+    assert row0["is_zero_tracks"] is True
 
 
 def test_sample_video_limit_is_deterministic(tmp_path: Path):
@@ -237,3 +259,43 @@ def test_sample_video_limit_is_deterministic(tmp_path: Path):
     assert payload["split_domain_video_ids"] == ["0", "1"]
     assert [r["video_id"] for r in payload["stageb_video_results"]] == ["0", "1"]
     assert summary["total_split_domain_videos"] == 2
+    assert summary["video_results"]["without_stageb_result"] == 0
+
+
+def test_summary_is_deterministic_for_same_inputs(tmp_path: Path):
+    run_root = _base_layout(tmp_path)
+    payload_a, summary_a = build_normalized_bridge_input_from_real_stageb_sidecar(run_root=run_root)
+    payload_b, summary_b = build_normalized_bridge_input_from_real_stageb_sidecar(run_root=run_root)
+    assert payload_a == payload_b
+    assert summary_a == summary_b
+
+
+def test_missing_required_field_is_reason_classified(tmp_path: Path):
+    run_root = _base_layout(tmp_path)
+    _write_json(
+        run_root / "d2" / "inference" / "feature_export_v1" / "videos" / "0.json",
+        {
+            "video_id": 0,
+            "runtime_evidence": {
+                "stageb_completion_marker": "completed",
+                "evidence_source": "instances_predictions.pth",
+            },
+            "tracks": [
+                {
+                    "track_id": 10,
+                    "embedding_normalization": "none",
+                    "start_frame_idx": 2,
+                    "end_frame_idx": 6,
+                    "num_active_frames": 5,
+                    "objectness_score": 0.9,
+                }
+            ],
+        },
+    )
+
+    payload, summary = build_normalized_bridge_input_from_real_stageb_sidecar(run_root=run_root)
+    result0 = [r for r in payload["stageb_video_results"] if r["video_id"] == "0"][0]
+    assert result0["runtime_status"] == "success"
+    assert result0["tracks"] == []
+    assert summary["drop"]["by_reason"]["missing_required_field"] == 1
+    assert summary["drop"]["by_reason"]["non_finite_embedding"] == 0
