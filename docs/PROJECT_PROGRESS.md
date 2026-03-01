@@ -369,6 +369,74 @@ Implement and validate the Stage C0 offline consumer/loader over Stage B export 
 
 ---
 
+## 2026-03-01 — Stage C1 completed (MIL-first offline baseline attribution)
+
+### Scope
+Implement and validate the first Stage C offline attribution baseline (MIL-first only) on top of Stage C0 loader APIs, including deterministic score output artifacts and baseline diagnostics.
+
+### Completed
+- Implemented Stage C1 offline MIL-first scoring path over Stage C0 split/track traversal.
+- Added Stage C1 CLI/pipeline entrypoint for deterministic offline scoring runs.
+- Added focused Stage C1 tests for nominal path, determinism, ordering/identity guarantees, and C1-boundary failure cases.
+- Produced and validated Stage C1 baseline artifact set:
+  - `track_scores.jsonl`
+  - `per_video_summary.json`
+  - `run_summary.json`
+- Preserved strict non-goals for this stage:
+  - no EM/OT/Sinkhorn
+  - no training/loss integration
+  - no Stage D loop/orchestration logic
+
+### Validation
+- Canonical remote validation passed on `gpu4090d` for Stage C1 targeted tests.
+- Branch used: `codex/stagec1-milfirst-offline-baseline-v1`
+- Canonical result: `6 passed`
+- Intended commit and remote verified HEAD matched:
+  - `6644e91eeb354aba640c6bb8108ba926f20d849a`
+
+### Key references
+- Stage C1 PASS output:
+  - `codex/2026030105_progress_sync_and_stagec0_consumer_loader_taskpack_meta_tier1_2/16_output.txt`
+- Stage C1 planning/task-pack continuity:
+  - `codex/2026030105_progress_sync_and_stagec0_consumer_loader_taskpack_meta_tier1_2/14_output.txt`
+  - `codex/2026030107_stagec1_attribution_baseline_offline_milfirst_tier2/`
+
+### Notes
+- Stage C1 baseline is complete as the first offline attribution milestone.
+- Recommended next step is Stage C1.r1: real-artifact smoke and baseline diagnostics hardening before Stage C2 EM baseline work.
+
+---
+
+## Validation evidence highlights (through Stage C1 PASS)
+
+### Canonical remote validation discipline (preserved)
+- Canonical remote host/path usage remained consistent in PASS evidence:
+  - host alias: `gpu4090d`
+  - repo dir: `/home/zyy/code/wsovvis_runner`
+- Branch/commit match discipline was explicitly enforced in Stage C0 and Stage C1 PASS logs.
+- Stage C0 failure context captured the known pitfall:
+  - remote verify can pass/fail on a branch/HEAD that does not include local unpushed edits (`08_output.txt` context), requiring commit+push+remote-HEAD equality checks before claiming PASS.
+
+### Stage C0 and Stage C1 canonical test outcomes
+- Stage C0 canonical remote PASS:
+  - `10 passed` (`tests/test_stagec_loader_v1.py`)
+  - evidence: `.../10_output.txt`
+- Stage C1 canonical remote PASS:
+  - `6 passed` (`tests/test_stagec1_attribution_mil_v1.py`)
+  - evidence: `.../16_output.txt`
+
+### P3.1c.1 and P3.1c.2 real-run handoff evidence (bridge -> export -> validator)
+- P3.1c.1 real run18 sample handoff chain passed:
+  - builder -> adapter/export -> validator
+  - validator reported `Validation OK`
+  - targeted tests passed remotely: `16 passed`
+- P3.1c.2 hardening QA passed for run18 sample and larger subsets:
+  - sample (`--sample-video-limit 10`) and larger (`--sample-video-limit 200`) both reached validator `Validation OK`
+  - QA summary counters were hardened with deterministic join/drop/runtime/video diagnostics
+  - representative evidence: sample matched tracks `100` with dropped `4`; larger matched tracks `2000` with dropped `72` (reason-coded in QA summary)
+
+---
+
 ## Current Stage
 
 ### Current project status
@@ -385,10 +453,13 @@ Implement and validate the Stage C0 offline consumer/loader over Stage B export 
 - ✅ P3.1c.1 completed (real Stage B + sidecar -> normalized bridge-input builder + end-to-end handoff validation)
 - ✅ P3.1c.2 completed (bridge full-split hardening + QA)
 - ✅ Stage C0 completed (consumer/loader offline data-plane; canonical remote PASS `10/10`)
-- ▶️ Next recommended step: **Stage C1 attribution baseline (offline, MIL-first; no training-loop integration yet)**
+- ✅ Stage C1 completed (offline MIL-first attribution baseline; canonical remote PASS `6 passed`)
+- ▶️ Current state: **Stage C1 baseline completed**
+- ▶️ Next recommended step: **Stage C1.r1 (real-artifact smoke + baseline diagnostics hardening)** before Stage C2 EM baseline
 
-### Why Stage C1 attribution baseline next
-With Stage C0 loader/consumer now validated, the highest-leverage next step is to establish an offline attribution baseline pipeline that consumes Stage C0 outputs and produces deterministic baseline scoring/evaluation artifacts before any training-loop integration.
+### Why Stage C1.r1 next
+With the Stage C1 MIL-first baseline implemented and remotely validated, the highest-leverage next step is a real-artifact smoke and diagnostics-hardening pass to confirm robust behavior on real export artifacts and strengthen baseline sanity reporting before expanding methods.
 
-### Follow-on after Stage C1 baseline
-- Stage C attribution expansion (recommended later order: EM baseline -> OT/Sinkhorn mainline), still staged independently from Stage D loop integration.
+### Follow-on after Stage C1.r1
+- Stage C attribution expansion remains future work (recommended order: Stage C2 EM baseline, then OT/Sinkhorn line).
+- Training-loop and Stage D integration remain explicitly out of scope until later staged tasks.
