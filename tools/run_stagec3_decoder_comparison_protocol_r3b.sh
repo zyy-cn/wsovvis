@@ -173,14 +173,23 @@ src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 n = int(sys.argv[3])
 obj = json.loads(src.read_text(encoding="utf-8"))
-videos = obj.get("videos")
-if not isinstance(videos, list):
-    raise SystemExit("bridge payload missing 'videos' list")
-if len(videos) < n:
-    raise SystemExit(f"requested tail size {n} exceeds available videos {len(videos)}")
-obj["videos"] = videos[-n:]
+video_ids = obj.get("split_domain_video_ids")
+results = obj.get("stageb_video_results")
+if not isinstance(video_ids, list):
+    raise SystemExit("bridge payload missing 'split_domain_video_ids' list")
+if not isinstance(results, list):
+    raise SystemExit("bridge payload missing 'stageb_video_results' list")
+if len(video_ids) < n:
+    raise SystemExit(f"requested tail size {n} exceeds available videos {len(video_ids)}")
+selected_ids = video_ids[-n:]
+result_by_id = {str(row.get("video_id")): row for row in results}
+filtered_results = [result_by_id[str(vid)] for vid in selected_ids if str(vid) in result_by_id]
+if len(filtered_results) != len(selected_ids):
+    raise SystemExit("unable to map all selected video ids to stageb_video_results")
+obj["split_domain_video_ids"] = selected_ids
+obj["stageb_video_results"] = filtered_results
 dst.write_text(json.dumps(obj, indent=2), encoding="utf-8")
-print(json.dumps({"available_videos": len(videos), "selected_tail_videos": n}))
+print(json.dumps({"available_videos": len(video_ids), "selected_tail_videos": n}))
 PY
 
   python tools/build_stageb_track_feature_export_from_stageb_bridge_v1.py \
