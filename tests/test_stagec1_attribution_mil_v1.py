@@ -1,11 +1,11 @@
 import json
+import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from tools.run_stagec1_mil_baseline_offline import build_parser
 from wsovvis.track_feature_export import (
     StageC1AttributionError,
     StageC1MilConfig,
@@ -14,6 +14,15 @@ from wsovvis.track_feature_export import (
     load_stageb_export_split_v1,
     run_stagec1_mil_baseline_offline,
 )
+
+
+def _load_stagec1_cli_build_parser():
+    script_path = Path(__file__).resolve().parents[1] / "tools" / "run_stagec1_mil_baseline_offline.py"
+    spec = importlib.util.spec_from_file_location("stagec1_cli_script", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.build_parser
 
 
 def _base_input() -> dict:
@@ -224,7 +233,7 @@ def test_stagec1_mil_smoke_stagec0_to_artifacts(tmp_path: Path) -> None:
 
 
 def test_stagec1_cli_decoder_backend_parsing_and_invalid_value() -> None:
-    parser = build_parser()
+    parser = _load_stagec1_cli_build_parser()()
     args = parser.parse_args(["--split-root", "/tmp/s", "--output-dir", "/tmp/o"])
     assert args.decoder_backend == "independent"
     assert args.decoder_fg_score_min == -1.0
