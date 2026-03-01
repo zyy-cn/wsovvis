@@ -23,6 +23,15 @@ from .stagec_loader_v1 import (
     StageCVideoRecord,
     load_stageb_export_split_v1,
 )
+from .stagec1_attribution_mil_v1 import (
+    StageC1AttributionError,
+    StageC1MilConfig,
+    StageC1MilResult,
+    StageC1TrackScoreRecord,
+    compute_stagec1_mil_baseline_scores,
+    run_stagec1_mil_baseline_offline,
+    write_stagec1_mil_artifacts,
+)
 from .v1_core import (
     ExportContractError,
     build_track_feature_export_v1,
@@ -43,11 +52,18 @@ __all__ = [
     "StageCTrackMetadata",
     "StageCTrackRecord",
     "StageCVideoRecord",
+    "StageC1AttributionError",
+    "StageC1MilConfig",
+    "StageC1MilResult",
+    "StageC1TrackScoreRecord",
+    "compute_stagec1_mil_baseline_scores",
     "convert_stageb_bridge_input_to_task_input_v1",
     "export_feature_enablement_from_real_run",
     "load_feature_export_enablement_input",
     "load_stageb_export_split_v1",
     "load_stageb_bridge_input",
     "load_task_local_input",
+    "run_stagec1_mil_baseline_offline",
     "validate_track_feature_export_v1",
+    "write_stagec1_mil_artifacts",
 ]
