@@ -52,6 +52,7 @@ class StageC1TrackScoreRecord:
     decoder_assignment_source: str | None = None
     decoder_score: float | None = None
     decoder_margin: float | None = None
+    decoder_bg_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -558,6 +559,14 @@ def _should_assign_bg(*, top1_score: float, margin: float, decoder_config: Stage
     return False
 
 
+def _bg_reason(*, score_for_gate: float, margin: float, decoder_config: StageC1DecoderConfig) -> str | None:
+    if decoder_config.bg_score_threshold is not None and score_for_gate < float(decoder_config.bg_score_threshold):
+        return "score_threshold"
+    if decoder_config.bg_min_margin is not None and math.isfinite(margin) and margin < float(decoder_config.bg_min_margin):
+        return "min_margin"
+    return None
+
+
 def _decode_video_assignments(
     *,
     track_ids: Sequence[str | int],
@@ -586,6 +595,11 @@ def _decode_video_assignments(
 
     coverage_hit_count = 0
     tie_break_count = 0
+    coverage_skip_fg_min_count = 0
+    coverage_skip_bg_gate_count = 0
+    fill_fg_count = 0
+    fill_bg_count = 0
+    bg_reason_counts: dict[str, int] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0}
     if decoder_config.backend == "coverage_greedy_v1":
         assigned = [False] * num_tracks
         assignments = [{} for _ in range(num_tracks)]
@@ -612,19 +626,22 @@ def _decode_video_assignments(
             if best_track_idx is None:
                 continue
 
-            top1_score = float(scorer_top1_scores[best_track_idx])
+            assignment_score = float(score_matrix[best_track_idx, label_index])
             margin = float(scorer_margins[best_track_idx])
-            if top1_score < float(decoder_config.fg_score_min):
+            if assignment_score < float(decoder_config.fg_score_min):
+                coverage_skip_fg_min_count += 1
                 continue
-            if _should_assign_bg(top1_score=top1_score, margin=margin, decoder_config=decoder_config):
+            if _should_assign_bg(top1_score=assignment_score, margin=margin, decoder_config=decoder_config):
+                coverage_skip_bg_gate_count += 1
                 continue
 
             assignments[best_track_idx] = {
                 "label_key": label_key,
                 "assigned_bg": False,
                 "source": "coverage",
-                "score": float(score_matrix[best_track_idx, label_index]),
+                "score": assignment_score,
                 "margin": float(margin),
+                "bg_reason": None,
             }
             assigned[best_track_idx] = True
             coverage_hit_count += 1
@@ -635,26 +652,36 @@ def _decode_video_assignments(
             top1_key = scorer_top1_keys[track_idx]
             top1_score = float(scorer_top1_scores[track_idx])
             margin = float(scorer_margins[track_idx])
-            assign_bg = top1_score < float(decoder_config.fg_score_min) or _should_assign_bg(
-                top1_score=top1_score, margin=margin, decoder_config=decoder_config
-            )
+            bg_reason = None
+            if top1_score < float(decoder_config.fg_score_min):
+                bg_reason = "fg_score_min"
+            else:
+                bg_reason = _bg_reason(score_for_gate=top1_score, margin=margin, decoder_config=decoder_config)
+            assign_bg = bg_reason is not None
             if assign_bg:
+                fill_bg_count += 1
+                bg_reason_counts[str(bg_reason)] += 1
                 assignments[track_idx] = {
                     "label_key": None,
                     "assigned_bg": True,
                     "source": "fill_bg",
                     "score": top1_score,
                     "margin": margin,
+                    "bg_reason": bg_reason,
                 }
             else:
+                fill_fg_count += 1
                 assignments[track_idx] = {
                     "label_key": top1_key,
                     "assigned_bg": False,
                     "source": "fill",
                     "score": top1_score,
                     "margin": margin,
+                    "bg_reason": None,
                 }
 
+    for row in assignments:
+        row.setdefault("bg_reason", None)
     num_bg = sum(1 for row in assignments if bool(row.get("assigned_bg", False)))
     num_fg = num_tracks - num_bg
     coverage_target_count = len(candidate_keys)
@@ -667,6 +694,12 @@ def _decode_video_assignments(
         "decoder_coverage_hit_count": coverage_hit_count,
         "decoder_coverage_ratio": coverage_ratio,
         "decoder_tie_break_count": tie_break_count,
+        "decoder_coverage_skip_fg_min_count": coverage_skip_fg_min_count,
+        "decoder_coverage_skip_bg_gate_count": coverage_skip_bg_gate_count,
+        "decoder_fill_fg_count": fill_fg_count,
+        "decoder_fill_bg_count": fill_bg_count,
+        "decoder_bg_reason_counts": bg_reason_counts,
+        "decoder_policy_version": "coverage_greedy_v1.r1b",
     }
     return assignments, video_diag
 
@@ -798,6 +831,7 @@ def compute_stagec1_labelset_proto_baseline_scores(
                     decoder_assignment_source=str(decoded["source"]),
                     decoder_score=float(decoded["score"]),
                     decoder_margin=float(decoded["margin"]),
+                    decoder_bg_reason=str(decoded["bg_reason"]) if decoded["bg_reason"] is not None else None,
                 )
             )
 
@@ -841,6 +875,20 @@ def compute_stagec1_labelset_proto_baseline_scores(
     decoder_coverage_target = int(sum(int(diag["decoder_coverage_target_count"]) for diag in decoder_diag_by_video.values()))
     decoder_coverage_hit = int(sum(int(diag["decoder_coverage_hit_count"]) for diag in decoder_diag_by_video.values()))
     decoder_tie_break_total = int(sum(int(diag["decoder_tie_break_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_coverage_skip_fg_min_total = int(
+        sum(int(diag["decoder_coverage_skip_fg_min_count"]) for diag in decoder_diag_by_video.values())
+    )
+    decoder_coverage_skip_bg_gate_total = int(
+        sum(int(diag["decoder_coverage_skip_bg_gate_count"]) for diag in decoder_diag_by_video.values())
+    )
+    decoder_fill_fg_total = int(sum(int(diag["decoder_fill_fg_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_fill_bg_total = int(sum(int(diag["decoder_fill_bg_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_bg_reason_counts: dict[str, int] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0}
+    for diag in decoder_diag_by_video.values():
+        reason_counts = diag.get("decoder_bg_reason_counts")
+        if isinstance(reason_counts, dict):
+            for key in ("score_threshold", "min_margin", "fg_score_min"):
+                decoder_bg_reason_counts[key] += int(reason_counts.get(key, 0))
     decoder_coverage_ratio = float(decoder_coverage_hit / decoder_coverage_target) if decoder_coverage_target > 0 else None
 
     run_summary = _build_run_summary(
@@ -876,9 +924,15 @@ def compute_stagec1_labelset_proto_baseline_scores(
                 "coverage_hit_count": decoder_coverage_hit,
                 "coverage_ratio": decoder_coverage_ratio,
                 "tie_break_count": decoder_tie_break_total,
+                "coverage_skip_fg_min_count": decoder_coverage_skip_fg_min_total,
+                "coverage_skip_bg_gate_count": decoder_coverage_skip_bg_gate_total,
+                "fill_fg_count": decoder_fill_fg_total,
+                "fill_bg_count": decoder_fill_bg_total,
+                "bg_reason_counts": decoder_bg_reason_counts,
                 "fg_score_min": float(decoder_config.fg_score_min),
                 "bg_score_threshold": decoder_config.bg_score_threshold,
                 "bg_min_margin": decoder_config.bg_min_margin,
+                "policy_version": "coverage_greedy_v1.r1b",
             },
         },
     )
@@ -1010,6 +1064,8 @@ def write_stagec1_mil_artifacts(result: StageC1MilResult, output_dir: Path) -> D
                 row["decoder_score"] = float(record.decoder_score)
             if record.decoder_margin is not None:
                 row["decoder_margin"] = float(record.decoder_margin)
+            if record.decoder_bg_reason is not None:
+                row["decoder_bg_reason"] = record.decoder_bg_reason
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
     per_video_summary_path = output_dir / "per_video_summary.json"
@@ -1068,9 +1124,15 @@ def run_stagec1_mil_baseline_offline(
             "coverage_hit_count": 0,
             "coverage_ratio": None,
             "tie_break_count": 0,
+            "coverage_skip_fg_min_count": 0,
+            "coverage_skip_bg_gate_count": 0,
+            "fill_fg_count": 0,
+            "fill_bg_count": 0,
+            "bg_reason_counts": {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0},
             "fg_score_min": float(decoder_config.fg_score_min),
             "bg_score_threshold": decoder_config.bg_score_threshold,
             "bg_min_margin": decoder_config.bg_min_margin,
+            "policy_version": "coverage_greedy_v1.r1b",
         }
         per_video_summary = []
         for row in result.per_video_summary:
@@ -1082,6 +1144,12 @@ def run_stagec1_mil_baseline_offline(
             row_copy["decoder_coverage_hit_count"] = 0
             row_copy["decoder_coverage_ratio"] = None
             row_copy["decoder_tie_break_count"] = 0
+            row_copy["decoder_coverage_skip_fg_min_count"] = 0
+            row_copy["decoder_coverage_skip_bg_gate_count"] = 0
+            row_copy["decoder_fill_fg_count"] = 0
+            row_copy["decoder_fill_bg_count"] = 0
+            row_copy["decoder_bg_reason_counts"] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0}
+            row_copy["decoder_policy_version"] = "coverage_greedy_v1.r1b"
             per_video_summary.append(row_copy)
         result = StageC1MilResult(
             track_scores=result.track_scores,
