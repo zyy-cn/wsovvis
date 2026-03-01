@@ -342,6 +342,33 @@ Improve document-only cold-start reliability for future sessions using `codex/co
 
 ---
 
+## 2026-03-01 — Stage C0 completed (consumer/loader offline data-plane)
+
+### Scope
+Implement and validate the Stage C0 offline consumer/loader over Stage B export artifact v1 with deterministic loading/indexing behavior and consumer-facing access APIs.
+
+### Completed
+- Implemented export artifact v1 consumer/loader path for manifest + shard consumption.
+- Added deterministic manifest/shard loading behavior with stable iteration/indexing checks.
+- Preserved strict scope boundaries (no attribution algorithm/training/Stage D additions).
+- Preserved workflow branch/commit match discipline for canonical validation evidence.
+
+### Validation
+- Canonical remote validation passed on `gpu4090d` for Stage C0 loader tests.
+- Branch used: `codex/stagec0-consumer-loader-offline-dataplane-v1`
+- Canonical result: `10/10` targeted Stage C0 test suite PASS.
+- Remote HEAD matched intended local/pushed commit (commit-consistent PASS evidence).
+
+### Key references
+- Stage C0 validation recovery PASS output: `codex/2026030105_progress_sync_and_stagec0_consumer_loader_taskpack_meta_tier1_2/10_output.txt`
+- Intended/verified commit in PASS evidence: `9a45f554...`
+
+### Notes
+- Stage C0 is complete as the offline data-plane foundation for Stage C attribution work.
+- Next recommended step is Stage C1 attribution baseline planning/implementation, starting with an offline MIL baseline over Stage C0 loader outputs.
+
+---
+
 ## Current Stage
 
 ### Current project status
@@ -357,10 +384,11 @@ Improve document-only cold-start reliability for future sessions using `codex/co
 - ✅ P3.1d.2 completed (real-run feature-export integration)
 - ✅ P3.1c.1 completed (real Stage B + sidecar -> normalized bridge-input builder + end-to-end handoff validation)
 - ✅ P3.1c.2 completed (bridge full-split hardening + QA)
-- ▶️ Next recommended step: **Stage C consumer/loader (offline data-plane)**
+- ✅ Stage C0 completed (consumer/loader offline data-plane; canonical remote PASS `10/10`)
+- ▶️ Next recommended step: **Stage C1 attribution baseline (offline, MIL-first; no training-loop integration yet)**
 
-### Why Stage C consumer/loader next
-P3.1c.2 closed the remaining bridge-chain hardening/QA gap with successful sample and larger real-run validation, including downstream validator success. The highest-leverage next step is a deterministic offline consumer/loader data-plane for export artifact v1 so Stage C experiments can consume artifacts consistently and with built-in sanity checks.
+### Why Stage C1 attribution baseline next
+With Stage C0 loader/consumer now validated, the highest-leverage next step is to establish an offline attribution baseline pipeline that consumes Stage C0 outputs and produces deterministic baseline scoring/evaluation artifacts before any training-loop integration.
 
-### Follow-on after Stage C consumer/loader
-- Stage C attribution MVP (recommended order: MIL baseline -> EM baseline -> OT/Sinkhorn mainline)
+### Follow-on after Stage C1 baseline
+- Stage C attribution expansion (recommended later order: EM baseline -> OT/Sinkhorn mainline), still staged independently from Stage D loop integration.
