@@ -58,7 +58,10 @@ def _resolve_split_domain_json_path(
     if not path.is_absolute():
         candidates: List[Path] = [repo_root / path]
         if run_root is not None:
-            candidates.append(run_root / path)
+            probe = run_root
+            while probe != probe.parent:
+                candidates.append(probe / path)
+                probe = probe.parent
         candidates.append(Path.cwd() / path)
         for candidate in candidates:
             if candidate.exists():
