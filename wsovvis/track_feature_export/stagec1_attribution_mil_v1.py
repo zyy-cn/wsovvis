@@ -3,17 +3,21 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Sequence, Tuple
+from pathlib import Path, PurePosixPath
+from typing import Any, Dict, Mapping, Sequence, Tuple
 
 import numpy as np
 
 from .stagec_loader_v1 import StageCTrackRecord, load_stageb_export_split_v1
 from .v1_core import ALL_STATUSES, PROCESSED_STATUSES, ExportContractError
 
+SCORER_BACKENDS = {"mil_v1", "labelset_proto_v1"}
+EMPTY_LABELSET_POLICIES = {"use_all_prototypes", "error"}
+PROTOTYPE_SCHEMA_NAME_V1 = "wsovvis.stagec.label_prototypes.v1"
+
 
 class StageC1AttributionError(ExportContractError):
-    """Raised when Stage C1 offline MIL baseline scoring fails."""
+    """Raised when Stage C offline baseline scoring fails."""
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,8 @@ class StageC1TrackScoreRecord:
     row_index: int
     status: str
     score: float
+    predicted_label_id: str | int | None = None
+    used_fallback_label_pool: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,18 @@ class StageC1MilResult:
     track_scores: Tuple[StageC1TrackScoreRecord, ...]
     per_video_summary: Tuple[Dict[str, Any], ...]
     run_summary: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StageCLabelPrototypeInventory:
+    schema_name: str
+    schema_version: str
+    embedding_dim: int
+    dtype: str
+    array_key: str
+    labels_by_key: Mapping[tuple[int, int | str], int | str]
+    row_index_by_key: Mapping[tuple[int, int | str], int]
+    prototypes: np.ndarray
 
 
 def _err(field_path: str, rule_summary: str) -> StageC1AttributionError:
@@ -52,6 +70,23 @@ def _require(condition: bool, field_path: str, rule_summary: str) -> None:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_label_id(value: Any) -> bool:
+    return (isinstance(value, int) and not isinstance(value, bool)) or (isinstance(value, str) and value != "")
+
+
+def _canonical_label_key(label_id: int | str) -> tuple[int, int | str]:
+    if isinstance(label_id, int) and not isinstance(label_id, bool):
+        return (0, int(label_id))
+    if isinstance(label_id, str) and label_id:
+        return (1, label_id)
+    raise _err("label_id", "must be non-empty string or integer")
+
+
+def _canonical_label_key_text(label_id: int | str) -> str:
+    key = _canonical_label_key(label_id)
+    return f"{key[0]}:{key[1]}"
 
 
 def _validate_config(config: StageC1MilConfig) -> None:
@@ -132,23 +167,40 @@ def _as_stats(values: Sequence[float]) -> Dict[str, Any]:
     }
 
 
-def compute_stagec1_mil_baseline_scores(
-    split_view: Any,
-    *,
-    config: StageC1MilConfig | None = None,
-) -> StageC1MilResult:
-    config = config or StageC1MilConfig()
-    _validate_config(config)
+def _validate_track_identity(track: StageCTrackRecord, video_id: str) -> tuple[str | int, int]:
+    metadata = track.metadata
+    _require(hasattr(metadata, "track_id"), "track.metadata.track_id", "required field missing")
+    _require(hasattr(metadata, "row_index"), "track.metadata.row_index", "required field missing")
+    _require(hasattr(metadata, "video_id"), "track.metadata.video_id", "required field missing")
+    _require(
+        (isinstance(metadata.track_id, str) and metadata.track_id) or isinstance(metadata.track_id, int),
+        "track.metadata.track_id",
+        "must be non-empty string or integer",
+    )
+    _require(
+        isinstance(metadata.row_index, int) and metadata.row_index >= 0,
+        "track.metadata.row_index",
+        "must be integer >= 0",
+    )
+    _require(
+        metadata.video_id == video_id,
+        "track.metadata.video_id",
+        f"must match parent video_id '{video_id}'",
+    )
+    return metadata.track_id, metadata.row_index
 
-    track_scores: list[StageC1TrackScoreRecord] = []
-    seen_keys: set[tuple[str, str | int]] = set()
-    expected_track_keys: list[tuple[str, str | int]] = []
 
+def _iter_processed_with_tracks(split_view: Any, config: StageC1MilConfig) -> tuple[list[Any], list[str], list[tuple[str, str | int]]]:
     all_videos = list(split_view.iter_videos())
     processed_with_tracks_video_ids: list[str] = []
+    expected_track_keys: list[tuple[str, str | int]] = []
 
     for video in all_videos:
-        _require(hasattr(video, "video_id") and isinstance(video.video_id, str) and video.video_id, "video.video_id", "must be non-empty string")
+        _require(
+            hasattr(video, "video_id") and isinstance(video.video_id, str) and video.video_id,
+            "video.video_id",
+            "must be non-empty string",
+        )
         _require(hasattr(video, "status"), "video.status", "required field missing")
         status = video.status
         _require(status in ALL_STATUSES, "video.status", f"must be one of {sorted(ALL_STATUSES)}")
@@ -167,45 +219,21 @@ def compute_stagec1_mil_baseline_scores(
 
         processed_with_tracks_video_ids.append(video.video_id)
         for track in split_view.iter_tracks(video.video_id):
-            metadata = track.metadata
-            _require(hasattr(metadata, "track_id"), "track.metadata.track_id", "required field missing")
-            _require(hasattr(metadata, "row_index"), "track.metadata.row_index", "required field missing")
-            _require(hasattr(metadata, "video_id"), "track.metadata.video_id", "required field missing")
-            _require(
-                (isinstance(metadata.track_id, str) and metadata.track_id) or isinstance(metadata.track_id, int),
-                "track.metadata.track_id",
-                "must be non-empty string or integer",
-            )
-            _require(
-                isinstance(metadata.row_index, int) and metadata.row_index >= 0,
-                "track.metadata.row_index",
-                "must be integer >= 0",
-            )
-            _require(
-                metadata.video_id == video.video_id,
-                "track.metadata.video_id",
-                f"must match parent video_id '{video.video_id}'",
-            )
+            track_id, _ = _validate_track_identity(track, video.video_id)
+            expected_track_keys.append((video.video_id, track_id))
 
-            key = (video.video_id, metadata.track_id)
-            expected_track_keys.append(key)
-            _require(key not in seen_keys, "track.identity", f"duplicate (video_id, track_id) key {key}")
-            seen_keys.add(key)
+    return all_videos, processed_with_tracks_video_ids, expected_track_keys
 
-            score = _compute_track_score(track, config)
-            track_scores.append(
-                StageC1TrackScoreRecord(
-                    video_id=video.video_id,
-                    track_id=metadata.track_id,
-                    row_index=metadata.row_index,
-                    status=status,
-                    score=score,
-                )
-            )
 
+def _validate_emitted_order_and_non_empty(
+    *,
+    track_scores: Sequence[StageC1TrackScoreRecord],
+    expected_track_keys: Sequence[tuple[str, str | int]],
+    processed_with_tracks_video_ids: Sequence[str],
+) -> list[tuple[str, str | int]]:
     emitted_keys = [(record.video_id, record.track_id) for record in track_scores]
     _require(
-        emitted_keys == expected_track_keys,
+        emitted_keys == list(expected_track_keys),
         "result.track_scores",
         "emitted key order mismatch against Stage C0 traversal order",
     )
@@ -221,6 +249,45 @@ def compute_stagec1_mil_baseline_scores(
         "result.track_scores",
         f"missing scored tracks for processed_with_tracks videos: {missing_scored_video_ids}",
     )
+    return emitted_keys
+
+
+def compute_stagec1_mil_baseline_scores(
+    split_view: Any,
+    *,
+    config: StageC1MilConfig | None = None,
+) -> StageC1MilResult:
+    config = config or StageC1MilConfig()
+    _validate_config(config)
+
+    track_scores: list[StageC1TrackScoreRecord] = []
+    seen_keys: set[tuple[str, str | int]] = set()
+
+    all_videos, processed_with_tracks_video_ids, expected_track_keys = _iter_processed_with_tracks(split_view, config)
+
+    for video_id in processed_with_tracks_video_ids:
+        for track in split_view.iter_tracks(video_id):
+            track_id, row_index = _validate_track_identity(track, video_id)
+            key = (video_id, track_id)
+            _require(key not in seen_keys, "track.identity", f"duplicate (video_id, track_id) key {key}")
+            seen_keys.add(key)
+
+            score = _compute_track_score(track, config)
+            track_scores.append(
+                StageC1TrackScoreRecord(
+                    video_id=video_id,
+                    track_id=track_id,
+                    row_index=row_index,
+                    status="processed_with_tracks",
+                    score=score,
+                )
+            )
+
+    emitted_keys = _validate_emitted_order_and_non_empty(
+        track_scores=track_scores,
+        expected_track_keys=expected_track_keys,
+        processed_with_tracks_video_ids=processed_with_tracks_video_ids,
+    )
 
     per_video_summary = _build_per_video_summary(track_scores, top_k_per_video=config.top_k_per_video)
     run_summary = _build_run_summary(
@@ -229,6 +296,350 @@ def compute_stagec1_mil_baseline_scores(
         all_videos=all_videos,
         expected_track_keys=expected_track_keys,
         emitted_keys=emitted_keys,
+        scorer_backend="mil_v1",
+    )
+
+    return StageC1MilResult(
+        track_scores=tuple(track_scores),
+        per_video_summary=tuple(per_video_summary),
+        run_summary=run_summary,
+    )
+
+
+def _parse_semver_major(version: Any, field_path: str) -> int:
+    _require(isinstance(version, str), field_path, "must be string")
+    parts = version.split(".")
+    _require(len(parts) == 3 and all(p.isdigit() for p in parts), field_path, "must follow MAJOR.MINOR.PATCH")
+    return int(parts[0])
+
+
+def _require_rel_path(path_value: Any, field_path: str) -> str:
+    _require(isinstance(path_value, str) and path_value, field_path, "must be non-empty relative path")
+    rel = PurePosixPath(path_value)
+    _require(not rel.is_absolute(), field_path, "absolute path is forbidden")
+    _require(".." not in rel.parts, field_path, "must not contain '..'")
+    return str(rel)
+
+
+def load_stagec_label_prototype_inventory_v1(manifest_json: Path) -> StageCLabelPrototypeInventory:
+    try:
+        manifest = json.loads(manifest_json.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise _err("prototype_manifest_json", f"missing file: {manifest_json}") from exc
+    except json.JSONDecodeError as exc:
+        raise _err("prototype_manifest_json", f"invalid JSON: {exc}") from exc
+
+    _require(isinstance(manifest, dict), "prototype_manifest.$", "top-level value must be an object")
+    _require(
+        manifest.get("schema_name") == PROTOTYPE_SCHEMA_NAME_V1,
+        "prototype_manifest.schema_name",
+        f"must equal '{PROTOTYPE_SCHEMA_NAME_V1}'",
+    )
+    _require(
+        _parse_semver_major(manifest.get("schema_version"), "prototype_manifest.schema_version") == 1,
+        "prototype_manifest.schema_version",
+        "unsupported major version",
+    )
+    _require(
+        isinstance(manifest.get("embedding_dim"), int) and manifest["embedding_dim"] > 0,
+        "prototype_manifest.embedding_dim",
+        "must be integer > 0",
+    )
+    _require(manifest.get("dtype") == "float32", "prototype_manifest.dtype", "must equal 'float32'")
+
+    labels_raw = manifest.get("labels")
+    _require(isinstance(labels_raw, list) and labels_raw, "prototype_manifest.labels", "must be non-empty list")
+
+    array_key = manifest.get("array_key", "prototypes")
+    _require(isinstance(array_key, str) and array_key, "prototype_manifest.array_key", "must be non-empty string")
+    arrays_path_rel = _require_rel_path(manifest.get("arrays_path"), "prototype_manifest.arrays_path")
+    arrays_path = manifest_json.parent / arrays_path_rel
+    _require(arrays_path.exists(), "prototype_manifest.arrays_path", f"target file missing: {arrays_path}")
+
+    try:
+        with np.load(arrays_path, allow_pickle=False) as npz:
+            _require(array_key in npz, "prototype_manifest.array_key", f"missing key '{array_key}' in {arrays_path}")
+            prototypes = np.asarray(npz[array_key])
+    except Exception as exc:  # noqa: BLE001
+        raise _err("prototype_manifest.arrays_path", f"failed to load NPZ: {exc}") from exc
+
+    _require(prototypes.ndim == 2, "prototype_arrays", "must be rank-2 [num_labels, embedding_dim]")
+    _require(prototypes.shape[1] == manifest["embedding_dim"], "prototype_arrays", "embedding dim mismatch")
+    _require(np.dtype(prototypes.dtype) == np.float32, "prototype_arrays.dtype", "must be float32")
+    _require(np.isfinite(prototypes).all(), "prototype_arrays", "must contain only finite values")
+
+    num_labels = prototypes.shape[0]
+    _require(len(labels_raw) == num_labels, "prototype_manifest.labels", "length must match prototype row count")
+
+    row_index_by_key: dict[tuple[int, int | str], int] = {}
+    labels_by_key: dict[tuple[int, int | str], int | str] = {}
+    seen_rows: set[int] = set()
+    for i, record in enumerate(labels_raw):
+        rpath = f"prototype_manifest.labels[{i}]"
+        _require(isinstance(record, dict), rpath, "must be object")
+        _require("row_index" in record, f"{rpath}.row_index", "required field missing")
+        _require("label_id" in record, f"{rpath}.label_id", "required field missing")
+        row_index = record["row_index"]
+        label_id = record["label_id"]
+        _require(isinstance(row_index, int) and row_index >= 0, f"{rpath}.row_index", "must be integer >= 0")
+        _require(row_index < num_labels, f"{rpath}.row_index", f"must be < num_labels ({num_labels})")
+        _require(row_index not in seen_rows, f"{rpath}.row_index", "duplicate row_index")
+        _require(_is_label_id(label_id), f"{rpath}.label_id", "must be non-empty string or integer")
+        key = _canonical_label_key(label_id)
+        _require(key not in labels_by_key, f"{rpath}.label_id", "duplicate canonical label id")
+        seen_rows.add(row_index)
+        row_index_by_key[key] = int(row_index)
+        labels_by_key[key] = label_id
+
+    _require(len(seen_rows) == num_labels, "prototype_manifest.labels", "must cover every prototype row exactly once")
+
+    row_norms = np.linalg.norm(prototypes.astype(np.float64), axis=1)
+    _require(np.all(row_norms > 0.0), "prototype_arrays", "all prototype rows must have non-zero norm")
+
+    return StageCLabelPrototypeInventory(
+        schema_name=manifest["schema_name"],
+        schema_version=manifest["schema_version"],
+        embedding_dim=int(manifest["embedding_dim"]),
+        dtype=str(manifest["dtype"]),
+        array_key=array_key,
+        labels_by_key=labels_by_key,
+        row_index_by_key=row_index_by_key,
+        prototypes=prototypes,
+    )
+
+
+def _extract_labelset_records(payload: Any) -> Sequence[tuple[str, Any]]:
+    if isinstance(payload, dict) and isinstance(payload.get("videos"), list):
+        out: list[tuple[str, Any]] = []
+        for index, row in enumerate(payload["videos"]):
+            _require(isinstance(row, dict), f"labelset.videos[{index}]", "must be object")
+            video_id = row.get("video_id")
+            _require(isinstance(video_id, str) and video_id, f"labelset.videos[{index}].video_id", "must be non-empty string")
+            out.append((video_id, row))
+        return out
+
+    if isinstance(payload, dict) and isinstance(payload.get("per_video"), dict):
+        return [(str(k), v) for k, v in payload["per_video"].items()]
+
+    if isinstance(payload, dict):
+        return [(str(k), v) for k, v in payload.items()]
+
+    _require(False, "labelset.$", "must be object with either {videos:[...]} or mapping by video_id")
+    return ()
+
+
+def load_stagec_labelset_lookup(labelset_json: Path, *, labelset_key: str) -> Dict[str, Tuple[tuple[int, int | str], ...]]:
+    try:
+        payload = json.loads(labelset_json.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise _err("labelset_json", f"missing file: {labelset_json}") from exc
+    except json.JSONDecodeError as exc:
+        raise _err("labelset_json", f"invalid JSON: {exc}") from exc
+
+    _require(isinstance(labelset_key, str) and labelset_key, "labelset_key", "must be non-empty string")
+
+    out: Dict[str, Tuple[tuple[int, int | str], ...]] = {}
+    for raw_video_id, raw_value in _extract_labelset_records(payload):
+        _require(isinstance(raw_video_id, str) and raw_video_id, "labelset.video_id", "must be non-empty string")
+        value = raw_value
+        if isinstance(raw_value, dict):
+            _require(
+                labelset_key in raw_value,
+                f"labelset[{raw_video_id}].{labelset_key}",
+                "required key missing for this video",
+            )
+            value = raw_value[labelset_key]
+
+        _require(isinstance(value, list), f"labelset[{raw_video_id}]", "label list must be an array")
+        keys: set[tuple[int, int | str]] = set()
+        for idx, label_id in enumerate(value):
+            _require(_is_label_id(label_id), f"labelset[{raw_video_id}][{idx}]", "must be non-empty string or integer")
+            keys.add(_canonical_label_key(label_id))
+        out[raw_video_id] = tuple(sorted(keys))
+
+    return out
+
+
+def _compute_proto_track_score(
+    *,
+    embedding: np.ndarray,
+    candidate_keys: Sequence[tuple[int, int | str]],
+    inventory: StageCLabelPrototypeInventory,
+    normalized_prototypes: np.ndarray,
+) -> tuple[float, tuple[int, int | str]]:
+    _require(embedding.ndim == 1, "track.embedding", "must be rank-1")
+    _require(np.isfinite(embedding).all(), "track.embedding", "must contain only finite values")
+    _require(embedding.shape[0] == inventory.embedding_dim, "track.embedding", "embedding dim mismatch with prototype inventory")
+
+    emb64 = embedding.astype(np.float64, copy=False)
+    emb_norm = float(np.linalg.norm(emb64))
+    if emb_norm <= 0.0:
+        scores = np.zeros((len(candidate_keys),), dtype=np.float64)
+    else:
+        emb_unit = emb64 / emb_norm
+        rows = [inventory.row_index_by_key[key] for key in candidate_keys]
+        scores = normalized_prototypes[rows, :].dot(emb_unit)
+
+    best_score = -float("inf")
+    best_key: tuple[int, int | str] | None = None
+    for idx, key in enumerate(candidate_keys):
+        score = float(scores[idx])
+        if score > best_score or (score == best_score and (best_key is None or key < best_key)):
+            best_score = score
+            best_key = key
+
+    _require(best_key is not None, "candidate_labels", "must be non-empty")
+    _require(math.isfinite(best_score), "track.score", "must be finite")
+    return best_score, best_key
+
+
+def compute_stagec1_labelset_proto_baseline_scores(
+    split_view: Any,
+    *,
+    prototype_inventory: StageCLabelPrototypeInventory,
+    labelset_lookup: Mapping[str, Sequence[tuple[int, int | str]]],
+    config: StageC1MilConfig | None = None,
+    empty_labelset_policy: str = "use_all_prototypes",
+) -> StageC1MilResult:
+    config = config or StageC1MilConfig()
+    _validate_config(config)
+    _require(empty_labelset_policy in EMPTY_LABELSET_POLICIES, "empty_labelset_policy", f"must be one of {sorted(EMPTY_LABELSET_POLICIES)}")
+    _require(
+        int(getattr(split_view, "embedding_dim", -1)) == prototype_inventory.embedding_dim,
+        "prototype_manifest.embedding_dim",
+        "must match split embedding_dim",
+    )
+
+    all_videos, processed_with_tracks_video_ids, expected_track_keys = _iter_processed_with_tracks(split_view, config)
+    prototype_keys_all = tuple(sorted(prototype_inventory.labels_by_key.keys()))
+
+    proto = prototype_inventory.prototypes.astype(np.float64, copy=False)
+    proto_norms = np.linalg.norm(proto, axis=1, keepdims=True)
+    normalized_proto = proto / proto_norms
+
+    track_scores: list[StageC1TrackScoreRecord] = []
+    seen_keys: set[tuple[str, str | int]] = set()
+
+    videos_missing_labelset: list[str] = []
+    videos_with_nonempty_labelset = 0
+    videos_using_fallback = 0
+    fallback_tracks_total = 0
+    labelset_size_by_video: Dict[str, int] = {}
+    fallback_track_count_by_video: Dict[str, int] = {}
+
+    for video_id in processed_with_tracks_video_ids:
+        raw_keys = tuple(labelset_lookup.get(video_id, ()))
+        labelset_size_by_video[video_id] = len(raw_keys)
+        if video_id not in labelset_lookup:
+            videos_missing_labelset.append(video_id)
+        if raw_keys:
+            videos_with_nonempty_labelset += 1
+
+        candidate_keys = tuple(sorted(key for key in raw_keys if key in prototype_inventory.row_index_by_key))
+        used_fallback = False
+        if not candidate_keys:
+            if empty_labelset_policy == "error":
+                raise _err(
+                    "labelset_lookup",
+                    (
+                        f"video '{video_id}' has empty candidate label intersection against prototype inventory "
+                        "under empty_labelset_policy='error'"
+                    ),
+                )
+            candidate_keys = prototype_keys_all
+            used_fallback = True
+            videos_using_fallback += 1
+
+        local_fallback_tracks = 0
+        for track in split_view.iter_tracks(video_id):
+            track_id, row_index = _validate_track_identity(track, video_id)
+            key = (video_id, track_id)
+            _require(key not in seen_keys, "track.identity", f"duplicate (video_id, track_id) key {key}")
+            seen_keys.add(key)
+
+            score, best_label_key = _compute_proto_track_score(
+                embedding=track.embedding,
+                candidate_keys=candidate_keys,
+                inventory=prototype_inventory,
+                normalized_prototypes=normalized_proto,
+            )
+
+            if used_fallback:
+                local_fallback_tracks += 1
+                fallback_tracks_total += 1
+
+            track_scores.append(
+                StageC1TrackScoreRecord(
+                    video_id=video_id,
+                    track_id=track_id,
+                    row_index=row_index,
+                    status="processed_with_tracks",
+                    score=score,
+                    predicted_label_id=prototype_inventory.labels_by_key[best_label_key],
+                    used_fallback_label_pool=used_fallback,
+                )
+            )
+
+        fallback_track_count_by_video[video_id] = local_fallback_tracks
+
+    emitted_keys = _validate_emitted_order_and_non_empty(
+        track_scores=track_scores,
+        expected_track_keys=expected_track_keys,
+        processed_with_tracks_video_ids=processed_with_tracks_video_ids,
+    )
+
+    top_pred_labels_by_video: Dict[str, list[dict[str, Any]]] = {}
+    by_video: Dict[str, Dict[str, int]] = {}
+    for rec in track_scores:
+        if rec.predicted_label_id is None:
+            continue
+        video_map = by_video.setdefault(rec.video_id, {})
+        ckey = _canonical_label_key_text(rec.predicted_label_id)
+        video_map[ckey] = video_map.get(ckey, 0) + 1
+    for video_id, counts in by_video.items():
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        top_pred_labels_by_video[video_id] = [
+            {
+                "canonical_label_key": label_key,
+                "count": int(count),
+            }
+            for label_key, count in ranked[:3]
+        ]
+
+    per_video_summary = _build_per_video_summary(
+        track_scores,
+        top_k_per_video=config.top_k_per_video,
+        labelset_size_by_video=labelset_size_by_video,
+        fallback_track_count_by_video=fallback_track_count_by_video,
+        top_predicted_labels_by_video=top_pred_labels_by_video,
+    )
+
+    run_summary = _build_run_summary(
+        split_view=split_view,
+        track_scores=track_scores,
+        all_videos=all_videos,
+        expected_track_keys=expected_track_keys,
+        emitted_keys=emitted_keys,
+        scorer_backend="labelset_proto_v1",
+        extra={
+            "prototype_inventory": {
+                "schema_name": prototype_inventory.schema_name,
+                "schema_version": prototype_inventory.schema_version,
+                "num_labels": len(prototype_inventory.labels_by_key),
+                "embedding_dim": prototype_inventory.embedding_dim,
+                "dtype": prototype_inventory.dtype,
+                "array_key": prototype_inventory.array_key,
+            },
+            "labelset_coverage": {
+                "videos_with_nonempty_labelset": videos_with_nonempty_labelset,
+                "videos_missing_labelset": sorted(videos_missing_labelset),
+                "num_videos_missing_labelset": len(videos_missing_labelset),
+                "num_videos_using_fallback_label_pool": videos_using_fallback,
+                "num_tracks_scored_with_fallback_label_pool": fallback_tracks_total,
+                "empty_labelset_policy": empty_labelset_policy,
+            },
+            "label_conditioned_score_distribution": _as_stats([r.score for r in track_scores]),
+        },
     )
 
     return StageC1MilResult(
@@ -242,6 +653,9 @@ def _build_per_video_summary(
     track_scores: Sequence[StageC1TrackScoreRecord],
     *,
     top_k_per_video: int,
+    labelset_size_by_video: Mapping[str, int] | None = None,
+    fallback_track_count_by_video: Mapping[str, int] | None = None,
+    top_predicted_labels_by_video: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> list[Dict[str, Any]]:
     by_video: Dict[str, list[StageC1TrackScoreRecord]] = {}
     for record in track_scores:
@@ -252,23 +666,28 @@ def _build_per_video_summary(
         records = by_video[video_id]
         values = [r.score for r in records]
         top_k = sorted(records, key=lambda r: r.score, reverse=True)[:top_k_per_video]
-        summaries.append(
-            {
-                "video_id": video_id,
-                "num_tracks": len(records),
-                "score_min": float(min(values)),
-                "score_max": float(max(values)),
-                "score_mean": float(sum(values) / len(values)),
-                "top_k": [
-                    {
-                        "track_id": rec.track_id,
-                        "row_index": rec.row_index,
-                        "score": rec.score,
-                    }
-                    for rec in top_k
-                ],
-            }
-        )
+        row: Dict[str, Any] = {
+            "video_id": video_id,
+            "num_tracks": len(records),
+            "score_min": float(min(values)),
+            "score_max": float(max(values)),
+            "score_mean": float(sum(values) / len(values)),
+            "top_k": [
+                {
+                    "track_id": rec.track_id,
+                    "row_index": rec.row_index,
+                    "score": rec.score,
+                }
+                for rec in top_k
+            ],
+        }
+        if labelset_size_by_video is not None:
+            row["labelset_size"] = int(labelset_size_by_video.get(video_id, 0))
+        if fallback_track_count_by_video is not None:
+            row["num_tracks_scored_with_fallback_label_pool"] = int(fallback_track_count_by_video.get(video_id, 0))
+        if top_predicted_labels_by_video is not None:
+            row["top_predicted_labels"] = list(top_predicted_labels_by_video.get(video_id, ()))
+        summaries.append(row)
     return summaries
 
 
@@ -279,6 +698,8 @@ def _build_run_summary(
     all_videos: Sequence[Any],
     expected_track_keys: Sequence[tuple[str, str | int]],
     emitted_keys: Sequence[tuple[str, str | int]],
+    scorer_backend: str,
+    extra: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     scores = [rec.score for rec in track_scores]
     per_video_track_counts: Dict[str, int] = {}
@@ -291,7 +712,8 @@ def _build_run_summary(
     score_stats = _as_stats(scores)
     all_finite_scores = bool(score_stats["all_finite"])
     _require(all_finite_scores, "result.track_scores", "must contain only finite score values")
-    return {
+
+    run_summary: Dict[str, Any] = {
         "split": getattr(split_view, "split", "unknown"),
         "embedding_dim": int(getattr(split_view, "embedding_dim", -1)),
         "num_videos_total": len(all_videos),
@@ -309,7 +731,12 @@ def _build_run_summary(
             "unique_emitted_key_count": len(set(emitted_keys)),
             "key_order_matches_stagec0": list(emitted_keys) == list(expected_track_keys),
         },
+        "scorer_backend": scorer_backend,
     }
+
+    if extra:
+        run_summary.update(dict(extra))
+    return run_summary
 
 
 def write_stagec1_mil_artifacts(result: StageC1MilResult, output_dir: Path) -> Dict[str, Path]:
@@ -318,19 +745,18 @@ def write_stagec1_mil_artifacts(result: StageC1MilResult, output_dir: Path) -> D
     track_scores_path = output_dir / "track_scores.jsonl"
     with track_scores_path.open("w", encoding="utf-8") as f:
         for record in result.track_scores:
-            f.write(
-                json.dumps(
-                    {
-                        "video_id": record.video_id,
-                        "track_id": record.track_id,
-                        "row_index": record.row_index,
-                        "status": record.status,
-                        "score": record.score,
-                    },
-                    sort_keys=True,
-                )
-                + "\n"
-            )
+            row: Dict[str, Any] = {
+                "video_id": record.video_id,
+                "track_id": record.track_id,
+                "row_index": record.row_index,
+                "status": record.status,
+                "score": record.score,
+            }
+            if record.predicted_label_id is not None:
+                row["predicted_label_id"] = record.predicted_label_id
+            if record.used_fallback_label_pool:
+                row["used_fallback_label_pool"] = True
+            f.write(json.dumps(row, sort_keys=True) + "\n")
 
     per_video_summary_path = output_dir / "per_video_summary.json"
     per_video_summary_path.write_text(json.dumps(list(result.per_video_summary), indent=2, sort_keys=True), encoding="utf-8")
@@ -351,9 +777,35 @@ def run_stagec1_mil_baseline_offline(
     output_dir: Path,
     config: StageC1MilConfig | None = None,
     eager_validate: bool = True,
+    scorer_backend: str = "mil_v1",
+    labelset_json: Path | None = None,
+    prototype_manifest_json: Path | None = None,
+    labelset_key: str = "label_set_observed_ids",
+    empty_labelset_policy: str = "use_all_prototypes",
 ) -> Dict[str, Any]:
+    _require(scorer_backend in SCORER_BACKENDS, "scorer_backend", f"must be one of {sorted(SCORER_BACKENDS)}")
+
     split_view = load_stageb_export_split_v1(split_root=split_root, eager_validate=eager_validate)
-    result = compute_stagec1_mil_baseline_scores(split_view, config=config)
+
+    if scorer_backend == "mil_v1":
+        result = compute_stagec1_mil_baseline_scores(split_view, config=config)
+    else:
+        _require(labelset_json is not None, "labelset_json", "required when scorer_backend='labelset_proto_v1'")
+        _require(
+            prototype_manifest_json is not None,
+            "prototype_manifest_json",
+            "required when scorer_backend='labelset_proto_v1'",
+        )
+        inventory = load_stagec_label_prototype_inventory_v1(prototype_manifest_json)
+        labelset_lookup = load_stagec_labelset_lookup(labelset_json, labelset_key=labelset_key)
+        result = compute_stagec1_labelset_proto_baseline_scores(
+            split_view,
+            prototype_inventory=inventory,
+            labelset_lookup=labelset_lookup,
+            config=config,
+            empty_labelset_policy=empty_labelset_policy,
+        )
+
     artifact_paths = write_stagec1_mil_artifacts(result=result, output_dir=output_dir)
     return {
         "artifacts": {key: str(path) for key, path in artifact_paths.items()},

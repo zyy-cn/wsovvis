@@ -22,6 +22,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Stage C1 MIL-first offline attribution baseline scoring")
     parser.add_argument("--split-root", type=Path, required=True, help="Stage B export split root")
     parser.add_argument("--output-dir", type=Path, required=True, help="Output directory for Stage C1 artifacts")
+    parser.add_argument(
+        "--scorer-backend",
+        choices=("mil_v1", "labelset_proto_v1"),
+        default="mil_v1",
+        help="Scoring backend (default preserves StageC1 MIL behavior)",
+    )
     parser.add_argument("--embedding-abs-mean-weight", type=float, default=1.0)
     parser.add_argument("--objectness-weight", type=float, default=1.0)
     parser.add_argument("--length-log-weight", type=float, default=0.25)
@@ -31,6 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=_parse_supported_statuses,
         default=("processed_with_tracks", "processed_zero_tracks"),
         help="Comma-separated statuses accepted for processed videos",
+    )
+    parser.add_argument("--labelset-json", type=Path, default=None, help="Per-video labelset JSON input")
+    parser.add_argument("--prototype-manifest-json", type=Path, default=None, help="Prototype manifest JSON input")
+    parser.add_argument("--labelset-key", type=str, default="label_set_observed_ids", help="Key used to read per-video labelset IDs")
+    parser.add_argument(
+        "--empty-labelset-policy",
+        choices=("use_all_prototypes", "error"),
+        default="use_all_prototypes",
+        help="Behavior when labelset/prototype intersection is empty",
     )
     parser.add_argument("--no-eager-validate", action="store_true", help="Disable eager Stage C0 shard validation")
     return parser
@@ -53,6 +68,11 @@ def main() -> None:
         output_dir=args.output_dir,
         config=config,
         eager_validate=not args.no_eager_validate,
+        scorer_backend=args.scorer_backend,
+        labelset_json=args.labelset_json,
+        prototype_manifest_json=args.prototype_manifest_json,
+        labelset_key=args.labelset_key,
+        empty_labelset_policy=args.empty_labelset_policy,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 
