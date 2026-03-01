@@ -421,7 +421,7 @@ def test_decoder_coverage_changes_assignment_vs_independent(tmp_path: Path) -> N
     )
     manifest_path = _write_proto_manifest(
         tmp_path,
-        prototypes=np.asarray([[1.0, 0.0], [0.9, 0.4358899]], dtype=np.float32),
+        prototypes=np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32),
         labels=[{"label_id": 100, "row_index": 0}, {"label_id": 200, "row_index": 1}],
     )
     labelset_path = _write_labelset(tmp_path, {"videos": [{"video_id": "vid_a", "label_set_observed_ids": [100, 200]}]})
