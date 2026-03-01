@@ -103,6 +103,8 @@ def test_stagec1_mil_nominal_order_and_finiteness(tmp_path: Path) -> None:
     assert emitted_keys == _expected_stagec0_track_order(view)
     assert len(set(emitted_keys)) == len(emitted_keys)
     assert all(np.isfinite(r.score) for r in result.track_scores)
+    assert result.run_summary["ordering_identity_checks"]["key_order_matches_stagec0"] is True
+    assert result.run_summary["ordering_identity_checks"]["unique_emitted_key_count"] == len(emitted_keys)
 
 
 def test_stagec1_mil_determinism_exact_match(tmp_path: Path) -> None:
@@ -115,6 +117,34 @@ def test_stagec1_mil_determinism_exact_match(tmp_path: Path) -> None:
     assert a_rows == b_rows
     assert a.per_video_summary == b.per_video_summary
     assert a.run_summary == b.run_summary
+
+
+def test_stagec1_mil_run_summary_diagnostics_fields(tmp_path: Path) -> None:
+    view = load_stageb_export_split_v1(_build_export(tmp_path))
+    result = compute_stagec1_mil_baseline_scores(view)
+    run_summary = result.run_summary
+
+    assert run_summary["num_videos_total"] == 4
+    assert run_summary["num_videos_processed_with_tracks"] == 2
+    assert run_summary["num_videos_scored_non_empty"] == 2
+    assert run_summary["num_tracks_scored"] == 3
+
+    score_dist = run_summary["score_distribution"]
+    assert score_dist["count"] == 3
+    assert score_dist["all_finite"] is True
+    assert np.isfinite(score_dist["min"])
+    assert np.isfinite(score_dist["max"])
+    assert np.isfinite(score_dist["mean"])
+    assert np.isfinite(score_dist["p50"])
+    assert np.isfinite(score_dist["p90"])
+
+    track_count_dist = run_summary["per_video_track_count_distribution"]
+    assert track_count_dist["count"] == 2
+    assert track_count_dist["min"] == 1.0
+    assert track_count_dist["max"] == 2.0
+    assert track_count_dist["mean"] == pytest.approx(1.5)
+    assert track_count_dist["p50"] == pytest.approx(1.5)
+    assert track_count_dist["p90"] == pytest.approx(1.9)
 
 
 def test_stagec1_mil_invalid_config_rejected() -> None:
@@ -155,6 +185,18 @@ def test_stagec1_mil_missing_boundary_field_fails_clear() -> None:
         compute_stagec1_mil_baseline_scores(bad_view)
 
 
+def test_stagec1_mil_processed_with_tracks_requires_non_empty_scores() -> None:
+    empty_tracks_view = SimpleNamespace(
+        split="train",
+        embedding_dim=4,
+        iter_videos=lambda: iter([SimpleNamespace(video_id="vid_a", status="processed_with_tracks")]),
+        iter_tracks=lambda _video_id: iter(()),
+    )
+
+    with pytest.raises(StageC1AttributionError, match="must be non-empty when split contains processed_with_tracks videos"):
+        compute_stagec1_mil_baseline_scores(empty_tracks_view)
+
+
 def test_stagec1_mil_smoke_stagec0_to_artifacts(tmp_path: Path) -> None:
     split_root = _build_export(tmp_path)
     out_dir = tmp_path / "stagec1_out"
@@ -169,6 +211,8 @@ def test_stagec1_mil_smoke_stagec0_to_artifacts(tmp_path: Path) -> None:
     assert run_summary["num_tracks_scored"] == 3
     assert run_summary["split"] == "train"
     assert np.isfinite(run_summary["score_mean"])
+    assert run_summary["score_distribution"]["all_finite"] is True
+    assert run_summary["num_videos_scored_non_empty"] == 2
 
     rows = [json.loads(line) for line in track_scores_path.read_text(encoding="utf-8").strip().splitlines()]
     assert [(r["video_id"], r["track_id"]) for r in rows] == [

@@ -109,6 +109,29 @@ def _compute_track_score(track: StageCTrackRecord, config: StageC1MilConfig) -> 
     return float(score)
 
 
+def _as_stats(values: Sequence[float]) -> Dict[str, Any]:
+    if not values:
+        return {
+            "count": 0,
+            "all_finite": True,
+            "min": None,
+            "max": None,
+            "mean": None,
+            "p50": None,
+            "p90": None,
+        }
+    arr = np.asarray(values, dtype=np.float64)
+    return {
+        "count": int(arr.shape[0]),
+        "all_finite": bool(np.isfinite(arr).all()),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "mean": float(np.mean(arr)),
+        "p50": float(np.quantile(arr, 0.5)),
+        "p90": float(np.quantile(arr, 0.9)),
+    }
+
+
 def compute_stagec1_mil_baseline_scores(
     split_view: Any,
     *,
@@ -121,7 +144,10 @@ def compute_stagec1_mil_baseline_scores(
     seen_keys: set[tuple[str, str | int]] = set()
     expected_track_keys: list[tuple[str, str | int]] = []
 
-    for video in split_view.iter_videos():
+    all_videos = list(split_view.iter_videos())
+    processed_with_tracks_video_ids: list[str] = []
+
+    for video in all_videos:
         _require(hasattr(video, "video_id") and isinstance(video.video_id, str) and video.video_id, "video.video_id", "must be non-empty string")
         _require(hasattr(video, "status"), "video.status", "required field missing")
         status = video.status
@@ -139,6 +165,7 @@ def compute_stagec1_mil_baseline_scores(
         if status != "processed_with_tracks":
             continue
 
+        processed_with_tracks_video_ids.append(video.video_id)
         for track in split_view.iter_tracks(video.video_id):
             metadata = track.metadata
             _require(hasattr(metadata, "track_id"), "track.metadata.track_id", "required field missing")
@@ -182,9 +209,27 @@ def compute_stagec1_mil_baseline_scores(
         "result.track_scores",
         "emitted key order mismatch against Stage C0 traversal order",
     )
+    scored_video_ids = {record.video_id for record in track_scores}
+    _require(
+        not processed_with_tracks_video_ids or bool(track_scores),
+        "result.track_scores",
+        "must be non-empty when split contains processed_with_tracks videos",
+    )
+    missing_scored_video_ids = sorted(set(processed_with_tracks_video_ids) - scored_video_ids)
+    _require(
+        not missing_scored_video_ids,
+        "result.track_scores",
+        f"missing scored tracks for processed_with_tracks videos: {missing_scored_video_ids}",
+    )
 
     per_video_summary = _build_per_video_summary(track_scores, top_k_per_video=config.top_k_per_video)
-    run_summary = _build_run_summary(split_view=split_view, track_scores=track_scores)
+    run_summary = _build_run_summary(
+        split_view=split_view,
+        track_scores=track_scores,
+        all_videos=all_videos,
+        expected_track_keys=expected_track_keys,
+        emitted_keys=emitted_keys,
+    )
 
     return StageC1MilResult(
         track_scores=tuple(track_scores),
@@ -231,17 +276,39 @@ def _build_run_summary(
     *,
     split_view: Any,
     track_scores: Sequence[StageC1TrackScoreRecord],
+    all_videos: Sequence[Any],
+    expected_track_keys: Sequence[tuple[str, str | int]],
+    emitted_keys: Sequence[tuple[str, str | int]],
 ) -> Dict[str, Any]:
     scores = [rec.score for rec in track_scores]
-    all_videos = list(split_view.iter_videos())
+    per_video_track_counts: Dict[str, int] = {}
+    for rec in track_scores:
+        per_video_track_counts[rec.video_id] = per_video_track_counts.get(rec.video_id, 0) + 1
+
+    num_videos_processed_with_tracks = sum(1 for video in all_videos if getattr(video, "status", None) == "processed_with_tracks")
+    num_videos_scored_non_empty = len(per_video_track_counts)
+    track_count_stats = _as_stats(list(per_video_track_counts.values()))
+    score_stats = _as_stats(scores)
+    all_finite_scores = bool(score_stats["all_finite"])
+    _require(all_finite_scores, "result.track_scores", "must contain only finite score values")
     return {
         "split": getattr(split_view, "split", "unknown"),
         "embedding_dim": int(getattr(split_view, "embedding_dim", -1)),
         "num_videos_total": len(all_videos),
+        "num_videos_processed_with_tracks": num_videos_processed_with_tracks,
+        "num_videos_scored_non_empty": num_videos_scored_non_empty,
         "num_tracks_scored": len(track_scores),
-        "score_min": float(min(scores)) if scores else None,
-        "score_max": float(max(scores)) if scores else None,
-        "score_mean": float(sum(scores) / len(scores)) if scores else None,
+        "score_min": score_stats["min"],
+        "score_max": score_stats["max"],
+        "score_mean": score_stats["mean"],
+        "score_distribution": score_stats,
+        "per_video_track_count_distribution": track_count_stats,
+        "ordering_identity_checks": {
+            "expected_key_count": len(expected_track_keys),
+            "emitted_key_count": len(emitted_keys),
+            "unique_emitted_key_count": len(set(emitted_keys)),
+            "key_order_matches_stagec0": list(emitted_keys) == list(expected_track_keys),
+        },
     }
 
 
