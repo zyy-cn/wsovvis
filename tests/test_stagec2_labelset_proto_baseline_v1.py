@@ -56,7 +56,7 @@ def _build_export(tmp_path: Path, *, embedding_dim: int = 4) -> Path:
                 "status": "processed_with_tracks",
                 "tracks": [
                     {
-                        "track_id": "t2",
+                        "track_id": 2,
                         "start_frame_idx": 0,
                         "end_frame_idx": 2,
                         "num_active_frames": 3,
