@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         default="small,medium",
         help="Comma-separated required tiers",
     )
+    p.add_argument(
+        "--determinism-required-tiers",
+        default="small",
+        help="Comma-separated tiers that must include determinism evidence for all required decoders",
+    )
     return p.parse_args()
 
 
@@ -67,6 +72,7 @@ def compute_status(
     determinism: Dict[Tuple[str, str], Dict[str, Any]],
     required_decoders: List[str],
     required_tiers: List[str],
+    determinism_required_tiers: List[str],
 ) -> Tuple[str, List[str]]:
     issues: List[str] = []
     for tier in required_tiers:
@@ -74,35 +80,56 @@ def compute_status(
             key = (tier, decoder, "run_a")
             if key not in metrics:
                 issues.append(f"missing_run_metric:{tier}:{decoder}:run_a")
-    for decoder in required_decoders:
-        dkey = ("small", decoder)
-        if dkey not in determinism:
-            issues.append(f"missing_determinism:small:{decoder}")
-        elif not bool(determinism[dkey].get("cmp_pass", False)):
-            issues.append(f"determinism_fail:small:{decoder}")
+    for tier in determinism_required_tiers:
+        for decoder in required_decoders:
+            dkey = (tier, decoder)
+            if dkey not in determinism:
+                issues.append(f"missing_determinism:{tier}:{decoder}")
+            elif not bool(determinism[dkey].get("cmp_pass", False)):
+                issues.append(f"determinism_fail:{tier}:{decoder}")
     if issues:
         return "PARTIAL", issues
     return "PASS", issues
 
 
-def make_recommendations(status: str, tiers_seen: List[str]) -> Dict[str, Any]:
+def make_recommendations(
+    status: str,
+    tiers_seen: List[str],
+    cohorts: List[Dict[str, Any]],
+) -> Dict[str, Any]:
     insufficient = []
     if "large" not in tiers_seen:
         insufficient.append("large_tier_not_executed")
-    insufficient.append("single_run_source_run18_only")
+    if not any(tier.startswith("cross-run") for tier in tiers_seen):
+        insufficient.append("cross_run_cohort_not_executed")
+
+    run_roots = sorted(
+        {
+            str(entry.get("source_run_root", "")).strip()
+            for entry in cohorts
+            if str(entry.get("source_run_root", "")).strip()
+        }
+    )
+    if run_roots == ["runs/wsovvis_seqformer/18"]:
+        insufficient.append("single_run_source_run18_only")
+    elif len(run_roots) <= 1:
+        insufficient.append("single_run_source_only")
 
     engineering = {
-        "category": "INSUFFICIENT_EVIDENCE",
+        "category": "SUPPORTED_NO_DEFAULT_CHANGE",
         "recommendation": "keep_default_independent",
-        "rationale": (
-            "Required decoders passed small+medium protocol checks, but large-tier and cross-run "
-            "evidence are missing for any default-change decision."
-        ),
+        "rationale": "Comparison evidence supports keeping production default unchanged.",
     }
     if status != "PASS":
         engineering["category"] = "BLOCKED_EVIDENCE"
         engineering["recommendation"] = "keep_default_independent"
         engineering["rationale"] = "Protocol evidence is incomplete or determinism checks failed."
+    elif insufficient:
+        engineering["category"] = "INSUFFICIENT_EVIDENCE"
+        engineering["recommendation"] = "keep_default_independent"
+        engineering["rationale"] = (
+            "Protocol checks passed for configured cohorts, but evidence gaps remain for default-change decisions."
+        )
 
     research = {
         "category": "EXPLORATION",
@@ -200,8 +227,17 @@ def main() -> None:
 
     required_decoders = [s.strip() for s in args.required_decoders.split(",") if s.strip()]
     required_tiers = [s.strip() for s in args.required_tiers.split(",") if s.strip()]
+    determinism_required_tiers = [
+        s.strip() for s in args.determinism_required_tiers.split(",") if s.strip()
+    ]
 
-    status, issues = compute_status(metric_map, determinism_map, required_decoders, required_tiers)
+    status, issues = compute_status(
+        metric_map,
+        determinism_map,
+        required_decoders,
+        required_tiers,
+        determinism_required_tiers,
+    )
 
     run_metrics_sorted = sorted(
         metric_map.values(),
@@ -213,7 +249,7 @@ def main() -> None:
     )
 
     tiers_seen = sorted({str(c.get("tier")) for c in cohorts if c.get("tier")})
-    recommendations = make_recommendations(status, tiers_seen)
+    recommendations = make_recommendations(status, tiers_seen, cohorts)
 
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     remote_head = str(remote_meta.get("remote_head", ""))
@@ -238,6 +274,7 @@ def main() -> None:
         "cohorts": cohorts,
         "required_decoders": required_decoders,
         "required_tiers": required_tiers,
+        "determinism_required_tiers": determinism_required_tiers,
         "command_log": run_commands,
         "issues": issues,
     }
