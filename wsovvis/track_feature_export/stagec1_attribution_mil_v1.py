@@ -12,7 +12,7 @@ from .stagec_loader_v1 import StageCTrackRecord, load_stageb_export_split_v1
 from .v1_core import ALL_STATUSES, PROCESSED_STATUSES, ExportContractError
 
 SCORER_BACKENDS = {"mil_v1", "labelset_proto_v1"}
-DECODER_BACKENDS = {"independent", "coverage_greedy_v1"}
+DECODER_BACKENDS = {"independent", "coverage_greedy_v1", "otlite_v1"}
 EMPTY_LABELSET_POLICIES = {"use_all_prototypes", "error"}
 PROTOTYPE_SCHEMA_NAME_V1 = "wsovvis.stagec.label_prototypes.v1"
 
@@ -36,6 +36,10 @@ class StageC1DecoderConfig:
     fg_score_min: float = -1.0
     bg_score_threshold: float | None = None
     bg_min_margin: float | None = None
+    otlite_temperature: float = 0.10
+    otlite_iters: int = 8
+    otlite_eps: float = 1e-12
+    otlite_ot_prob_min: float | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,7 @@ class StageC1TrackScoreRecord:
     decoder_score: float | None = None
     decoder_margin: float | None = None
     decoder_bg_reason: str | None = None
+    decoder_ot_prob: float | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +150,23 @@ def _validate_decoder_config(config: StageC1DecoderConfig) -> None:
         "decoder.bg_min_margin",
         "must be numeric or null",
     )
+    _require(_is_number(config.otlite_temperature), "decoder.otlite_temperature", "must be numeric")
+    _require(float(config.otlite_temperature) > 0.0, "decoder.otlite_temperature", "must be > 0")
+    _require(isinstance(config.otlite_iters, int), "decoder.otlite_iters", "must be integer >= 1")
+    _require(int(config.otlite_iters) >= 1, "decoder.otlite_iters", "must be integer >= 1")
+    _require(_is_number(config.otlite_eps), "decoder.otlite_eps", "must be numeric")
+    _require(float(config.otlite_eps) > 0.0, "decoder.otlite_eps", "must be > 0")
+    _require(
+        config.otlite_ot_prob_min is None or _is_number(config.otlite_ot_prob_min),
+        "decoder.otlite_ot_prob_min",
+        "must be numeric or null",
+    )
+    if config.otlite_ot_prob_min is not None:
+        _require(
+            0.0 <= float(config.otlite_ot_prob_min) <= 1.0,
+            "decoder.otlite_ot_prob_min",
+            "must be in [0,1] when provided",
+        )
 
 
 def _compute_track_score(track: StageCTrackRecord, config: StageC1MilConfig) -> float:
@@ -590,6 +612,7 @@ def _decode_video_assignments(
                 "source": "independent",
                 "score": float(scorer_top1_scores[idx]),
                 "margin": float(scorer_margins[idx]),
+                "ot_prob": None,
             }
         )
 
@@ -599,7 +622,10 @@ def _decode_video_assignments(
     coverage_skip_bg_gate_count = 0
     fill_fg_count = 0
     fill_bg_count = 0
-    bg_reason_counts: dict[str, int] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0}
+    bg_reason_counts: dict[str, int] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0, "ot_prob_min": 0}
+    otlite_col_mass_l1_error: float | None = None
+    otlite_row_mass_l1_error: float | None = None
+    otlite_bg_ot_prob_count = 0
     if decoder_config.backend == "coverage_greedy_v1":
         assigned = [False] * num_tracks
         assignments = [{} for _ in range(num_tracks)]
@@ -642,6 +668,7 @@ def _decode_video_assignments(
                 "score": assignment_score,
                 "margin": float(margin),
                 "bg_reason": None,
+                "ot_prob": None,
             }
             assigned[best_track_idx] = True
             coverage_hit_count += 1
@@ -668,6 +695,7 @@ def _decode_video_assignments(
                     "score": top1_score,
                     "margin": margin,
                     "bg_reason": bg_reason,
+                    "ot_prob": None,
                 }
             else:
                 fill_fg_count += 1
@@ -678,14 +706,108 @@ def _decode_video_assignments(
                     "score": top1_score,
                     "margin": margin,
                     "bg_reason": None,
+                    "ot_prob": None,
                 }
+    elif decoder_config.backend == "otlite_v1":
+        num_labels = len(candidate_keys)
+        assignments = [{} for _ in range(num_tracks)]
+        if num_tracks > 0 and num_labels > 0:
+            score64 = score_matrix.astype(np.float64, copy=False)
+            row_max = np.max(score64, axis=1, keepdims=True)
+            stable_score = score64 - row_max
+            kernel = np.exp(stable_score / float(decoder_config.otlite_temperature))
+            kernel = np.maximum(kernel, float(decoder_config.otlite_eps))
+            plan = kernel.astype(np.float64, copy=True)
+            target_col_mass = float(num_tracks) / float(num_labels)
+
+            for _ in range(int(decoder_config.otlite_iters)):
+                row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(decoder_config.otlite_eps))
+                plan = plan / row_sums
+                col_sums = np.maximum(np.sum(plan, axis=0, keepdims=True), float(decoder_config.otlite_eps))
+                plan = plan * (target_col_mass / col_sums)
+
+            row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(decoder_config.otlite_eps))
+            plan = plan / row_sums
+            otlite_row_mass_l1_error = float(np.sum(np.abs(np.sum(plan, axis=1) - 1.0)))
+            otlite_col_mass_l1_error = float(np.sum(np.abs(np.sum(plan, axis=0) - target_col_mass)))
+
+            for track_idx in range(num_tracks):
+                best_label_idx = 0
+                best_prob = float(plan[track_idx, 0])
+                for label_idx in range(1, num_labels):
+                    candidate_prob = float(plan[track_idx, label_idx])
+                    if candidate_prob > best_prob:
+                        best_label_idx = label_idx
+                        best_prob = candidate_prob
+                    elif candidate_prob == best_prob:
+                        tie_break_count += 1
+                        if candidate_keys[label_idx] < candidate_keys[best_label_idx]:
+                            best_label_idx = label_idx
+                            best_prob = candidate_prob
+
+                chosen_key = candidate_keys[best_label_idx]
+                assignment_score = float(score_matrix[track_idx, best_label_idx])
+                margin = float(scorer_margins[track_idx])
+                bg_reason: str | None = None
+                if assignment_score < float(decoder_config.fg_score_min):
+                    bg_reason = "fg_score_min"
+                else:
+                    bg_reason = _bg_reason(
+                        score_for_gate=assignment_score,
+                        margin=margin,
+                        decoder_config=decoder_config,
+                    )
+                    if (
+                        bg_reason is None
+                        and decoder_config.otlite_ot_prob_min is not None
+                        and best_prob < float(decoder_config.otlite_ot_prob_min)
+                    ):
+                        bg_reason = "ot_prob_min"
+
+                if bg_reason is None:
+                    fill_fg_count += 1
+                    assignments[track_idx] = {
+                        "label_key": chosen_key,
+                        "assigned_bg": False,
+                        "source": "otlite",
+                        "score": assignment_score,
+                        "margin": margin,
+                        "bg_reason": None,
+                        "ot_prob": best_prob,
+                    }
+                else:
+                    fill_bg_count += 1
+                    bg_reason_counts[str(bg_reason)] += 1
+                    if bg_reason == "ot_prob_min":
+                        otlite_bg_ot_prob_count += 1
+                    assignments[track_idx] = {
+                        "label_key": None,
+                        "assigned_bg": True,
+                        "source": "otlite_bg",
+                        "score": assignment_score,
+                        "margin": margin,
+                        "bg_reason": bg_reason,
+                        "ot_prob": best_prob,
+                    }
+
+            coverage_hit_count = len(
+                {
+                    row["label_key"]
+                    for row in assignments
+                    if not bool(row.get("assigned_bg", False)) and row.get("label_key") is not None
+                }
+            )
 
     for row in assignments:
         row.setdefault("bg_reason", None)
+        row.setdefault("ot_prob", None)
     num_bg = sum(1 for row in assignments if bool(row.get("assigned_bg", False)))
     num_fg = num_tracks - num_bg
     coverage_target_count = len(candidate_keys)
     coverage_ratio = float(coverage_hit_count / coverage_target_count) if coverage_target_count > 0 else None
+    policy_version = "coverage_greedy_v1.r1b"
+    if decoder_config.backend == "otlite_v1":
+        policy_version = "otlite_v1.r2a"
     video_diag = {
         "decoder_backend": decoder_config.backend,
         "decoder_num_tracks_fg": num_fg,
@@ -699,8 +821,12 @@ def _decode_video_assignments(
         "decoder_fill_fg_count": fill_fg_count,
         "decoder_fill_bg_count": fill_bg_count,
         "decoder_bg_reason_counts": bg_reason_counts,
-        "decoder_policy_version": "coverage_greedy_v1.r1b",
+        "decoder_policy_version": policy_version,
     }
+    if decoder_config.backend == "otlite_v1":
+        video_diag["decoder_otlite_col_mass_l1_error"] = otlite_col_mass_l1_error
+        video_diag["decoder_otlite_row_mass_l1_error"] = otlite_row_mass_l1_error
+        video_diag["decoder_otlite_bg_ot_prob_count"] = int(otlite_bg_ot_prob_count)
     return assignments, video_diag
 
 
@@ -832,6 +958,7 @@ def compute_stagec1_labelset_proto_baseline_scores(
                     decoder_score=float(decoded["score"]),
                     decoder_margin=float(decoded["margin"]),
                     decoder_bg_reason=str(decoded["bg_reason"]) if decoded["bg_reason"] is not None else None,
+                    decoder_ot_prob=float(decoded["ot_prob"]) if decoded["ot_prob"] is not None else None,
                 )
             )
 
@@ -883,13 +1010,29 @@ def compute_stagec1_labelset_proto_baseline_scores(
     )
     decoder_fill_fg_total = int(sum(int(diag["decoder_fill_fg_count"]) for diag in decoder_diag_by_video.values()))
     decoder_fill_bg_total = int(sum(int(diag["decoder_fill_bg_count"]) for diag in decoder_diag_by_video.values()))
-    decoder_bg_reason_counts: dict[str, int] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0}
+    decoder_bg_reason_counts: dict[str, int] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0, "ot_prob_min": 0}
     for diag in decoder_diag_by_video.values():
         reason_counts = diag.get("decoder_bg_reason_counts")
         if isinstance(reason_counts, dict):
-            for key in ("score_threshold", "min_margin", "fg_score_min"):
+            for key in ("score_threshold", "min_margin", "fg_score_min", "ot_prob_min"):
                 decoder_bg_reason_counts[key] += int(reason_counts.get(key, 0))
     decoder_coverage_ratio = float(decoder_coverage_hit / decoder_coverage_target) if decoder_coverage_target > 0 else None
+    otlite_col_l1_values: list[float] = []
+    otlite_row_l1_values: list[float] = []
+    otlite_bg_ot_prob_count = 0
+    if decoder_config.backend == "otlite_v1":
+        for diag in decoder_diag_by_video.values():
+            col_err = diag.get("decoder_otlite_col_mass_l1_error")
+            row_err = diag.get("decoder_otlite_row_mass_l1_error")
+            if isinstance(col_err, (int, float)):
+                otlite_col_l1_values.append(float(col_err))
+            if isinstance(row_err, (int, float)):
+                otlite_row_l1_values.append(float(row_err))
+            otlite_bg_ot_prob_count += int(diag.get("decoder_otlite_bg_ot_prob_count", 0))
+
+    policy_version = "coverage_greedy_v1.r1b"
+    if decoder_config.backend == "otlite_v1":
+        policy_version = "otlite_v1.r2a"
 
     run_summary = _build_run_summary(
         split_view=split_view,
@@ -932,10 +1075,24 @@ def compute_stagec1_labelset_proto_baseline_scores(
                 "fg_score_min": float(decoder_config.fg_score_min),
                 "bg_score_threshold": decoder_config.bg_score_threshold,
                 "bg_min_margin": decoder_config.bg_min_margin,
-                "policy_version": "coverage_greedy_v1.r1b",
+                "policy_version": policy_version,
             },
         },
     )
+    if decoder_config.backend == "otlite_v1":
+        run_summary["decoder_summary"]["otlite_temperature"] = float(decoder_config.otlite_temperature)
+        run_summary["decoder_summary"]["otlite_iters"] = int(decoder_config.otlite_iters)
+        run_summary["decoder_summary"]["otlite_eps"] = float(decoder_config.otlite_eps)
+        run_summary["decoder_summary"]["otlite_ot_prob_min"] = decoder_config.otlite_ot_prob_min
+        run_summary["decoder_summary"]["otlite_col_mass_l1_error_mean"] = (
+            float(np.mean(np.asarray(otlite_col_l1_values, dtype=np.float64))) if otlite_col_l1_values else None
+        )
+        run_summary["decoder_summary"]["otlite_col_mass_l1_error_max"] = max(otlite_col_l1_values) if otlite_col_l1_values else None
+        run_summary["decoder_summary"]["otlite_row_mass_l1_error_mean"] = (
+            float(np.mean(np.asarray(otlite_row_l1_values, dtype=np.float64))) if otlite_row_l1_values else None
+        )
+        run_summary["decoder_summary"]["otlite_row_mass_l1_error_max"] = max(otlite_row_l1_values) if otlite_row_l1_values else None
+        run_summary["decoder_summary"]["otlite_bg_ot_prob_count"] = int(otlite_bg_ot_prob_count)
 
     return StageC1MilResult(
         track_scores=tuple(track_scores),
@@ -1066,6 +1223,8 @@ def write_stagec1_mil_artifacts(result: StageC1MilResult, output_dir: Path) -> D
                 row["decoder_margin"] = float(record.decoder_margin)
             if record.decoder_bg_reason is not None:
                 row["decoder_bg_reason"] = record.decoder_bg_reason
+            if record.decoder_ot_prob is not None:
+                row["decoder_ot_prob"] = float(record.decoder_ot_prob)
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
     per_video_summary_path = output_dir / "per_video_summary.json"
@@ -1092,6 +1251,10 @@ def run_stagec1_mil_baseline_offline(
     decoder_fg_score_min: float = -1.0,
     decoder_bg_score_threshold: float | None = None,
     decoder_bg_min_margin: float | None = None,
+    decoder_otlite_temperature: float = 0.10,
+    decoder_otlite_iters: int = 8,
+    decoder_otlite_eps: float = 1e-12,
+    decoder_otlite_ot_prob_min: float | None = None,
     labelset_json: Path | None = None,
     prototype_manifest_json: Path | None = None,
     labelset_key: str = "label_set_observed_ids",
@@ -1103,17 +1266,22 @@ def run_stagec1_mil_baseline_offline(
         fg_score_min=decoder_fg_score_min,
         bg_score_threshold=decoder_bg_score_threshold,
         bg_min_margin=decoder_bg_min_margin,
+        otlite_temperature=decoder_otlite_temperature,
+        otlite_iters=decoder_otlite_iters,
+        otlite_eps=decoder_otlite_eps,
+        otlite_ot_prob_min=decoder_otlite_ot_prob_min,
     )
     _validate_decoder_config(decoder_config)
-
-    split_view = load_stageb_export_split_v1(split_root=split_root, eager_validate=eager_validate)
-
     if scorer_backend == "mil_v1":
         _require(
             decoder_config.backend == "independent",
             "decoder_backend",
             "must be 'independent' when scorer_backend='mil_v1'",
         )
+
+    split_view = load_stageb_export_split_v1(split_root=split_root, eager_validate=eager_validate)
+
+    if scorer_backend == "mil_v1":
         result = compute_stagec1_mil_baseline_scores(split_view, config=config)
         run_summary = dict(result.run_summary)
         run_summary["decoder_backend"] = decoder_config.backend
@@ -1128,7 +1296,7 @@ def run_stagec1_mil_baseline_offline(
             "coverage_skip_bg_gate_count": 0,
             "fill_fg_count": 0,
             "fill_bg_count": 0,
-            "bg_reason_counts": {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0},
+            "bg_reason_counts": {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0, "ot_prob_min": 0},
             "fg_score_min": float(decoder_config.fg_score_min),
             "bg_score_threshold": decoder_config.bg_score_threshold,
             "bg_min_margin": decoder_config.bg_min_margin,
@@ -1148,7 +1316,7 @@ def run_stagec1_mil_baseline_offline(
             row_copy["decoder_coverage_skip_bg_gate_count"] = 0
             row_copy["decoder_fill_fg_count"] = 0
             row_copy["decoder_fill_bg_count"] = 0
-            row_copy["decoder_bg_reason_counts"] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0}
+            row_copy["decoder_bg_reason_counts"] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0, "ot_prob_min": 0}
             row_copy["decoder_policy_version"] = "coverage_greedy_v1.r1b"
             per_video_summary.append(row_copy)
         result = StageC1MilResult(

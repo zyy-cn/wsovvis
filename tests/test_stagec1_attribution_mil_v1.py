@@ -237,6 +237,10 @@ def test_stagec1_cli_decoder_backend_parsing_and_invalid_value() -> None:
     args = parser.parse_args(["--split-root", "/tmp/s", "--output-dir", "/tmp/o"])
     assert args.decoder_backend == "independent"
     assert args.decoder_fg_score_min == -1.0
+    assert args.decoder_otlite_temperature == pytest.approx(0.10)
+    assert args.decoder_otlite_iters == 8
+    assert args.decoder_otlite_eps == pytest.approx(1e-12)
+    assert args.decoder_otlite_ot_prob_min is None
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--split-root", "/tmp/s", "--output-dir", "/tmp/o", "--decoder-backend", "bad_backend"])

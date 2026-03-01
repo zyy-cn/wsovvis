@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--decoder-backend",
-        choices=("independent", "coverage_greedy_v1"),
+        choices=("independent", "coverage_greedy_v1", "otlite_v1"),
         default="independent",
         help="Decoder backend applied after scorer output (default preserves independent behavior)",
     )
@@ -46,6 +46,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="If set, assign decoder background when top1-top2 margin is below this threshold",
+    )
+    parser.add_argument(
+        "--decoder-otlite-temperature",
+        type=float,
+        default=0.10,
+        help="OT-lite temperature (>0); lower values make assignments sharper",
+    )
+    parser.add_argument(
+        "--decoder-otlite-iters",
+        type=int,
+        default=8,
+        help="OT-lite fixed row/column normalization iteration count (>=1)",
+    )
+    parser.add_argument(
+        "--decoder-otlite-eps",
+        type=float,
+        default=1e-12,
+        help="OT-lite numerical epsilon (>0)",
+    )
+    parser.add_argument(
+        "--decoder-otlite-ot-prob-min",
+        type=float,
+        default=None,
+        help="If set, OT-lite assigns BG when selected OT probability is below this threshold",
     )
     parser.add_argument("--embedding-abs-mean-weight", type=float, default=1.0)
     parser.add_argument("--objectness-weight", type=float, default=1.0)
@@ -92,6 +116,10 @@ def main() -> None:
         decoder_fg_score_min=args.decoder_fg_score_min,
         decoder_bg_score_threshold=args.decoder_bg_score_threshold,
         decoder_bg_min_margin=args.decoder_bg_min_margin,
+        decoder_otlite_temperature=args.decoder_otlite_temperature,
+        decoder_otlite_iters=args.decoder_otlite_iters,
+        decoder_otlite_eps=args.decoder_otlite_eps,
+        decoder_otlite_ot_prob_min=args.decoder_otlite_ot_prob_min,
         labelset_json=args.labelset_json,
         prototype_manifest_json=args.prototype_manifest_json,
         labelset_key=args.labelset_key,

@@ -515,6 +515,13 @@ def test_decoder_backend_invalid_or_incompatible_rejected(tmp_path: Path) -> Non
             scorer_backend="mil_v1",
             decoder_backend="coverage_greedy_v1",
         )
+    with pytest.raises(StageC1AttributionError, match="must be 'independent' when scorer_backend='mil_v1'"):
+        run_stagec1_mil_baseline_offline(
+            split_root=split_root,
+            output_dir=tmp_path / "incompatible_backend_otlite",
+            scorer_backend="mil_v1",
+            decoder_backend="otlite_v1",
+        )
 
 
 def test_decoder_coverage_hit_miss_counts_when_labels_exceed_tracks(tmp_path: Path) -> None:
