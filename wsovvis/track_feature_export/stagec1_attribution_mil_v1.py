@@ -12,6 +12,7 @@ from .stagec_loader_v1 import StageCTrackRecord, load_stageb_export_split_v1
 from .v1_core import ALL_STATUSES, PROCESSED_STATUSES, ExportContractError
 
 SCORER_BACKENDS = {"mil_v1", "labelset_proto_v1"}
+DECODER_BACKENDS = {"independent", "coverage_greedy_v1"}
 EMPTY_LABELSET_POLICIES = {"use_all_prototypes", "error"}
 PROTOTYPE_SCHEMA_NAME_V1 = "wsovvis.stagec.label_prototypes.v1"
 
@@ -30,6 +31,14 @@ class StageC1MilConfig:
 
 
 @dataclass(frozen=True)
+class StageC1DecoderConfig:
+    backend: str = "independent"
+    fg_score_min: float = -1.0
+    bg_score_threshold: float | None = None
+    bg_min_margin: float | None = None
+
+
+@dataclass(frozen=True)
 class StageC1TrackScoreRecord:
     video_id: str
     track_id: str | int
@@ -38,6 +47,11 @@ class StageC1TrackScoreRecord:
     score: float
     predicted_label_id: str | int | None = None
     used_fallback_label_pool: bool = False
+    decoder_predicted_label_id: str | int | None = None
+    decoder_assigned_bg: bool | None = None
+    decoder_assignment_source: str | None = None
+    decoder_score: float | None = None
+    decoder_margin: float | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +128,21 @@ def _validate_config(config: StageC1MilConfig) -> None:
         not unsupported_for_scoring,
         "config.supported_video_statuses",
         f"contains non-processed statuses unsupported by MIL scoring: {sorted(unsupported_for_scoring)}",
+    )
+
+
+def _validate_decoder_config(config: StageC1DecoderConfig) -> None:
+    _require(config.backend in DECODER_BACKENDS, "decoder.backend", f"must be one of {sorted(DECODER_BACKENDS)}")
+    _require(_is_number(config.fg_score_min), "decoder.fg_score_min", "must be numeric")
+    _require(
+        config.bg_score_threshold is None or _is_number(config.bg_score_threshold),
+        "decoder.bg_score_threshold",
+        "must be numeric or null",
+    )
+    _require(
+        config.bg_min_margin is None or _is_number(config.bg_min_margin),
+        "decoder.bg_min_margin",
+        "must be numeric or null",
     )
 
 
@@ -460,13 +489,13 @@ def load_stagec_labelset_lookup(labelset_json: Path, *, labelset_key: str) -> Di
     return out
 
 
-def _compute_proto_track_score(
+def _compute_proto_track_score_vector(
     *,
     embedding: np.ndarray,
     candidate_keys: Sequence[tuple[int, int | str]],
     inventory: StageCLabelPrototypeInventory,
     normalized_prototypes: np.ndarray,
-) -> tuple[float, tuple[int, int | str]]:
+) -> np.ndarray:
     _require(embedding.ndim == 1, "track.embedding", "must be rank-1")
     _require(np.isfinite(embedding).all(), "track.embedding", "must contain only finite values")
     _require(embedding.shape[0] == inventory.embedding_dim, "track.embedding", "embedding dim mismatch with prototype inventory")
@@ -480,17 +509,166 @@ def _compute_proto_track_score(
         rows = [inventory.row_index_by_key[key] for key in candidate_keys]
         scores = normalized_prototypes[rows, :].dot(emb_unit)
 
-    best_score = -float("inf")
-    best_key: tuple[int, int | str] | None = None
-    for idx, key in enumerate(candidate_keys):
-        score = float(scores[idx])
-        if score > best_score or (score == best_score and (best_key is None or key < best_key)):
-            best_score = score
-            best_key = key
+    _require(len(candidate_keys) > 0, "candidate_labels", "must be non-empty")
+    _require(np.isfinite(scores).all(), "track.score_vector", "must contain only finite values")
+    return np.asarray(scores, dtype=np.float64)
 
-    _require(best_key is not None, "candidate_labels", "must be non-empty")
-    _require(math.isfinite(best_score), "track.score", "must be finite")
-    return best_score, best_key
+
+def _best_label_with_margin(
+    *,
+    score_vector: np.ndarray,
+    candidate_keys: Sequence[tuple[int, int | str]],
+) -> tuple[tuple[int, int | str], float, float, float]:
+    _require(score_vector.ndim == 1, "track.score_vector", "must be rank-1")
+    _require(len(candidate_keys) == int(score_vector.shape[0]), "candidate_labels", "must align with score_vector length")
+    _require(len(candidate_keys) > 0, "candidate_labels", "must be non-empty")
+
+    best_idx = 0
+    best_score = float(score_vector[0])
+    for idx in range(1, score_vector.shape[0]):
+        score = float(score_vector[idx])
+        if score > best_score or (score == best_score and candidate_keys[idx] < candidate_keys[best_idx]):
+            best_idx = idx
+            best_score = score
+
+    second_best = -float("inf")
+    for idx in range(score_vector.shape[0]):
+        if idx == best_idx:
+            continue
+        score = float(score_vector[idx])
+        if score > second_best:
+            second_best = score
+
+    if math.isfinite(second_best):
+        margin = float(best_score - second_best)
+    else:
+        margin = float("inf")
+    return candidate_keys[best_idx], float(best_score), float(second_best), margin
+
+
+def _track_tiebreak_key(track_id: str | int, row_index: int) -> tuple[int, str]:
+    return (int(row_index), _canonical_label_key_text(track_id))
+
+
+def _should_assign_bg(*, top1_score: float, margin: float, decoder_config: StageC1DecoderConfig) -> bool:
+    if decoder_config.bg_score_threshold is not None and top1_score < float(decoder_config.bg_score_threshold):
+        return True
+    if decoder_config.bg_min_margin is not None and math.isfinite(margin) and margin < float(decoder_config.bg_min_margin):
+        return True
+    return False
+
+
+def _decode_video_assignments(
+    *,
+    track_ids: Sequence[str | int],
+    row_indices: Sequence[int],
+    candidate_keys: Sequence[tuple[int, int | str]],
+    score_matrix: np.ndarray,
+    scorer_top1_keys: Sequence[tuple[int, int | str]],
+    scorer_top1_scores: Sequence[float],
+    scorer_margins: Sequence[float],
+    decoder_config: StageC1DecoderConfig,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    num_tracks = len(track_ids)
+    _require(score_matrix.shape == (num_tracks, len(candidate_keys)), "decoder.score_matrix", "shape mismatch")
+
+    assignments: list[dict[str, Any]] = []
+    for idx in range(num_tracks):
+        assignments.append(
+            {
+                "label_key": scorer_top1_keys[idx],
+                "assigned_bg": False,
+                "source": "independent",
+                "score": float(scorer_top1_scores[idx]),
+                "margin": float(scorer_margins[idx]),
+            }
+        )
+
+    coverage_hit_count = 0
+    tie_break_count = 0
+    if decoder_config.backend == "coverage_greedy_v1":
+        assigned = [False] * num_tracks
+        assignments = [{} for _ in range(num_tracks)]
+
+        for label_index, label_key in enumerate(candidate_keys):
+            best_track_idx: int | None = None
+            best_score = -float("inf")
+            best_tie_key = (10**18, "~")
+            for track_idx in range(num_tracks):
+                if assigned[track_idx]:
+                    continue
+                score = float(score_matrix[track_idx, label_index])
+                tie_key = _track_tiebreak_key(track_ids[track_idx], row_indices[track_idx])
+                if score > best_score:
+                    best_track_idx = track_idx
+                    best_score = score
+                    best_tie_key = tie_key
+                elif score == best_score:
+                    tie_break_count += 1
+                    if tie_key < best_tie_key:
+                        best_track_idx = track_idx
+                        best_tie_key = tie_key
+
+            if best_track_idx is None:
+                continue
+
+            top1_score = float(scorer_top1_scores[best_track_idx])
+            margin = float(scorer_margins[best_track_idx])
+            if top1_score < float(decoder_config.fg_score_min):
+                continue
+            if _should_assign_bg(top1_score=top1_score, margin=margin, decoder_config=decoder_config):
+                continue
+
+            assignments[best_track_idx] = {
+                "label_key": label_key,
+                "assigned_bg": False,
+                "source": "coverage",
+                "score": float(score_matrix[best_track_idx, label_index]),
+                "margin": float(margin),
+            }
+            assigned[best_track_idx] = True
+            coverage_hit_count += 1
+
+        for track_idx in range(num_tracks):
+            if assigned[track_idx]:
+                continue
+            top1_key = scorer_top1_keys[track_idx]
+            top1_score = float(scorer_top1_scores[track_idx])
+            margin = float(scorer_margins[track_idx])
+            assign_bg = top1_score < float(decoder_config.fg_score_min) or _should_assign_bg(
+                top1_score=top1_score, margin=margin, decoder_config=decoder_config
+            )
+            if assign_bg:
+                assignments[track_idx] = {
+                    "label_key": None,
+                    "assigned_bg": True,
+                    "source": "fill_bg",
+                    "score": top1_score,
+                    "margin": margin,
+                }
+            else:
+                assignments[track_idx] = {
+                    "label_key": top1_key,
+                    "assigned_bg": False,
+                    "source": "fill",
+                    "score": top1_score,
+                    "margin": margin,
+                }
+
+    num_bg = sum(1 for row in assignments if bool(row.get("assigned_bg", False)))
+    num_fg = num_tracks - num_bg
+    coverage_target_count = len(candidate_keys)
+    coverage_ratio = float(coverage_hit_count / coverage_target_count) if coverage_target_count > 0 else None
+    video_diag = {
+        "decoder_backend": decoder_config.backend,
+        "decoder_num_tracks_fg": num_fg,
+        "decoder_num_tracks_bg": num_bg,
+        "decoder_coverage_target_count": coverage_target_count,
+        "decoder_coverage_hit_count": coverage_hit_count,
+        "decoder_coverage_ratio": coverage_ratio,
+        "decoder_tie_break_count": tie_break_count,
+    }
+    return assignments, video_diag
 
 
 def compute_stagec1_labelset_proto_baseline_scores(
@@ -500,9 +678,12 @@ def compute_stagec1_labelset_proto_baseline_scores(
     labelset_lookup: Mapping[str, Sequence[tuple[int, int | str]]],
     config: StageC1MilConfig | None = None,
     empty_labelset_policy: str = "use_all_prototypes",
+    decoder_config: StageC1DecoderConfig | None = None,
 ) -> StageC1MilResult:
     config = config or StageC1MilConfig()
+    decoder_config = decoder_config or StageC1DecoderConfig()
     _validate_config(config)
+    _validate_decoder_config(decoder_config)
     _require(empty_labelset_policy in EMPTY_LABELSET_POLICIES, "empty_labelset_policy", f"must be one of {sorted(EMPTY_LABELSET_POLICIES)}")
     _require(
         int(getattr(split_view, "embedding_dim", -1)) == prototype_inventory.embedding_dim,
@@ -526,6 +707,7 @@ def compute_stagec1_labelset_proto_baseline_scores(
     fallback_tracks_total = 0
     labelset_size_by_video: Dict[str, int] = {}
     fallback_track_count_by_video: Dict[str, int] = {}
+    decoder_diag_by_video: Dict[str, Dict[str, Any]] = {}
 
     for video_id in processed_with_tracks_video_ids:
         raw_keys = tuple(labelset_lookup.get(video_id, ()))
@@ -551,32 +733,71 @@ def compute_stagec1_labelset_proto_baseline_scores(
             videos_using_fallback += 1
 
         local_fallback_tracks = 0
+        local_track_ids: list[str | int] = []
+        local_row_indices: list[int] = []
+        local_score_vectors: list[np.ndarray] = []
+        local_scorer_top1_keys: list[tuple[int, int | str]] = []
+        local_scorer_top1_scores: list[float] = []
+        local_scorer_margins: list[float] = []
         for track in split_view.iter_tracks(video_id):
             track_id, row_index = _validate_track_identity(track, video_id)
             key = (video_id, track_id)
             _require(key not in seen_keys, "track.identity", f"duplicate (video_id, track_id) key {key}")
             seen_keys.add(key)
 
-            score, best_label_key = _compute_proto_track_score(
+            score_vector = _compute_proto_track_score_vector(
                 embedding=track.embedding,
                 candidate_keys=candidate_keys,
                 inventory=prototype_inventory,
                 normalized_prototypes=normalized_proto,
+            )
+            best_label_key, best_score, _, best_margin = _best_label_with_margin(
+                score_vector=score_vector,
+                candidate_keys=candidate_keys,
             )
 
             if used_fallback:
                 local_fallback_tracks += 1
                 fallback_tracks_total += 1
 
+            local_track_ids.append(track_id)
+            local_row_indices.append(row_index)
+            local_score_vectors.append(score_vector)
+            local_scorer_top1_keys.append(best_label_key)
+            local_scorer_top1_scores.append(float(best_score))
+            local_scorer_margins.append(float(best_margin))
+
+        score_matrix = np.vstack(local_score_vectors) if local_score_vectors else np.zeros((0, len(candidate_keys)), dtype=np.float64)
+        decoded_assignments, video_decoder_diag = _decode_video_assignments(
+            track_ids=local_track_ids,
+            row_indices=local_row_indices,
+            candidate_keys=candidate_keys,
+            score_matrix=score_matrix,
+            scorer_top1_keys=local_scorer_top1_keys,
+            scorer_top1_scores=local_scorer_top1_scores,
+            scorer_margins=local_scorer_margins,
+            decoder_config=decoder_config,
+        )
+        decoder_diag_by_video[video_id] = video_decoder_diag
+
+        for idx, track_id in enumerate(local_track_ids):
+            decoded = decoded_assignments[idx]
+            decoded_key = decoded["label_key"]
+            decoded_label_id = prototype_inventory.labels_by_key[decoded_key] if decoded_key is not None else None
             track_scores.append(
                 StageC1TrackScoreRecord(
                     video_id=video_id,
                     track_id=track_id,
-                    row_index=row_index,
+                    row_index=local_row_indices[idx],
                     status="processed_with_tracks",
-                    score=score,
-                    predicted_label_id=prototype_inventory.labels_by_key[best_label_key],
+                    score=local_scorer_top1_scores[idx],
+                    predicted_label_id=prototype_inventory.labels_by_key[local_scorer_top1_keys[idx]],
                     used_fallback_label_pool=used_fallback,
+                    decoder_predicted_label_id=decoded_label_id,
+                    decoder_assigned_bg=bool(decoded["assigned_bg"]),
+                    decoder_assignment_source=str(decoded["source"]),
+                    decoder_score=float(decoded["score"]),
+                    decoder_margin=float(decoded["margin"]),
                 )
             )
 
@@ -612,7 +833,15 @@ def compute_stagec1_labelset_proto_baseline_scores(
         labelset_size_by_video=labelset_size_by_video,
         fallback_track_count_by_video=fallback_track_count_by_video,
         top_predicted_labels_by_video=top_pred_labels_by_video,
+        decoder_diag_by_video=decoder_diag_by_video,
     )
+
+    decoder_total_bg = int(sum(int(diag["decoder_num_tracks_bg"]) for diag in decoder_diag_by_video.values()))
+    decoder_total_fg = int(sum(int(diag["decoder_num_tracks_fg"]) for diag in decoder_diag_by_video.values()))
+    decoder_coverage_target = int(sum(int(diag["decoder_coverage_target_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_coverage_hit = int(sum(int(diag["decoder_coverage_hit_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_tie_break_total = int(sum(int(diag["decoder_tie_break_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_coverage_ratio = float(decoder_coverage_hit / decoder_coverage_target) if decoder_coverage_target > 0 else None
 
     run_summary = _build_run_summary(
         split_view=split_view,
@@ -639,6 +868,18 @@ def compute_stagec1_labelset_proto_baseline_scores(
                 "empty_labelset_policy": empty_labelset_policy,
             },
             "label_conditioned_score_distribution": _as_stats([r.score for r in track_scores]),
+            "decoder_backend": decoder_config.backend,
+            "decoder_summary": {
+                "num_tracks_fg": decoder_total_fg,
+                "num_tracks_bg": decoder_total_bg,
+                "coverage_target_count": decoder_coverage_target,
+                "coverage_hit_count": decoder_coverage_hit,
+                "coverage_ratio": decoder_coverage_ratio,
+                "tie_break_count": decoder_tie_break_total,
+                "fg_score_min": float(decoder_config.fg_score_min),
+                "bg_score_threshold": decoder_config.bg_score_threshold,
+                "bg_min_margin": decoder_config.bg_min_margin,
+            },
         },
     )
 
@@ -656,6 +897,7 @@ def _build_per_video_summary(
     labelset_size_by_video: Mapping[str, int] | None = None,
     fallback_track_count_by_video: Mapping[str, int] | None = None,
     top_predicted_labels_by_video: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    decoder_diag_by_video: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[Dict[str, Any]]:
     by_video: Dict[str, list[StageC1TrackScoreRecord]] = {}
     for record in track_scores:
@@ -687,6 +929,8 @@ def _build_per_video_summary(
             row["num_tracks_scored_with_fallback_label_pool"] = int(fallback_track_count_by_video.get(video_id, 0))
         if top_predicted_labels_by_video is not None:
             row["top_predicted_labels"] = list(top_predicted_labels_by_video.get(video_id, ()))
+        if decoder_diag_by_video is not None and video_id in decoder_diag_by_video:
+            row.update(dict(decoder_diag_by_video[video_id]))
         summaries.append(row)
     return summaries
 
@@ -756,6 +1000,16 @@ def write_stagec1_mil_artifacts(result: StageC1MilResult, output_dir: Path) -> D
                 row["predicted_label_id"] = record.predicted_label_id
             if record.used_fallback_label_pool:
                 row["used_fallback_label_pool"] = True
+            if record.decoder_predicted_label_id is not None:
+                row["decoder_predicted_label_id"] = record.decoder_predicted_label_id
+            if record.decoder_assigned_bg is not None:
+                row["decoder_assigned_bg"] = bool(record.decoder_assigned_bg)
+            if record.decoder_assignment_source is not None:
+                row["decoder_assignment_source"] = record.decoder_assignment_source
+            if record.decoder_score is not None:
+                row["decoder_score"] = float(record.decoder_score)
+            if record.decoder_margin is not None:
+                row["decoder_margin"] = float(record.decoder_margin)
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
     per_video_summary_path = output_dir / "per_video_summary.json"
@@ -778,17 +1032,62 @@ def run_stagec1_mil_baseline_offline(
     config: StageC1MilConfig | None = None,
     eager_validate: bool = True,
     scorer_backend: str = "mil_v1",
+    decoder_backend: str = "independent",
+    decoder_fg_score_min: float = -1.0,
+    decoder_bg_score_threshold: float | None = None,
+    decoder_bg_min_margin: float | None = None,
     labelset_json: Path | None = None,
     prototype_manifest_json: Path | None = None,
     labelset_key: str = "label_set_observed_ids",
     empty_labelset_policy: str = "use_all_prototypes",
 ) -> Dict[str, Any]:
     _require(scorer_backend in SCORER_BACKENDS, "scorer_backend", f"must be one of {sorted(SCORER_BACKENDS)}")
+    decoder_config = StageC1DecoderConfig(
+        backend=decoder_backend,
+        fg_score_min=decoder_fg_score_min,
+        bg_score_threshold=decoder_bg_score_threshold,
+        bg_min_margin=decoder_bg_min_margin,
+    )
+    _validate_decoder_config(decoder_config)
 
     split_view = load_stageb_export_split_v1(split_root=split_root, eager_validate=eager_validate)
 
     if scorer_backend == "mil_v1":
+        _require(
+            decoder_config.backend == "independent",
+            "decoder_backend",
+            "must be 'independent' when scorer_backend='mil_v1'",
+        )
         result = compute_stagec1_mil_baseline_scores(split_view, config=config)
+        run_summary = dict(result.run_summary)
+        run_summary["decoder_backend"] = decoder_config.backend
+        run_summary["decoder_summary"] = {
+            "num_tracks_fg": 0,
+            "num_tracks_bg": 0,
+            "coverage_target_count": 0,
+            "coverage_hit_count": 0,
+            "coverage_ratio": None,
+            "tie_break_count": 0,
+            "fg_score_min": float(decoder_config.fg_score_min),
+            "bg_score_threshold": decoder_config.bg_score_threshold,
+            "bg_min_margin": decoder_config.bg_min_margin,
+        }
+        per_video_summary = []
+        for row in result.per_video_summary:
+            row_copy = dict(row)
+            row_copy["decoder_backend"] = decoder_config.backend
+            row_copy["decoder_num_tracks_fg"] = 0
+            row_copy["decoder_num_tracks_bg"] = 0
+            row_copy["decoder_coverage_target_count"] = 0
+            row_copy["decoder_coverage_hit_count"] = 0
+            row_copy["decoder_coverage_ratio"] = None
+            row_copy["decoder_tie_break_count"] = 0
+            per_video_summary.append(row_copy)
+        result = StageC1MilResult(
+            track_scores=result.track_scores,
+            per_video_summary=tuple(per_video_summary),
+            run_summary=run_summary,
+        )
     else:
         _require(labelset_json is not None, "labelset_json", "required when scorer_backend='labelset_proto_v1'")
         _require(
@@ -804,6 +1103,7 @@ def run_stagec1_mil_baseline_offline(
             labelset_lookup=labelset_lookup,
             config=config,
             empty_labelset_policy=empty_labelset_policy,
+            decoder_config=decoder_config,
         )
 
     artifact_paths = write_stagec1_mil_artifacts(result=result, output_dir=output_dir)

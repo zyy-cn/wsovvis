@@ -72,6 +72,34 @@ def _build_export(tmp_path: Path, *, embedding_dim: int = 4) -> Path:
     return out_root
 
 
+def _build_single_video_export(tmp_path: Path, *, tracks: list[dict], embedding_dim: int) -> Path:
+    payload = {
+        "split": "train",
+        "embedding_dim": embedding_dim,
+        "embedding_dtype": "float32",
+        "embedding_pooling": "track_pooled",
+        "embedding_normalization": "none",
+        "producer": {
+            "stage_b_checkpoint_id": "ckpt_001",
+            "stage_b_checkpoint_hash": "sha256:a",
+            "stage_b_config_ref": "configs/stage_b.yaml",
+            "stage_b_config_hash": "sha256:b",
+            "pseudo_tube_manifest_id": "ptube_v1",
+            "pseudo_tube_manifest_hash": "sha256:c",
+            "split": "train",
+            "extraction_settings": {
+                "frame_sampling_rule": "uniform_stride_2",
+                "pooling_rule": "mean_over_active_frames",
+                "min_track_length": 1,
+            },
+        },
+        "videos": [{"video_id": "vid_a", "status": "processed_with_tracks", "tracks": tracks}],
+    }
+    out_root = tmp_path / "single_video_export"
+    build_track_feature_export_v1(payload, out_root)
+    return out_root
+
+
 def _write_proto_manifest(
     tmp_path: Path,
     *,
@@ -286,6 +314,205 @@ def test_proto_backend_deterministic_double_run(tmp_path: Path) -> None:
 
     for name in ("track_scores.jsonl", "per_video_summary.json", "run_summary.json"):
         assert (out_a / name).read_bytes() == (out_b / name).read_bytes()
+
+
+def test_decoder_independent_matches_scorer_predictions(tmp_path: Path) -> None:
+    split_root = _build_export(tmp_path)
+    manifest_path = _write_proto_manifest(
+        tmp_path,
+        prototypes=np.asarray([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=np.float32),
+        labels=[{"label_id": 1, "row_index": 0}, {"label_id": 2, "row_index": 1}],
+    )
+    labelset_path = _write_labelset(
+        tmp_path,
+        {
+            "videos": [
+                {"video_id": "vid_a", "label_set_observed_ids": [1]},
+                {"video_id": "vid_b", "label_set_observed_ids": [2]},
+            ]
+        },
+    )
+    out_dir = tmp_path / "out_independent"
+    run_stagec1_mil_baseline_offline(
+        split_root=split_root,
+        output_dir=out_dir,
+        scorer_backend="labelset_proto_v1",
+        decoder_backend="independent",
+        labelset_json=labelset_path,
+        prototype_manifest_json=manifest_path,
+    )
+    rows = [json.loads(line) for line in (out_dir / "track_scores.jsonl").read_text(encoding="utf-8").strip().splitlines()]
+    assert all(row["predicted_label_id"] == row["decoder_predicted_label_id"] for row in rows)
+    assert all(row["decoder_assigned_bg"] is False for row in rows)
+    summary = json.loads((out_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["decoder_backend"] == "independent"
+
+
+def test_decoder_coverage_greedy_tie_break_is_deterministic(tmp_path: Path) -> None:
+    split_root = _build_single_video_export(
+        tmp_path,
+        embedding_dim=2,
+        tracks=[
+            {
+                "track_id": 1,
+                "start_frame_idx": 0,
+                "end_frame_idx": 2,
+                "num_active_frames": 3,
+                "objectness_score": 0.8,
+                "embedding": [1.0, 0.0],
+            },
+            {
+                "track_id": 2,
+                "start_frame_idx": 3,
+                "end_frame_idx": 5,
+                "num_active_frames": 3,
+                "objectness_score": 0.8,
+                "embedding": [1.0, 0.0],
+            },
+        ],
+    )
+    manifest_path = _write_proto_manifest(
+        tmp_path,
+        prototypes=np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32),
+        labels=[{"label_id": 10, "row_index": 0}, {"label_id": 20, "row_index": 1}],
+    )
+    labelset_path = _write_labelset(tmp_path, {"videos": [{"video_id": "vid_a", "label_set_observed_ids": [10, 20]}]})
+    out_dir = tmp_path / "out_tie"
+
+    run_stagec1_mil_baseline_offline(
+        split_root=split_root,
+        output_dir=out_dir,
+        scorer_backend="labelset_proto_v1",
+        decoder_backend="coverage_greedy_v1",
+        labelset_json=labelset_path,
+        prototype_manifest_json=manifest_path,
+    )
+    rows = [json.loads(line) for line in (out_dir / "track_scores.jsonl").read_text(encoding="utf-8").strip().splitlines()]
+    assert rows[0]["track_id"] == 1
+    assert rows[0]["decoder_assignment_source"] == "coverage"
+    assert rows[0]["decoder_predicted_label_id"] == 10
+    assert rows[1]["track_id"] == 2
+    assert rows[1]["decoder_assignment_source"] == "coverage"
+    assert rows[1]["decoder_predicted_label_id"] == 20
+
+
+def test_decoder_coverage_changes_assignment_vs_independent(tmp_path: Path) -> None:
+    split_root = _build_single_video_export(
+        tmp_path,
+        embedding_dim=2,
+        tracks=[
+            {
+                "track_id": 1,
+                "start_frame_idx": 0,
+                "end_frame_idx": 2,
+                "num_active_frames": 3,
+                "objectness_score": 0.8,
+                "embedding": [1.0, 0.0],
+            },
+            {
+                "track_id": 2,
+                "start_frame_idx": 3,
+                "end_frame_idx": 5,
+                "num_active_frames": 3,
+                "objectness_score": 0.7,
+                "embedding": [0.8, 0.6],
+            },
+        ],
+    )
+    manifest_path = _write_proto_manifest(
+        tmp_path,
+        prototypes=np.asarray([[1.0, 0.0], [0.9, 0.4358899]], dtype=np.float32),
+        labels=[{"label_id": 100, "row_index": 0}, {"label_id": 200, "row_index": 1}],
+    )
+    labelset_path = _write_labelset(tmp_path, {"videos": [{"video_id": "vid_a", "label_set_observed_ids": [100, 200]}]})
+
+    out_ind = tmp_path / "out_ind"
+    out_cov = tmp_path / "out_cov"
+    run_stagec1_mil_baseline_offline(
+        split_root=split_root,
+        output_dir=out_ind,
+        scorer_backend="labelset_proto_v1",
+        decoder_backend="independent",
+        labelset_json=labelset_path,
+        prototype_manifest_json=manifest_path,
+    )
+    run_stagec1_mil_baseline_offline(
+        split_root=split_root,
+        output_dir=out_cov,
+        scorer_backend="labelset_proto_v1",
+        decoder_backend="coverage_greedy_v1",
+        labelset_json=labelset_path,
+        prototype_manifest_json=manifest_path,
+    )
+
+    rows_ind = [json.loads(line) for line in (out_ind / "track_scores.jsonl").read_text(encoding="utf-8").strip().splitlines()]
+    rows_cov = [json.loads(line) for line in (out_cov / "track_scores.jsonl").read_text(encoding="utf-8").strip().splitlines()]
+    assert [r["decoder_predicted_label_id"] for r in rows_ind] == [100, 100]
+    assert [r["decoder_predicted_label_id"] for r in rows_cov] == [100, 200]
+
+
+def test_decoder_additive_serialization_fields_present(tmp_path: Path) -> None:
+    split_root = _build_export(tmp_path)
+    manifest_path = _write_proto_manifest(
+        tmp_path,
+        prototypes=np.asarray([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=np.float32),
+        labels=[{"label_id": 1, "row_index": 0}, {"label_id": 2, "row_index": 1}],
+    )
+    labelset_path = _write_labelset(
+        tmp_path,
+        {
+            "videos": [
+                {"video_id": "vid_a", "label_set_observed_ids": [1, 2]},
+                {"video_id": "vid_b", "label_set_observed_ids": [1, 2]},
+            ]
+        },
+    )
+    out_dir = tmp_path / "out_serialization"
+    run_stagec1_mil_baseline_offline(
+        split_root=split_root,
+        output_dir=out_dir,
+        scorer_backend="labelset_proto_v1",
+        decoder_backend="coverage_greedy_v1",
+        labelset_json=labelset_path,
+        prototype_manifest_json=manifest_path,
+    )
+
+    row = json.loads((out_dir / "track_scores.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert "video_id" in row
+    assert "track_id" in row
+    assert "score" in row
+    assert "predicted_label_id" in row
+    assert "decoder_predicted_label_id" in row
+    assert "decoder_assignment_source" in row
+    assert "decoder_assigned_bg" in row
+
+    per_video = json.loads((out_dir / "per_video_summary.json").read_text(encoding="utf-8"))
+    assert "num_tracks" in per_video[0]
+    assert "decoder_backend" in per_video[0]
+    assert "decoder_coverage_hit_count" in per_video[0]
+
+    run_summary = json.loads((out_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert run_summary["scorer_backend"] == "labelset_proto_v1"
+    assert run_summary["decoder_backend"] == "coverage_greedy_v1"
+    assert "decoder_summary" in run_summary
+
+
+def test_decoder_backend_invalid_or_incompatible_rejected(tmp_path: Path) -> None:
+    split_root = _build_export(tmp_path)
+    with pytest.raises(StageC1AttributionError, match="decoder.backend"):
+        run_stagec1_mil_baseline_offline(
+            split_root=split_root,
+            output_dir=tmp_path / "bad_backend",
+            scorer_backend="mil_v1",
+            decoder_backend="bad_backend",
+        )
+    with pytest.raises(StageC1AttributionError, match="must be 'independent' when scorer_backend='mil_v1'"):
+        run_stagec1_mil_baseline_offline(
+            split_root=split_root,
+            output_dir=tmp_path / "incompatible_backend",
+            scorer_backend="mil_v1",
+            decoder_backend="coverage_greedy_v1",
+        )
 
 
 def test_stagec1_default_backend_matches_explicit_mil(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ from .stagec_loader_v1 import (
 )
 from .stagec1_attribution_mil_v1 import (
     StageC1AttributionError,
+    StageC1DecoderConfig,
     StageCLabelPrototypeInventory,
     StageC1MilConfig,
     StageC1MilResult,
@@ -57,6 +58,7 @@ __all__ = [
     "StageCTrackRecord",
     "StageCVideoRecord",
     "StageC1AttributionError",
+    "StageC1DecoderConfig",
     "StageCLabelPrototypeInventory",
     "StageC1MilConfig",
     "StageC1MilResult",

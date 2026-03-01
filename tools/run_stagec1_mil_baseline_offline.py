@@ -28,6 +28,25 @@ def build_parser() -> argparse.ArgumentParser:
         default="mil_v1",
         help="Scoring backend (default preserves StageC1 MIL behavior)",
     )
+    parser.add_argument(
+        "--decoder-backend",
+        choices=("independent", "coverage_greedy_v1"),
+        default="independent",
+        help="Decoder backend applied after scorer output (default preserves independent behavior)",
+    )
+    parser.add_argument("--decoder-fg-score-min", type=float, default=-1.0, help="Minimum foreground score for decoder assignment")
+    parser.add_argument(
+        "--decoder-bg-score-threshold",
+        type=float,
+        default=None,
+        help="If set, assign decoder background when top foreground score is below this threshold",
+    )
+    parser.add_argument(
+        "--decoder-bg-min-margin",
+        type=float,
+        default=None,
+        help="If set, assign decoder background when top1-top2 margin is below this threshold",
+    )
     parser.add_argument("--embedding-abs-mean-weight", type=float, default=1.0)
     parser.add_argument("--objectness-weight", type=float, default=1.0)
     parser.add_argument("--length-log-weight", type=float, default=0.25)
@@ -69,6 +88,10 @@ def main() -> None:
         config=config,
         eager_validate=not args.no_eager_validate,
         scorer_backend=args.scorer_backend,
+        decoder_backend=args.decoder_backend,
+        decoder_fg_score_min=args.decoder_fg_score_min,
+        decoder_bg_score_threshold=args.decoder_bg_score_threshold,
+        decoder_bg_min_margin=args.decoder_bg_min_margin,
         labelset_json=args.labelset_json,
         prototype_manifest_json=args.prototype_manifest_json,
         labelset_key=args.labelset_key,

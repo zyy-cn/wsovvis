@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tools.run_stagec1_mil_baseline_offline import build_parser
 from wsovvis.track_feature_export import (
     StageC1AttributionError,
     StageC1MilConfig,
@@ -220,3 +221,13 @@ def test_stagec1_mil_smoke_stagec0_to_artifacts(tmp_path: Path) -> None:
         ("vid_a", 2),
         ("vid_c", 9),
     ]
+
+
+def test_stagec1_cli_decoder_backend_parsing_and_invalid_value() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["--split-root", "/tmp/s", "--output-dir", "/tmp/o"])
+    assert args.decoder_backend == "independent"
+    assert args.decoder_fg_score_min == -1.0
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--split-root", "/tmp/s", "--output-dir", "/tmp/o", "--decoder-backend", "bad_backend"])
