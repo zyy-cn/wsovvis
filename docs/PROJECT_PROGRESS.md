@@ -295,6 +295,33 @@ Implement the builder that joins real Stage B predictions with real feature-expo
 
 ---
 
+## 2026-03-01 — P3.1c.2 completed (bridge full-split hardening + QA)
+
+### Scope
+Harden the real Stage B + sidecar -> normalized bridge-input builder QA/reporting path and validate the bridge-to-export handoff on larger real-run subsets.
+
+### Completed
+- Hardened QA summary schema/counter structure for deterministic machine-readable reporting
+- Added richer join counters (prediction/sidecar totals, matched, missing counterparts, extras, duplicate-key diagnostics)
+- Added reason-coded dropped-track counters for malformed/non-finite/invalid tracks
+- Added runtime/video summaries (runtime status counts, per-video result counters, zero-track/unprocessed diagnostics)
+- Preserved bridge-handoff compatibility and completed real-run validation chains on run18 subsets
+
+### Validation
+- Canonical remote validation/execution passed on `gpu4090d` with branch/commit matching
+- run18 sample chain (`--sample-video-limit 10`) succeeded end-to-end
+- run18 larger chain (`--sample-video-limit 200`) succeeded end-to-end
+- Downstream export validator reported `Validation OK` for both sample and larger runs
+
+### Key references
+- Canonical validation branch: `codex/p3-1c2-bridge-fullsplit-hardening-qa`
+- Passing intended commit observed in logs: `4a85ccfe...`
+
+### Notes
+- This milestone closes the P3.1c bridge-hardening phase and makes Stage C consumer/loader offline data-plane implementation the next recommended execution phase.
+
+---
+
 ## 2026-02-28 — Workflow/spec cold-start hardening (docs)
 
 ### Scope
@@ -329,12 +356,11 @@ Improve document-only cold-start reliability for future sessions using `codex/co
 - ✅ P3.1d.1 completed (feature-export writer/CLI/tests, fixture-validated)
 - ✅ P3.1d.2 completed (real-run feature-export integration)
 - ✅ P3.1c.1 completed (real Stage B + sidecar -> normalized bridge-input builder + end-to-end handoff validation)
-- ▶️ Next recommended step: **P3.1c.2 (full-split hardening + QA for the real bridge chain)**
+- ✅ P3.1c.2 completed (bridge full-split hardening + QA)
+- ▶️ Next recommended step: **Stage C consumer/loader (offline data-plane)**
 
-### Why P3.1c.2 next
-The real bridge chain is now functionally complete on a small real sample (including downstream export/validator handoff). The next risk is production robustness and observability on larger/full-split runs: mismatch diagnostics, dropped-track reason accounting, and repeatable QA summaries before Stage C experiments consume bridge exports at scale.
+### Why Stage C consumer/loader next
+P3.1c.2 closed the remaining bridge-chain hardening/QA gap with successful sample and larger real-run validation, including downstream validator success. The highest-leverage next step is a deterministic offline consumer/loader data-plane for export artifact v1 so Stage C experiments can consume artifacts consistently and with built-in sanity checks.
 
-### Follow-on after P3.1c.2
-- Stage C loader / consumer data-plane implementation for export artifact v1
+### Follow-on after Stage C consumer/loader
 - Stage C attribution MVP (recommended order: MIL baseline -> EM baseline -> OT/Sinkhorn mainline)
-
