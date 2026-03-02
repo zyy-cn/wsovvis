@@ -92,6 +92,7 @@ class StageC1TrackScoreRecord:
     predicted_label_source: str | None = None
     sinkhorn_active_special_columns: Tuple[str, ...] | None = None
     sinkhorn_bg_posterior: float | None = None
+    sinkhorn_unk_fg_posterior: float | None = None
     sinkhorn_top_observed_score: float | None = None
 
 
@@ -275,22 +276,22 @@ def _validate_sinkhorn_c43_config(config: StageC1SinkhornC43Config) -> None:
             "sinkhorn.c43.bg_prior_weight",
             "must be > 0 when sinkhorn.c43.enable_bg=true",
         )
-        _require(not config.enable_unk_fg, "sinkhorn.c43.enable_unk_fg", "C4.3-A defers unk-fg to C4.3-B")
-        _require(
-            float(config.unk_fg_prior_weight) == 0.0,
-            "sinkhorn.c43.unk_fg_prior_weight",
-            "C4.3-A defers unk-fg to C4.3-B; expected 0",
-        )
-        _require(
-            config.unk_fg_min_top_obs_score is None,
-            "sinkhorn.c43.unk_fg_min_top_obs_score",
-            "C4.3-A defers unk-fg gating to C4.3-B; expected null",
-        )
-        _require(
-            config.unk_fg_max_top_obs_score is None,
-            "sinkhorn.c43.unk_fg_max_top_obs_score",
-            "C4.3-A defers unk-fg gating to C4.3-B; expected null",
-        )
+        if not config.enable_unk_fg:
+            _require(
+                float(config.unk_fg_prior_weight) == 0.0,
+                "sinkhorn.c43.unk_fg_prior_weight",
+                "must be 0 when sinkhorn.c43.enable_unk_fg=false",
+            )
+            _require(
+                config.unk_fg_min_top_obs_score is None,
+                "sinkhorn.c43.unk_fg_min_top_obs_score",
+                "must be null when sinkhorn.c43.enable_unk_fg=false",
+            )
+            _require(
+                config.unk_fg_max_top_obs_score is None,
+                "sinkhorn.c43.unk_fg_max_top_obs_score",
+                "must be null when sinkhorn.c43.enable_unk_fg=false",
+            )
 
 
 def _validate_no_sinkhorn_special_label_collisions(inventory: StageCLabelPrototypeInventory) -> None:
@@ -1755,6 +1756,7 @@ def compute_stagec1_sinkhorn_v1_scores(
     decoder_diag_by_video: Dict[str, Dict[str, Any]] = {}
     sinkhorn_diag_by_video: Dict[str, Dict[str, Any]] = {}
     sinkhorn_bg_key = _canonical_label_key(SINKHORN_SPECIAL_BG_LABEL_ID)
+    sinkhorn_unk_fg_key = _canonical_label_key(SINKHORN_SPECIAL_UNK_FG_LABEL_ID)
 
     for video_id in processed_with_tracks_video_ids:
         raw_keys = tuple(labelset_lookup.get(video_id, ()))
@@ -1810,15 +1812,45 @@ def compute_stagec1_sinkhorn_v1_scores(
         sinkhorn_score_matrix = local_observed_score_matrix
         sinkhorn_target_col_weights: np.ndarray | None = None
         active_special_columns: tuple[str, ...] = ()
+        c43_unk_fg_eligible_track_count = 0
+        c43_unk_fg_column_active = False
+        c43_unk_fg_noop_reason: str | None = None
         if sinkhorn_c43_config.enable:
             active_special_columns = (SINKHORN_SPECIAL_BG_LABEL_ID,)
             bg_column = np.full((local_observed_score_matrix.shape[0], 1), float(sinkhorn_c43_config.bg_score), dtype=np.float64)
             sinkhorn_score_matrix = np.concatenate([local_observed_score_matrix, bg_column], axis=1)
             sinkhorn_candidate_keys = tuple(list(candidate_keys) + [sinkhorn_bg_key])
-            sinkhorn_target_col_weights = np.asarray(
-                [1.0] * len(candidate_keys) + [float(sinkhorn_c43_config.bg_prior_weight)],
-                dtype=np.float64,
-            )
+            target_weights: list[float] = [1.0] * len(candidate_keys) + [float(sinkhorn_c43_config.bg_prior_weight)]
+
+            if sinkhorn_c43_config.enable_unk_fg:
+                top_obs_scores = (
+                    np.max(local_observed_score_matrix, axis=1)
+                    if local_observed_score_matrix.shape[0] > 0
+                    else np.zeros((0,), dtype=np.float64)
+                )
+                eligible_mask = np.ones((local_observed_score_matrix.shape[0],), dtype=bool)
+                if sinkhorn_c43_config.unk_fg_min_top_obs_score is not None:
+                    eligible_mask = eligible_mask & (
+                        top_obs_scores >= float(sinkhorn_c43_config.unk_fg_min_top_obs_score)
+                    )
+                if sinkhorn_c43_config.unk_fg_max_top_obs_score is not None:
+                    eligible_mask = eligible_mask & (
+                        top_obs_scores <= float(sinkhorn_c43_config.unk_fg_max_top_obs_score)
+                    )
+                c43_unk_fg_eligible_track_count = int(np.sum(eligible_mask))
+                if float(sinkhorn_c43_config.unk_fg_prior_weight) <= 0.0:
+                    c43_unk_fg_noop_reason = "prior_weight_non_positive"
+                elif c43_unk_fg_eligible_track_count == 0:
+                    c43_unk_fg_noop_reason = "no_eligible_tracks"
+                else:
+                    c43_unk_fg_column_active = True
+                    active_special_columns = (SINKHORN_SPECIAL_BG_LABEL_ID, SINKHORN_SPECIAL_UNK_FG_LABEL_ID)
+                    unk_fg_scores = np.where(eligible_mask, 0.0, -1e12).astype(np.float64, copy=False).reshape(-1, 1)
+                    sinkhorn_score_matrix = np.concatenate([sinkhorn_score_matrix, unk_fg_scores], axis=1)
+                    sinkhorn_candidate_keys = tuple(list(sinkhorn_candidate_keys) + [sinkhorn_unk_fg_key])
+                    target_weights.append(float(sinkhorn_c43_config.unk_fg_prior_weight))
+
+            sinkhorn_target_col_weights = np.asarray(target_weights, dtype=np.float64)
 
         posterior_matrix, sinkhorn_diag = _compute_sinkhorn_posteriors(
             score_matrix=sinkhorn_score_matrix,
@@ -1833,9 +1865,13 @@ def compute_stagec1_sinkhorn_v1_scores(
         if sinkhorn_c43_config.enable:
             observed_col_count = len(candidate_keys)
             bg_idx = observed_col_count
+            unk_fg_idx = observed_col_count + 1 if c43_unk_fg_column_active else None
             sinkhorn_diag["c43_mass_observed_total"] = float(np.sum(posterior_matrix[:, :observed_col_count]))
             sinkhorn_diag["c43_mass_bg_total"] = float(np.sum(posterior_matrix[:, bg_idx]))
-            sinkhorn_diag["c43_mass_unk_fg_total"] = 0.0
+            sinkhorn_diag["c43_mass_unk_fg_total"] = float(np.sum(posterior_matrix[:, unk_fg_idx])) if unk_fg_idx is not None else 0.0
+            sinkhorn_diag["c43_unk_fg_eligible_track_count"] = int(c43_unk_fg_eligible_track_count)
+            sinkhorn_diag["c43_unk_fg_column_active"] = bool(c43_unk_fg_column_active)
+            sinkhorn_diag["c43_unk_fg_noop_reason"] = c43_unk_fg_noop_reason
         sinkhorn_diag_by_video[video_id] = sinkhorn_diag
 
         local_scorer_top1_keys: list[tuple[int, int | str]] = []
@@ -1843,6 +1879,7 @@ def compute_stagec1_sinkhorn_v1_scores(
         local_scorer_margins: list[float] = []
         local_predicted_label_sources: list[str | None] = []
         local_sinkhorn_bg_posteriors: list[float | None] = []
+        local_sinkhorn_unk_fg_posteriors: list[float | None] = []
         local_sinkhorn_top_observed_scores: list[float | None] = []
         for idx in range(len(local_track_ids)):
             best_key, best_prob, _, best_margin = _best_label_from_weights(
@@ -1855,6 +1892,8 @@ def compute_stagec1_sinkhorn_v1_scores(
             if sinkhorn_c43_config.enable:
                 if best_key == sinkhorn_bg_key:
                     local_predicted_label_sources.append("bg")
+                elif best_key == sinkhorn_unk_fg_key:
+                    local_predicted_label_sources.append("unk_fg")
                 else:
                     local_predicted_label_sources.append("observed")
             else:
@@ -1863,9 +1902,14 @@ def compute_stagec1_sinkhorn_v1_scores(
                 observed_probs = posterior_matrix[idx, : len(candidate_keys)]
                 local_sinkhorn_top_observed_scores.append(float(np.max(observed_probs)))
                 local_sinkhorn_bg_posteriors.append(float(posterior_matrix[idx, len(candidate_keys)]))
+                if c43_unk_fg_column_active:
+                    local_sinkhorn_unk_fg_posteriors.append(float(posterior_matrix[idx, len(candidate_keys) + 1]))
+                else:
+                    local_sinkhorn_unk_fg_posteriors.append(0.0 if sinkhorn_c43_config.enable_unk_fg else None)
             else:
                 local_sinkhorn_top_observed_scores.append(None)
                 local_sinkhorn_bg_posteriors.append(None)
+                local_sinkhorn_unk_fg_posteriors.append(None)
 
         decoder_score_matrix = posterior_matrix[:, : len(candidate_keys)] if sinkhorn_c43_config.enable else posterior_matrix
         decoder_scorer_top1_keys: list[tuple[int, int | str]] = []
@@ -1899,6 +1943,8 @@ def compute_stagec1_sinkhorn_v1_scores(
             scorer_key = local_scorer_top1_keys[idx]
             if scorer_key == sinkhorn_bg_key:
                 scorer_label_id: int | str = SINKHORN_SPECIAL_BG_LABEL_ID
+            elif scorer_key == sinkhorn_unk_fg_key:
+                scorer_label_id = SINKHORN_SPECIAL_UNK_FG_LABEL_ID
             else:
                 scorer_label_id = prototype_inventory.labels_by_key[scorer_key]
             track_scores.append(
@@ -1920,6 +1966,7 @@ def compute_stagec1_sinkhorn_v1_scores(
                     predicted_label_source=local_predicted_label_sources[idx],
                     sinkhorn_active_special_columns=active_special_columns if sinkhorn_c43_config.enable else None,
                     sinkhorn_bg_posterior=local_sinkhorn_bg_posteriors[idx],
+                    sinkhorn_unk_fg_posterior=local_sinkhorn_unk_fg_posteriors[idx],
                     sinkhorn_top_observed_score=local_sinkhorn_top_observed_scores[idx],
                 )
             )
@@ -1982,6 +2029,9 @@ def compute_stagec1_sinkhorn_v1_scores(
             row["sinkhorn_c43_mass_observed_total"] = sinkhorn_diag.get("c43_mass_observed_total")
             row["sinkhorn_c43_mass_bg_total"] = sinkhorn_diag.get("c43_mass_bg_total")
             row["sinkhorn_c43_mass_unk_fg_total"] = sinkhorn_diag.get("c43_mass_unk_fg_total")
+            row["sinkhorn_c43_unk_fg_eligible_track_count"] = int(sinkhorn_diag.get("c43_unk_fg_eligible_track_count", 0))
+            row["sinkhorn_c43_unk_fg_column_active"] = bool(sinkhorn_diag.get("c43_unk_fg_column_active", False))
+            row["sinkhorn_c43_unk_fg_noop_reason"] = sinkhorn_diag.get("c43_unk_fg_noop_reason")
 
     decoder_total_bg = int(sum(int(diag["decoder_num_tracks_bg"]) for diag in decoder_diag_by_video.values()))
     decoder_total_fg = int(sum(int(diag["decoder_num_tracks_fg"]) for diag in decoder_diag_by_video.values()))
@@ -2051,12 +2101,19 @@ def compute_stagec1_sinkhorn_v1_scores(
 
     sinkhorn_summary_policy_version = "sinkhorn_v1.r2" if sinkhorn_c43_config.enable else "sinkhorn_v1.r1"
     c43_source_counts = {"observed": 0, "bg": 0, "unk_fg": 0}
+    c43_unk_fg_eligible_track_count_total = 0
+    c43_unk_fg_noop_videos: dict[str, int] = {"prior_weight_non_positive": 0, "no_eligible_tracks": 0}
     if sinkhorn_c43_config.enable:
         for rec in track_scores:
             source = rec.predicted_label_source
             if source is None:
                 continue
             c43_source_counts[source] = c43_source_counts.get(source, 0) + 1
+        for diag in sinkhorn_diag_by_video.values():
+            c43_unk_fg_eligible_track_count_total += int(diag.get("c43_unk_fg_eligible_track_count", 0))
+            noop_reason = diag.get("c43_unk_fg_noop_reason")
+            if isinstance(noop_reason, str) and noop_reason in c43_unk_fg_noop_videos:
+                c43_unk_fg_noop_videos[noop_reason] += 1
 
     run_summary = _build_run_summary(
         split_view=split_view,
@@ -2125,18 +2182,29 @@ def compute_stagec1_sinkhorn_v1_scores(
         },
     )
     if sinkhorn_c43_config.enable:
+        active_special_column_set: set[str] = set()
+        for diag in sinkhorn_diag_by_video.values():
+            cols = diag.get("active_special_columns")
+            if isinstance(cols, list):
+                for col in cols:
+                    if isinstance(col, str):
+                        active_special_column_set.add(col)
         run_summary["sinkhorn_summary"]["c43_enabled"] = True
         run_summary["sinkhorn_summary"]["c43_enable_bg"] = bool(sinkhorn_c43_config.enable_bg)
         run_summary["sinkhorn_summary"]["c43_enable_unk_fg"] = bool(sinkhorn_c43_config.enable_unk_fg)
         run_summary["sinkhorn_summary"]["c43_bg_prior_weight"] = float(sinkhorn_c43_config.bg_prior_weight)
         run_summary["sinkhorn_summary"]["c43_unk_fg_prior_weight"] = float(sinkhorn_c43_config.unk_fg_prior_weight)
-        run_summary["sinkhorn_summary"]["c43_active_special_columns"] = [SINKHORN_SPECIAL_BG_LABEL_ID]
+        run_summary["sinkhorn_summary"]["c43_unk_fg_min_top_obs_score"] = sinkhorn_c43_config.unk_fg_min_top_obs_score
+        run_summary["sinkhorn_summary"]["c43_unk_fg_max_top_obs_score"] = sinkhorn_c43_config.unk_fg_max_top_obs_score
+        run_summary["sinkhorn_summary"]["c43_active_special_columns"] = sorted(active_special_column_set)
         run_summary["sinkhorn_summary"]["c43_num_tracks_observed"] = int(c43_source_counts["observed"])
         run_summary["sinkhorn_summary"]["c43_num_tracks_bg"] = int(c43_source_counts["bg"])
         run_summary["sinkhorn_summary"]["c43_num_tracks_unk_fg"] = int(c43_source_counts["unk_fg"])
         run_summary["sinkhorn_summary"]["c43_mass_observed_total"] = float(sum(sinkhorn_c43_mass_observed_values))
         run_summary["sinkhorn_summary"]["c43_mass_bg_total"] = float(sum(sinkhorn_c43_mass_bg_values))
         run_summary["sinkhorn_summary"]["c43_mass_unk_fg_total"] = float(sum(sinkhorn_c43_mass_unk_fg_values))
+        run_summary["sinkhorn_summary"]["c43_unk_fg_eligible_track_count_total"] = int(c43_unk_fg_eligible_track_count_total)
+        run_summary["sinkhorn_summary"]["c43_unk_fg_noop_videos"] = dict(c43_unk_fg_noop_videos)
     if decoder_config.backend == "otlite_v1":
         run_summary["decoder_summary"]["otlite_temperature"] = float(decoder_config.otlite_temperature)
         run_summary["decoder_summary"]["otlite_iters"] = int(decoder_config.otlite_iters)
@@ -2289,6 +2357,8 @@ def write_stagec1_mil_artifacts(result: StageC1MilResult, output_dir: Path) -> D
                 row["sinkhorn_active_special_columns"] = list(record.sinkhorn_active_special_columns)
             if record.sinkhorn_bg_posterior is not None:
                 row["sinkhorn_bg_posterior"] = float(record.sinkhorn_bg_posterior)
+            if record.sinkhorn_unk_fg_posterior is not None:
+                row["sinkhorn_unk_fg_posterior"] = float(record.sinkhorn_unk_fg_posterior)
             if record.sinkhorn_top_observed_score is not None:
                 row["sinkhorn_top_observed_score"] = float(record.sinkhorn_top_observed_score)
             f.write(json.dumps(row, sort_keys=True) + "\n")

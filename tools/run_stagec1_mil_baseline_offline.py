@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sinkhorn-c43-enable",
         action="store_true",
-        help="Enable sinkhorn C4.3 additive schema (C4.3-A supports bg-only path)",
+        help="Enable sinkhorn C4.3 additive schema",
     )
     parser.add_argument(
         "--sinkhorn-c43-enable-bg",
@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sinkhorn-c43-enable-unk-fg",
         action="store_true",
-        help="Reserved for C4.3-B; C4.3-A rejects this when set",
+        help="Enable sinkhorn C4.3 unk-fg special column",
     )
     parser.add_argument(
         "--sinkhorn-c43-bg-prior-weight",
@@ -123,19 +123,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--sinkhorn-c43-unk-fg-prior-weight",
         type=float,
         default=0.0,
-        help="Reserved for C4.3-B; C4.3-A expects 0",
+        help="C4.3 unk-fg column prior weight (0 keeps feature a no-op even when enabled)",
     )
     parser.add_argument(
         "--sinkhorn-c43-unk-fg-min-top-obs-score",
         type=float,
         default=None,
-        help="Reserved for C4.3-B; C4.3-A expects null",
+        help="Optional C4.3 unk-fg gate: track top observed score must be >= this value",
     )
     parser.add_argument(
         "--sinkhorn-c43-unk-fg-max-top-obs-score",
         type=float,
         default=None,
-        help="Reserved for C4.3-B; C4.3-A expects null",
+        help="Optional C4.3 unk-fg gate: track top observed score must be <= this value",
     )
     parser.add_argument(
         "--sinkhorn-c43-bg-score",
