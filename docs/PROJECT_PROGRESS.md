@@ -407,7 +407,54 @@ Implement and validate the first Stage C offline attribution baseline (MIL-first
 
 ---
 
-## Validation evidence highlights (through Stage C1 PASS)
+## 2026-03-01 — Stage C3 completed (global decoder backends + comparison closure)
+
+### Scope
+Implement and validate Stage C3 global decoder backend expansion and close the decoder-comparison milestone with canonical evidence and reproducible sidecar artifacts.
+
+### Completed
+- Implemented decoder backend stack in C3 scope:
+  - pre-existing baseline path: `independent`
+  - new backend: `coverage_greedy_v1` (C3.r1 + C3.r1b hardening)
+  - new backend: `otlite_v1` (C3.r2a + r2b/r2c calibration)
+- Preserved default decoder behavior as `independent` (no production default switch in C3).
+- Completed comparison protocol implementation and execution milestones:
+  - C3.r3a baseline protocol execution (`small=20`, `medium=75`)
+  - C3.r3b evidence expansion (`large=150`, fallback cross-run slot)
+  - C3.r3c1 true cross-run closure with non-run18 source (`run19`, tail cohort size `75`)
+- Produced comparison sidecar bundles under schema `stagec3.decoder_comparison.v1` for r3a/r3b/r3c1.
+
+### Validation
+- Canonical remote validation discipline preserved on `gpu4090d` with branch/commit equality checks for C3 implementation/evidence runs.
+- Decoder test bundles passed canonically during C3 implementation phases (including Stage C1/C2/C3 decoder-targeted suites).
+- C3.r3c1 provided final required evidence set:
+  - large-tier execution evidence (`run18`, `n=150`)
+  - true cross-run evidence (`run19`, `cross-run-run19-tail75`, `n=75`)
+  - determinism evidence for all required decoders on required tiers
+  - comparison sidecars regenerated from canonical protocol logs.
+
+### Recommendation state (post-C3)
+- Engineering recommendation: keep default `independent` (no default change).
+- Research recommendation: use `otlite_v1` for global-consistency experiments when comparison protocol context is matched.
+- Evidence basis now includes large tier + true non-run18 cross-run + determinism + canonical remote validation discipline.
+
+### Key references
+- C3 closure evidence output: `codex/2026030110_stagec3-global-decoder-v1/12_output.txt`
+- C3 blocked->resolved transition:
+  - blocked state: `codex/2026030110_stagec3-global-decoder-v1/11_output.txt`
+  - resolved state: `codex/2026030110_stagec3-global-decoder-v1/12_output.txt`
+- Final comparison sidecars (r3c1):
+  - `codex/2026030110_stagec3-global-decoder-v1/comparison/results/stagec3_r3c1_labelset_proto_run18_large150_crossrunrun19tail75_v1/comparison_manifest.json`
+  - `codex/2026030110_stagec3-global-decoder-v1/comparison/results/stagec3_r3c1_labelset_proto_run18_large150_crossrunrun19tail75_v1/comparison_metrics.json`
+  - `codex/2026030110_stagec3-global-decoder-v1/comparison/results/stagec3_r3c1_labelset_proto_run18_large150_crossrunrun19tail75_v1/comparison_report.md`
+
+### Notes
+- C3 milestone closure is complete for decoder comparison scope without changing Stage B contracts or decoder defaults.
+- Optional follow-up: add one or more additional non-run18 cohorts (for example run20+) before considering any default-change proposal.
+
+---
+
+## Validation evidence highlights (through Stage C3 closure)
 
 ### Canonical remote validation discipline (preserved)
 - Canonical remote host/path usage remained consistent in PASS evidence:
@@ -424,6 +471,22 @@ Implement and validate the first Stage C offline attribution baseline (MIL-first
 - Stage C1 canonical remote PASS:
   - `6 passed` (`tests/test_stagec1_attribution_mil_v1.py`)
   - evidence: `.../16_output.txt`
+
+### Stage C3 decoder comparison closure evidence
+- Decoder backends validated in C3 scope:
+  - baseline: `independent`
+  - alternatives: `coverage_greedy_v1`, `otlite_v1`
+- C3.r3 comparison sidecar schema remained stable:
+  - `schema_version = stagec3.decoder_comparison.v1`
+- Final closure run (C3.r3c1) captured required tiers and determinism requirements:
+  - `required_tiers = [large, cross-run-run19-tail75]`
+  - `determinism_required_tiers = [large, cross-run-run19-tail75]`
+- Final recommendation state in sidecar metrics:
+  - engineering: `keep_default_independent`
+  - research: `otlite_v1_for_global_consistency_experiments`
+- True cross-run closure status:
+  - prior blocker (no non-run18 source) recorded in C3.r3c
+  - resolved in C3.r3c1 via run19 source availability and protocol completion
 
 ### P3.1c.1 and P3.1c.2 real-run handoff evidence (bridge -> export -> validator)
 - P3.1c.1 real run18 sample handoff chain passed:
@@ -454,12 +517,13 @@ Implement and validate the first Stage C offline attribution baseline (MIL-first
 - ✅ P3.1c.2 completed (bridge full-split hardening + QA)
 - ✅ Stage C0 completed (consumer/loader offline data-plane; canonical remote PASS `10/10`)
 - ✅ Stage C1 completed (offline MIL-first attribution baseline; canonical remote PASS `6 passed`)
-- ▶️ Current state: **Stage C1 baseline completed**
-- ▶️ Next recommended step: **Stage C1.r1 (real-artifact smoke + baseline diagnostics hardening)** before Stage C2 EM baseline
+- ✅ Stage C3 completed (global decoder baseline + alternatives + comparison closure; default remains `independent`)
+- ▶️ Current state: **Stage C3 decoder-comparison milestone closed**
+- ▶️ Next recommended step: **C4 planning** (or optional extra non-run18 cohort evidence sweep before any default-change proposal)
 
-### Why Stage C1.r1 next
-With the Stage C1 MIL-first baseline implemented and remotely validated, the highest-leverage next step is a real-artifact smoke and diagnostics-hardening pass to confirm robust behavior on real export artifacts and strengthen baseline sanity reporting before expanding methods.
+### Why C4 planning next
+With C3 decoder implementation/calibration/comparison now closed and recommendations stabilized, the highest-leverage next step is C4 planning that reuses the closed decoder evidence baseline while preserving default behavior.
 
-### Follow-on after Stage C1.r1
-- Stage C attribution expansion remains future work (recommended order: Stage C2 EM baseline, then OT/Sinkhorn line).
-- Training-loop and Stage D integration remain explicitly out of scope until later staged tasks.
+### Optional follow-on before/alongside C4
+- Optional evidence extension: add additional non-run18 cross-run cohorts (for example run20+) with the same C3 protocol for broader source-diversity confidence.
+- Stage C attribution expansion remains future work (Stage C2/OT lines and any training-loop/Stage D integration remain out of scope for this closed C3 milestone).
