@@ -15,6 +15,9 @@ SCORER_BACKENDS = {"mil_v1", "labelset_proto_v1", "em_v1", "sinkhorn_v1"}
 DECODER_BACKENDS = {"independent", "coverage_greedy_v1", "otlite_v1"}
 EMPTY_LABELSET_POLICIES = {"use_all_prototypes", "error"}
 PROTOTYPE_SCHEMA_NAME_V1 = "wsovvis.stagec.label_prototypes.v1"
+SINKHORN_SPECIAL_BG_LABEL_ID = "__bg__"
+SINKHORN_SPECIAL_UNK_FG_LABEL_ID = "__unk_fg__"
+SINKHORN_C43_PREDICTED_LABEL_SOURCES = {"observed", "bg", "unk_fg"}
 
 
 class StageC1AttributionError(ExportContractError):
@@ -59,6 +62,18 @@ class StageC1SinkhornConfig:
 
 
 @dataclass(frozen=True)
+class StageC1SinkhornC43Config:
+    enable: bool = False
+    enable_bg: bool = False
+    enable_unk_fg: bool = False
+    bg_prior_weight: float = 0.0
+    unk_fg_prior_weight: float = 0.0
+    unk_fg_min_top_obs_score: float | None = None
+    unk_fg_max_top_obs_score: float | None = None
+    bg_score: float = 0.0
+
+
+@dataclass(frozen=True)
 class StageC1TrackScoreRecord:
     video_id: str
     track_id: str | int
@@ -74,6 +89,10 @@ class StageC1TrackScoreRecord:
     decoder_margin: float | None = None
     decoder_bg_reason: str | None = None
     decoder_ot_prob: float | None = None
+    predicted_label_source: str | None = None
+    sinkhorn_active_special_columns: Tuple[str, ...] | None = None
+    sinkhorn_bg_posterior: float | None = None
+    sinkhorn_top_observed_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +224,86 @@ def _validate_sinkhorn_config(config: StageC1SinkhornConfig) -> None:
     _require(float(config.tolerance) >= 0.0, "sinkhorn.tolerance", "must be >= 0")
     _require(_is_number(config.eps), "sinkhorn.eps", "must be numeric")
     _require(float(config.eps) > 0.0, "sinkhorn.eps", "must be > 0")
+
+
+def _validate_sinkhorn_c43_config(config: StageC1SinkhornC43Config) -> None:
+    _require(isinstance(config.enable, bool), "sinkhorn.c43.enable", "must be boolean")
+    _require(isinstance(config.enable_bg, bool), "sinkhorn.c43.enable_bg", "must be boolean")
+    _require(isinstance(config.enable_unk_fg, bool), "sinkhorn.c43.enable_unk_fg", "must be boolean")
+    _require(_is_number(config.bg_prior_weight), "sinkhorn.c43.bg_prior_weight", "must be numeric")
+    _require(float(config.bg_prior_weight) >= 0.0, "sinkhorn.c43.bg_prior_weight", "must be >= 0")
+    _require(_is_number(config.unk_fg_prior_weight), "sinkhorn.c43.unk_fg_prior_weight", "must be numeric")
+    _require(float(config.unk_fg_prior_weight) >= 0.0, "sinkhorn.c43.unk_fg_prior_weight", "must be >= 0")
+    _require(
+        config.unk_fg_min_top_obs_score is None or _is_number(config.unk_fg_min_top_obs_score),
+        "sinkhorn.c43.unk_fg_min_top_obs_score",
+        "must be numeric or null",
+    )
+    _require(
+        config.unk_fg_max_top_obs_score is None or _is_number(config.unk_fg_max_top_obs_score),
+        "sinkhorn.c43.unk_fg_max_top_obs_score",
+        "must be numeric or null",
+    )
+    _require(_is_number(config.bg_score), "sinkhorn.c43.bg_score", "must be numeric")
+    _require(math.isfinite(float(config.bg_score)), "sinkhorn.c43.bg_score", "must be finite")
+    if config.unk_fg_min_top_obs_score is not None and config.unk_fg_max_top_obs_score is not None:
+        _require(
+            float(config.unk_fg_min_top_obs_score) <= float(config.unk_fg_max_top_obs_score),
+            "sinkhorn.c43.unk_fg_min_top_obs_score",
+            "must be <= sinkhorn.c43.unk_fg_max_top_obs_score",
+        )
+
+    if not config.enable:
+        _require(not config.enable_bg, "sinkhorn.c43.enable_bg", "requires sinkhorn.c43.enable=true")
+        _require(not config.enable_unk_fg, "sinkhorn.c43.enable_unk_fg", "requires sinkhorn.c43.enable=true")
+        _require(float(config.bg_prior_weight) == 0.0, "sinkhorn.c43.bg_prior_weight", "must be 0 when disabled")
+        _require(float(config.unk_fg_prior_weight) == 0.0, "sinkhorn.c43.unk_fg_prior_weight", "must be 0 when disabled")
+        _require(
+            config.unk_fg_min_top_obs_score is None,
+            "sinkhorn.c43.unk_fg_min_top_obs_score",
+            "must be null when disabled",
+        )
+        _require(
+            config.unk_fg_max_top_obs_score is None,
+            "sinkhorn.c43.unk_fg_max_top_obs_score",
+            "must be null when disabled",
+        )
+    else:
+        _require(config.enable_bg, "sinkhorn.c43.enable_bg", "C4.3-A requires enable_bg=true when sinkhorn.c43.enable=true")
+        _require(
+            float(config.bg_prior_weight) > 0.0,
+            "sinkhorn.c43.bg_prior_weight",
+            "must be > 0 when sinkhorn.c43.enable_bg=true",
+        )
+        _require(not config.enable_unk_fg, "sinkhorn.c43.enable_unk_fg", "C4.3-A defers unk-fg to C4.3-B")
+        _require(
+            float(config.unk_fg_prior_weight) == 0.0,
+            "sinkhorn.c43.unk_fg_prior_weight",
+            "C4.3-A defers unk-fg to C4.3-B; expected 0",
+        )
+        _require(
+            config.unk_fg_min_top_obs_score is None,
+            "sinkhorn.c43.unk_fg_min_top_obs_score",
+            "C4.3-A defers unk-fg gating to C4.3-B; expected null",
+        )
+        _require(
+            config.unk_fg_max_top_obs_score is None,
+            "sinkhorn.c43.unk_fg_max_top_obs_score",
+            "C4.3-A defers unk-fg gating to C4.3-B; expected null",
+        )
+
+
+def _validate_no_sinkhorn_special_label_collisions(inventory: StageCLabelPrototypeInventory) -> None:
+    reserved_keys = {
+        _canonical_label_key(SINKHORN_SPECIAL_BG_LABEL_ID),
+        _canonical_label_key(SINKHORN_SPECIAL_UNK_FG_LABEL_ID),
+    }
+    collisions = sorted(key for key in inventory.labels_by_key.keys() if key in reserved_keys)
+    _require(
+        not collisions,
+        "prototype_manifest.labels",
+        f"reserved sinkhorn special label IDs are forbidden: {sorted([SINKHORN_SPECIAL_BG_LABEL_ID, SINKHORN_SPECIAL_UNK_FG_LABEL_ID])}",
+    )
 
 
 def _compute_track_score(track: StageCTrackRecord, config: StageC1MilConfig) -> float:
@@ -674,11 +773,27 @@ def _compute_sinkhorn_posteriors(
     iterations: int,
     tolerance: float,
     eps: float,
+    target_col_weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     _require(score_matrix.ndim == 2, "sinkhorn.score_matrix", "must be rank-2")
     _require(np.isfinite(score_matrix).all(), "sinkhorn.score_matrix", "must contain only finite values")
     num_tracks, num_labels = score_matrix.shape
     _require(num_labels > 0, "candidate_labels", "must be non-empty")
+    if target_col_weights is None:
+        normalized_col_weights = None
+    else:
+        weights = np.asarray(target_col_weights, dtype=np.float64)
+        _require(weights.ndim == 1, "sinkhorn.target_col_weights", "must be rank-1")
+        _require(
+            int(weights.shape[0]) == int(num_labels),
+            "sinkhorn.target_col_weights",
+            "must align with score_matrix column count",
+        )
+        _require(np.isfinite(weights).all(), "sinkhorn.target_col_weights", "must contain only finite values")
+        _require(np.all(weights >= 0.0), "sinkhorn.target_col_weights", "must be >= 0")
+        weight_sum = float(np.sum(weights))
+        _require(weight_sum > 0.0, "sinkhorn.target_col_weights", "sum must be > 0")
+        normalized_col_weights = weights / weight_sum
     if num_tracks == 0:
         return np.zeros((0, num_labels), dtype=np.float64), {
             "converged": True,
@@ -686,6 +801,8 @@ def _compute_sinkhorn_posteriors(
             "row_mass_l1_error": 0.0,
             "col_mass_l1_error": 0.0,
             "target_col_mass": 0.0,
+            "target_col_mass_vector": [0.0] * int(num_labels),
+            "posterior_col_mass": [0.0] * int(num_labels),
             "posterior_entropy_mean": None,
         }
 
@@ -696,7 +813,11 @@ def _compute_sinkhorn_posteriors(
     kernel = np.maximum(kernel, float(eps))
     _require(np.isfinite(kernel).all(), "sinkhorn.kernel", "must contain only finite values")
 
-    target_col_mass = float(num_tracks) / float(num_labels)
+    if normalized_col_weights is None:
+        target_col_mass_vector = np.full((num_labels,), float(num_tracks) / float(num_labels), dtype=np.float64)
+    else:
+        target_col_mass_vector = normalized_col_weights * float(num_tracks)
+    target_col_mass = float(np.mean(target_col_mass_vector)) if num_labels > 0 else 0.0
     plan = kernel.astype(np.float64, copy=True)
     converged = False
     iterations_used = int(iterations)
@@ -707,10 +828,10 @@ def _compute_sinkhorn_posteriors(
         row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(eps))
         plan = plan / row_sums
         col_sums = np.maximum(np.sum(plan, axis=0, keepdims=True), float(eps))
-        plan = plan * (target_col_mass / col_sums)
+        plan = plan * (target_col_mass_vector.reshape(1, -1) / col_sums)
 
         row_mass_l1_error = float(np.sum(np.abs(np.sum(plan, axis=1) - 1.0)))
-        col_mass_l1_error = float(np.sum(np.abs(np.sum(plan, axis=0) - target_col_mass)))
+        col_mass_l1_error = float(np.sum(np.abs(np.sum(plan, axis=0) - target_col_mass_vector)))
         if max(row_mass_l1_error, col_mass_l1_error) <= float(tolerance):
             converged = True
             iterations_used = idx + 1
@@ -719,7 +840,8 @@ def _compute_sinkhorn_posteriors(
     row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(eps))
     posterior = plan / row_sums
     row_mass_l1_error = float(np.sum(np.abs(np.sum(posterior, axis=1) - 1.0)))
-    col_mass_l1_error = float(np.sum(np.abs(np.sum(posterior, axis=0) - target_col_mass)))
+    posterior_col_mass = np.sum(posterior, axis=0)
+    col_mass_l1_error = float(np.sum(np.abs(posterior_col_mass - target_col_mass_vector)))
     clamped = np.maximum(posterior, float(eps))
     row_entropy = -np.sum(clamped * np.log(clamped), axis=1)
 
@@ -729,6 +851,8 @@ def _compute_sinkhorn_posteriors(
         "row_mass_l1_error": float(row_mass_l1_error),
         "col_mass_l1_error": float(col_mass_l1_error),
         "target_col_mass": float(target_col_mass),
+        "target_col_mass_vector": [float(x) for x in target_col_mass_vector.tolist()],
+        "posterior_col_mass": [float(x) for x in posterior_col_mass.tolist()],
         "posterior_entropy_mean": float(np.mean(row_entropy)),
     }
 
@@ -1595,19 +1719,23 @@ def compute_stagec1_sinkhorn_v1_scores(
     empty_labelset_policy: str = "use_all_prototypes",
     decoder_config: StageC1DecoderConfig | None = None,
     sinkhorn_config: StageC1SinkhornConfig | None = None,
+    sinkhorn_c43_config: StageC1SinkhornC43Config | None = None,
 ) -> StageC1MilResult:
     config = config or StageC1MilConfig()
     decoder_config = decoder_config or StageC1DecoderConfig()
     sinkhorn_config = sinkhorn_config or StageC1SinkhornConfig()
+    sinkhorn_c43_config = sinkhorn_c43_config or StageC1SinkhornC43Config()
     _validate_config(config)
     _validate_decoder_config(decoder_config)
     _validate_sinkhorn_config(sinkhorn_config)
+    _validate_sinkhorn_c43_config(sinkhorn_c43_config)
     _require(empty_labelset_policy in EMPTY_LABELSET_POLICIES, "empty_labelset_policy", f"must be one of {sorted(EMPTY_LABELSET_POLICIES)}")
     _require(
         int(getattr(split_view, "embedding_dim", -1)) == prototype_inventory.embedding_dim,
         "prototype_manifest.embedding_dim",
         "must match split embedding_dim",
     )
+    _validate_no_sinkhorn_special_label_collisions(prototype_inventory)
 
     all_videos, processed_with_tracks_video_ids, expected_track_keys = _iter_processed_with_tracks(split_view, config)
     prototype_keys_all = tuple(sorted(prototype_inventory.labels_by_key.keys()))
@@ -1626,6 +1754,7 @@ def compute_stagec1_sinkhorn_v1_scores(
     fallback_track_count_by_video: Dict[str, int] = {}
     decoder_diag_by_video: Dict[str, Dict[str, Any]] = {}
     sinkhorn_diag_by_video: Dict[str, Dict[str, Any]] = {}
+    sinkhorn_bg_key = _canonical_label_key(SINKHORN_SPECIAL_BG_LABEL_ID)
 
     for video_id in processed_with_tracks_video_ids:
         raw_keys = tuple(labelset_lookup.get(video_id, ()))
@@ -1673,38 +1802,92 @@ def compute_stagec1_sinkhorn_v1_scores(
             local_row_indices.append(row_index)
             local_cos_score_vectors.append(score_vector)
 
-        local_cos_score_matrix = (
+        local_observed_score_matrix = (
             np.vstack(local_cos_score_vectors) if local_cos_score_vectors else np.zeros((0, len(candidate_keys)), dtype=np.float64)
         )
+
+        sinkhorn_candidate_keys = candidate_keys
+        sinkhorn_score_matrix = local_observed_score_matrix
+        sinkhorn_target_col_weights: np.ndarray | None = None
+        active_special_columns: tuple[str, ...] = ()
+        if sinkhorn_c43_config.enable:
+            active_special_columns = (SINKHORN_SPECIAL_BG_LABEL_ID,)
+            bg_column = np.full((local_observed_score_matrix.shape[0], 1), float(sinkhorn_c43_config.bg_score), dtype=np.float64)
+            sinkhorn_score_matrix = np.concatenate([local_observed_score_matrix, bg_column], axis=1)
+            sinkhorn_candidate_keys = tuple(list(candidate_keys) + [sinkhorn_bg_key])
+            sinkhorn_target_col_weights = np.asarray(
+                [1.0] * len(candidate_keys) + [float(sinkhorn_c43_config.bg_prior_weight)],
+                dtype=np.float64,
+            )
+
         posterior_matrix, sinkhorn_diag = _compute_sinkhorn_posteriors(
-            score_matrix=local_cos_score_matrix,
+            score_matrix=sinkhorn_score_matrix,
             temperature=float(sinkhorn_config.temperature),
             iterations=int(sinkhorn_config.iterations),
             tolerance=float(sinkhorn_config.tolerance),
             eps=float(sinkhorn_config.eps),
+            target_col_weights=sinkhorn_target_col_weights,
         )
+        sinkhorn_diag["c43_enabled"] = bool(sinkhorn_c43_config.enable)
+        sinkhorn_diag["active_special_columns"] = list(active_special_columns)
+        if sinkhorn_c43_config.enable:
+            observed_col_count = len(candidate_keys)
+            bg_idx = observed_col_count
+            sinkhorn_diag["c43_mass_observed_total"] = float(np.sum(posterior_matrix[:, :observed_col_count]))
+            sinkhorn_diag["c43_mass_bg_total"] = float(np.sum(posterior_matrix[:, bg_idx]))
+            sinkhorn_diag["c43_mass_unk_fg_total"] = 0.0
         sinkhorn_diag_by_video[video_id] = sinkhorn_diag
 
         local_scorer_top1_keys: list[tuple[int, int | str]] = []
         local_scorer_top1_scores: list[float] = []
         local_scorer_margins: list[float] = []
+        local_predicted_label_sources: list[str | None] = []
+        local_sinkhorn_bg_posteriors: list[float | None] = []
+        local_sinkhorn_top_observed_scores: list[float | None] = []
         for idx in range(len(local_track_ids)):
             best_key, best_prob, _, best_margin = _best_label_from_weights(
                 weight_vector=posterior_matrix[idx, :],
-                candidate_keys=candidate_keys,
+                candidate_keys=sinkhorn_candidate_keys,
             )
             local_scorer_top1_keys.append(best_key)
             local_scorer_top1_scores.append(float(best_prob))
             local_scorer_margins.append(float(best_margin))
+            if sinkhorn_c43_config.enable:
+                if best_key == sinkhorn_bg_key:
+                    local_predicted_label_sources.append("bg")
+                else:
+                    local_predicted_label_sources.append("observed")
+            else:
+                local_predicted_label_sources.append(None)
+            if sinkhorn_c43_config.enable:
+                observed_probs = posterior_matrix[idx, : len(candidate_keys)]
+                local_sinkhorn_top_observed_scores.append(float(np.max(observed_probs)))
+                local_sinkhorn_bg_posteriors.append(float(posterior_matrix[idx, len(candidate_keys)]))
+            else:
+                local_sinkhorn_top_observed_scores.append(None)
+                local_sinkhorn_bg_posteriors.append(None)
+
+        decoder_score_matrix = posterior_matrix[:, : len(candidate_keys)] if sinkhorn_c43_config.enable else posterior_matrix
+        decoder_scorer_top1_keys: list[tuple[int, int | str]] = []
+        decoder_scorer_top1_scores: list[float] = []
+        decoder_scorer_margins: list[float] = []
+        for idx in range(len(local_track_ids)):
+            best_key, best_prob, _, best_margin = _best_label_from_weights(
+                weight_vector=decoder_score_matrix[idx, :],
+                candidate_keys=candidate_keys,
+            )
+            decoder_scorer_top1_keys.append(best_key)
+            decoder_scorer_top1_scores.append(float(best_prob))
+            decoder_scorer_margins.append(float(best_margin))
 
         decoded_assignments, video_decoder_diag = _decode_video_assignments(
             track_ids=local_track_ids,
             row_indices=local_row_indices,
             candidate_keys=candidate_keys,
-            score_matrix=posterior_matrix,
-            scorer_top1_keys=local_scorer_top1_keys,
-            scorer_top1_scores=local_scorer_top1_scores,
-            scorer_margins=local_scorer_margins,
+            score_matrix=decoder_score_matrix,
+            scorer_top1_keys=decoder_scorer_top1_keys,
+            scorer_top1_scores=decoder_scorer_top1_scores,
+            scorer_margins=decoder_scorer_margins,
             decoder_config=decoder_config,
         )
         decoder_diag_by_video[video_id] = video_decoder_diag
@@ -1713,6 +1896,11 @@ def compute_stagec1_sinkhorn_v1_scores(
             decoded = decoded_assignments[idx]
             decoded_key = decoded["label_key"]
             decoded_label_id = prototype_inventory.labels_by_key[decoded_key] if decoded_key is not None else None
+            scorer_key = local_scorer_top1_keys[idx]
+            if scorer_key == sinkhorn_bg_key:
+                scorer_label_id: int | str = SINKHORN_SPECIAL_BG_LABEL_ID
+            else:
+                scorer_label_id = prototype_inventory.labels_by_key[scorer_key]
             track_scores.append(
                 StageC1TrackScoreRecord(
                     video_id=video_id,
@@ -1720,7 +1908,7 @@ def compute_stagec1_sinkhorn_v1_scores(
                     row_index=local_row_indices[idx],
                     status="processed_with_tracks",
                     score=local_scorer_top1_scores[idx],
-                    predicted_label_id=prototype_inventory.labels_by_key[local_scorer_top1_keys[idx]],
+                    predicted_label_id=scorer_label_id,
                     used_fallback_label_pool=used_fallback,
                     decoder_predicted_label_id=decoded_label_id,
                     decoder_assigned_bg=bool(decoded["assigned_bg"]),
@@ -1729,6 +1917,10 @@ def compute_stagec1_sinkhorn_v1_scores(
                     decoder_margin=float(decoded["margin"]),
                     decoder_bg_reason=str(decoded["bg_reason"]) if decoded["bg_reason"] is not None else None,
                     decoder_ot_prob=float(decoded["ot_prob"]) if decoded["ot_prob"] is not None else None,
+                    predicted_label_source=local_predicted_label_sources[idx],
+                    sinkhorn_active_special_columns=active_special_columns if sinkhorn_c43_config.enable else None,
+                    sinkhorn_bg_posterior=local_sinkhorn_bg_posteriors[idx],
+                    sinkhorn_top_observed_score=local_sinkhorn_top_observed_scores[idx],
                 )
             )
 
@@ -1776,6 +1968,20 @@ def compute_stagec1_sinkhorn_v1_scores(
         row["sinkhorn_col_mass_l1_error"] = sinkhorn_diag.get("col_mass_l1_error")
         row["sinkhorn_target_col_mass"] = sinkhorn_diag.get("target_col_mass")
         row["sinkhorn_posterior_entropy_mean"] = sinkhorn_diag.get("posterior_entropy_mean")
+        if sinkhorn_c43_config.enable:
+            counts = {"observed": 0, "bg": 0, "unk_fg": 0}
+            for rec in track_scores:
+                if rec.video_id != video_id or rec.predicted_label_source is None:
+                    continue
+                counts[rec.predicted_label_source] = counts.get(rec.predicted_label_source, 0) + 1
+            row["sinkhorn_c43_enabled"] = True
+            row["sinkhorn_c43_active_special_columns"] = list(sinkhorn_diag.get("active_special_columns", []))
+            row["sinkhorn_c43_num_tracks_observed"] = int(counts.get("observed", 0))
+            row["sinkhorn_c43_num_tracks_bg"] = int(counts.get("bg", 0))
+            row["sinkhorn_c43_num_tracks_unk_fg"] = int(counts.get("unk_fg", 0))
+            row["sinkhorn_c43_mass_observed_total"] = sinkhorn_diag.get("c43_mass_observed_total")
+            row["sinkhorn_c43_mass_bg_total"] = sinkhorn_diag.get("c43_mass_bg_total")
+            row["sinkhorn_c43_mass_unk_fg_total"] = sinkhorn_diag.get("c43_mass_unk_fg_total")
 
     decoder_total_bg = int(sum(int(diag["decoder_num_tracks_bg"]) for diag in decoder_diag_by_video.values()))
     decoder_total_fg = int(sum(int(diag["decoder_num_tracks_fg"]) for diag in decoder_diag_by_video.values()))
@@ -1818,6 +2024,9 @@ def compute_stagec1_sinkhorn_v1_scores(
     sinkhorn_row_l1_values: list[float] = []
     sinkhorn_col_l1_values: list[float] = []
     sinkhorn_converged_videos = 0
+    sinkhorn_c43_mass_observed_values: list[float] = []
+    sinkhorn_c43_mass_bg_values: list[float] = []
+    sinkhorn_c43_mass_unk_fg_values: list[float] = []
     for diag in sinkhorn_diag_by_video.values():
         if bool(diag.get("converged", False)):
             sinkhorn_converged_videos += 1
@@ -1830,6 +2039,24 @@ def compute_stagec1_sinkhorn_v1_scores(
             sinkhorn_row_l1_values.append(float(row_l1))
         if isinstance(col_l1, (int, float)):
             sinkhorn_col_l1_values.append(float(col_l1))
+        mass_observed = diag.get("c43_mass_observed_total")
+        mass_bg = diag.get("c43_mass_bg_total")
+        mass_unk_fg = diag.get("c43_mass_unk_fg_total")
+        if isinstance(mass_observed, (int, float)):
+            sinkhorn_c43_mass_observed_values.append(float(mass_observed))
+        if isinstance(mass_bg, (int, float)):
+            sinkhorn_c43_mass_bg_values.append(float(mass_bg))
+        if isinstance(mass_unk_fg, (int, float)):
+            sinkhorn_c43_mass_unk_fg_values.append(float(mass_unk_fg))
+
+    sinkhorn_summary_policy_version = "sinkhorn_v1.r2" if sinkhorn_c43_config.enable else "sinkhorn_v1.r1"
+    c43_source_counts = {"observed": 0, "bg": 0, "unk_fg": 0}
+    if sinkhorn_c43_config.enable:
+        for rec in track_scores:
+            source = rec.predicted_label_source
+            if source is None:
+                continue
+            c43_source_counts[source] = c43_source_counts.get(source, 0) + 1
 
     run_summary = _build_run_summary(
         split_view=split_view,
@@ -1893,10 +2120,23 @@ def compute_stagec1_sinkhorn_v1_scores(
                     float(np.mean(np.asarray(sinkhorn_col_l1_values, dtype=np.float64))) if sinkhorn_col_l1_values else None
                 ),
                 "col_mass_l1_error_max": max(sinkhorn_col_l1_values) if sinkhorn_col_l1_values else None,
-                "policy_version": "sinkhorn_v1.r1",
+                "policy_version": sinkhorn_summary_policy_version,
             },
         },
     )
+    if sinkhorn_c43_config.enable:
+        run_summary["sinkhorn_summary"]["c43_enabled"] = True
+        run_summary["sinkhorn_summary"]["c43_enable_bg"] = bool(sinkhorn_c43_config.enable_bg)
+        run_summary["sinkhorn_summary"]["c43_enable_unk_fg"] = bool(sinkhorn_c43_config.enable_unk_fg)
+        run_summary["sinkhorn_summary"]["c43_bg_prior_weight"] = float(sinkhorn_c43_config.bg_prior_weight)
+        run_summary["sinkhorn_summary"]["c43_unk_fg_prior_weight"] = float(sinkhorn_c43_config.unk_fg_prior_weight)
+        run_summary["sinkhorn_summary"]["c43_active_special_columns"] = [SINKHORN_SPECIAL_BG_LABEL_ID]
+        run_summary["sinkhorn_summary"]["c43_num_tracks_observed"] = int(c43_source_counts["observed"])
+        run_summary["sinkhorn_summary"]["c43_num_tracks_bg"] = int(c43_source_counts["bg"])
+        run_summary["sinkhorn_summary"]["c43_num_tracks_unk_fg"] = int(c43_source_counts["unk_fg"])
+        run_summary["sinkhorn_summary"]["c43_mass_observed_total"] = float(sum(sinkhorn_c43_mass_observed_values))
+        run_summary["sinkhorn_summary"]["c43_mass_bg_total"] = float(sum(sinkhorn_c43_mass_bg_values))
+        run_summary["sinkhorn_summary"]["c43_mass_unk_fg_total"] = float(sum(sinkhorn_c43_mass_unk_fg_values))
     if decoder_config.backend == "otlite_v1":
         run_summary["decoder_summary"]["otlite_temperature"] = float(decoder_config.otlite_temperature)
         run_summary["decoder_summary"]["otlite_iters"] = int(decoder_config.otlite_iters)
@@ -2043,6 +2283,14 @@ def write_stagec1_mil_artifacts(result: StageC1MilResult, output_dir: Path) -> D
                 row["decoder_bg_reason"] = record.decoder_bg_reason
             if record.decoder_ot_prob is not None:
                 row["decoder_ot_prob"] = float(record.decoder_ot_prob)
+            if record.predicted_label_source is not None:
+                row["predicted_label_source"] = record.predicted_label_source
+            if record.sinkhorn_active_special_columns is not None:
+                row["sinkhorn_active_special_columns"] = list(record.sinkhorn_active_special_columns)
+            if record.sinkhorn_bg_posterior is not None:
+                row["sinkhorn_bg_posterior"] = float(record.sinkhorn_bg_posterior)
+            if record.sinkhorn_top_observed_score is not None:
+                row["sinkhorn_top_observed_score"] = float(record.sinkhorn_top_observed_score)
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
     per_video_summary_path = output_dir / "per_video_summary.json"
@@ -2085,6 +2333,14 @@ def run_stagec1_mil_baseline_offline(
     sinkhorn_iterations: int = 12,
     sinkhorn_tolerance: float = 1e-6,
     sinkhorn_eps: float = 1e-12,
+    sinkhorn_c43_enable: bool = False,
+    sinkhorn_c43_enable_bg: bool = False,
+    sinkhorn_c43_enable_unk_fg: bool = False,
+    sinkhorn_c43_bg_prior_weight: float = 0.0,
+    sinkhorn_c43_unk_fg_prior_weight: float = 0.0,
+    sinkhorn_c43_unk_fg_min_top_obs_score: float | None = None,
+    sinkhorn_c43_unk_fg_max_top_obs_score: float | None = None,
+    sinkhorn_c43_bg_score: float = 0.0,
 ) -> Dict[str, Any]:
     _require(scorer_backend in SCORER_BACKENDS, "scorer_backend", f"must be one of {sorted(SCORER_BACKENDS)}")
     decoder_config = StageC1DecoderConfig(
@@ -2112,6 +2368,17 @@ def run_stagec1_mil_baseline_offline(
         eps=sinkhorn_eps,
     )
     _validate_sinkhorn_config(sinkhorn_config)
+    sinkhorn_c43_config = StageC1SinkhornC43Config(
+        enable=sinkhorn_c43_enable,
+        enable_bg=sinkhorn_c43_enable_bg,
+        enable_unk_fg=sinkhorn_c43_enable_unk_fg,
+        bg_prior_weight=sinkhorn_c43_bg_prior_weight,
+        unk_fg_prior_weight=sinkhorn_c43_unk_fg_prior_weight,
+        unk_fg_min_top_obs_score=sinkhorn_c43_unk_fg_min_top_obs_score,
+        unk_fg_max_top_obs_score=sinkhorn_c43_unk_fg_max_top_obs_score,
+        bg_score=sinkhorn_c43_bg_score,
+    )
+    _validate_sinkhorn_c43_config(sinkhorn_c43_config)
     if scorer_backend == "mil_v1":
         _require(
             decoder_config.backend == "independent",
@@ -2216,6 +2483,7 @@ def run_stagec1_mil_baseline_offline(
             empty_labelset_policy=empty_labelset_policy,
             decoder_config=decoder_config,
             sinkhorn_config=sinkhorn_config,
+            sinkhorn_c43_config=sinkhorn_c43_config,
         )
 
     artifact_paths = write_stagec1_mil_artifacts(result=result, output_dir=output_dir)

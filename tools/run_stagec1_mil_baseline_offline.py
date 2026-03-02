@@ -98,6 +98,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sinkhorn-iterations", type=int, default=12, help="Sinkhorn scorer iteration count (>=1)")
     parser.add_argument("--sinkhorn-tolerance", type=float, default=1e-6, help="Sinkhorn convergence tolerance (>=0)")
     parser.add_argument("--sinkhorn-eps", type=float, default=1e-12, help="Sinkhorn numerical epsilon (>0)")
+    parser.add_argument(
+        "--sinkhorn-c43-enable",
+        action="store_true",
+        help="Enable sinkhorn C4.3 additive schema (C4.3-A supports bg-only path)",
+    )
+    parser.add_argument(
+        "--sinkhorn-c43-enable-bg",
+        action="store_true",
+        help="Enable sinkhorn C4.3 bg special column (requires --sinkhorn-c43-enable)",
+    )
+    parser.add_argument(
+        "--sinkhorn-c43-enable-unk-fg",
+        action="store_true",
+        help="Reserved for C4.3-B; C4.3-A rejects this when set",
+    )
+    parser.add_argument(
+        "--sinkhorn-c43-bg-prior-weight",
+        type=float,
+        default=0.0,
+        help="C4.3 bg column prior weight (must be >0 when bg column is enabled)",
+    )
+    parser.add_argument(
+        "--sinkhorn-c43-unk-fg-prior-weight",
+        type=float,
+        default=0.0,
+        help="Reserved for C4.3-B; C4.3-A expects 0",
+    )
+    parser.add_argument(
+        "--sinkhorn-c43-unk-fg-min-top-obs-score",
+        type=float,
+        default=None,
+        help="Reserved for C4.3-B; C4.3-A expects null",
+    )
+    parser.add_argument(
+        "--sinkhorn-c43-unk-fg-max-top-obs-score",
+        type=float,
+        default=None,
+        help="Reserved for C4.3-B; C4.3-A expects null",
+    )
+    parser.add_argument(
+        "--sinkhorn-c43-bg-score",
+        type=float,
+        default=0.0,
+        help="Raw score used for sinkhorn C4.3 bg special column",
+    )
     parser.add_argument("--no-eager-validate", action="store_true", help="Disable eager Stage C0 shard validation")
     return parser
 
@@ -140,6 +185,14 @@ def main() -> None:
         sinkhorn_iterations=args.sinkhorn_iterations,
         sinkhorn_tolerance=args.sinkhorn_tolerance,
         sinkhorn_eps=args.sinkhorn_eps,
+        sinkhorn_c43_enable=args.sinkhorn_c43_enable,
+        sinkhorn_c43_enable_bg=args.sinkhorn_c43_enable_bg,
+        sinkhorn_c43_enable_unk_fg=args.sinkhorn_c43_enable_unk_fg,
+        sinkhorn_c43_bg_prior_weight=args.sinkhorn_c43_bg_prior_weight,
+        sinkhorn_c43_unk_fg_prior_weight=args.sinkhorn_c43_unk_fg_prior_weight,
+        sinkhorn_c43_unk_fg_min_top_obs_score=args.sinkhorn_c43_unk_fg_min_top_obs_score,
+        sinkhorn_c43_unk_fg_max_top_obs_score=args.sinkhorn_c43_unk_fg_max_top_obs_score,
+        sinkhorn_c43_bg_score=args.sinkhorn_c43_bg_score,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 
