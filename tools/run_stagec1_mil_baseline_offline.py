@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True, help="Output directory for Stage C1 artifacts")
     parser.add_argument(
         "--scorer-backend",
-        choices=("mil_v1", "labelset_proto_v1"),
+        choices=("mil_v1", "labelset_proto_v1", "em_v1"),
         default="mil_v1",
         help="Scoring backend (default preserves StageC1 MIL behavior)",
     )
@@ -90,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="use_all_prototypes",
         help="Behavior when labelset/prototype intersection is empty",
     )
+    parser.add_argument("--em-temperature", type=float, default=0.10, help="EM scorer temperature (>0)")
+    parser.add_argument("--em-iterations", type=int, default=5, help="EM scorer iteration count (>=1)")
+    parser.add_argument("--em-prior-alpha", type=float, default=1.0, help="EM scorer Dirichlet prior alpha (>=0)")
+    parser.add_argument("--em-eps", type=float, default=1e-12, help="EM scorer numerical epsilon (>0)")
     parser.add_argument("--no-eager-validate", action="store_true", help="Disable eager Stage C0 shard validation")
     return parser
 
@@ -124,6 +128,10 @@ def main() -> None:
         prototype_manifest_json=args.prototype_manifest_json,
         labelset_key=args.labelset_key,
         empty_labelset_policy=args.empty_labelset_policy,
+        em_temperature=args.em_temperature,
+        em_iterations=args.em_iterations,
+        em_prior_alpha=args.em_prior_alpha,
+        em_eps=args.em_eps,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 
