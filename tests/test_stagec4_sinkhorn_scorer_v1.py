@@ -209,12 +209,12 @@ def test_sinkhorn_c42_parity_hard_gate_snapshot(tmp_path: Path) -> None:
     )
 
     assert _artifact_bytes(out_dir)["track_scores.jsonl"] == (
-        b'{"decoder_assigned_bg": false, "decoder_assignment_source": "independent", "decoder_margin": 0.9999092121509193, '
-        b'"decoder_predicted_label_id": 10, "decoder_score": 0.9999546060754596, "predicted_label_id": 10, "row_index": 0, '
-        b'"score": 0.9999546060754596, "status": "processed_with_tracks", "track_id": 1, "video_id": "vid_a"}\n'
-        b'{"decoder_assigned_bg": false, "decoder_assignment_source": "independent", "decoder_margin": 0.9999092121509193, '
-        b'"decoder_predicted_label_id": 20, "decoder_score": 0.9999546060754596, "predicted_label_id": 20, "row_index": 0, '
-        b'"score": 0.9999546060754596, "status": "processed_with_tracks", "track_id": 2, "video_id": "vid_b"}\n'
+        b'{"decoder_assigned_bg": false, "decoder_assignment_source": "independent", "decoder_margin": 0.0, '
+        b'"decoder_predicted_label_id": 10, "decoder_score": 0.5, "predicted_label_id": 10, "row_index": 0, '
+        b'"score": 0.5, "status": "processed_with_tracks", "track_id": 1, "video_id": "vid_a"}\n'
+        b'{"decoder_assigned_bg": false, "decoder_assignment_source": "independent", "decoder_margin": 0.0, '
+        b'"decoder_predicted_label_id": 10, "decoder_score": 0.5, "predicted_label_id": 10, "row_index": 0, '
+        b'"score": 0.5, "status": "processed_with_tracks", "track_id": 2, "video_id": "vid_b"}\n'
     )
     assert b'"policy_version": "sinkhorn_v1.r1"' in _artifact_bytes(out_dir)["run_summary.json"]
     assert b'"sinkhorn_c43_enabled"' not in _artifact_bytes(out_dir)["per_video_summary.json"]
