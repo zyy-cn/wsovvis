@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True, help="Output directory for Stage C1 artifacts")
     parser.add_argument(
         "--scorer-backend",
-        choices=("mil_v1", "labelset_proto_v1", "em_v1"),
+        choices=("mil_v1", "labelset_proto_v1", "em_v1", "sinkhorn_v1"),
         default="mil_v1",
         help="Scoring backend (default preserves StageC1 MIL behavior)",
     )
@@ -94,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--em-iterations", type=int, default=5, help="EM scorer iteration count (>=1)")
     parser.add_argument("--em-prior-alpha", type=float, default=1.0, help="EM scorer Dirichlet prior alpha (>=0)")
     parser.add_argument("--em-eps", type=float, default=1e-12, help="EM scorer numerical epsilon (>0)")
+    parser.add_argument("--sinkhorn-temperature", type=float, default=0.10, help="Sinkhorn scorer temperature (>0)")
+    parser.add_argument("--sinkhorn-iterations", type=int, default=12, help="Sinkhorn scorer iteration count (>=1)")
+    parser.add_argument("--sinkhorn-tolerance", type=float, default=1e-6, help="Sinkhorn convergence tolerance (>=0)")
+    parser.add_argument("--sinkhorn-eps", type=float, default=1e-12, help="Sinkhorn numerical epsilon (>0)")
     parser.add_argument("--no-eager-validate", action="store_true", help="Disable eager Stage C0 shard validation")
     return parser
 
@@ -132,6 +136,10 @@ def main() -> None:
         em_iterations=args.em_iterations,
         em_prior_alpha=args.em_prior_alpha,
         em_eps=args.em_eps,
+        sinkhorn_temperature=args.sinkhorn_temperature,
+        sinkhorn_iterations=args.sinkhorn_iterations,
+        sinkhorn_tolerance=args.sinkhorn_tolerance,
+        sinkhorn_eps=args.sinkhorn_eps,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
 

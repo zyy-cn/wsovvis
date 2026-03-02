@@ -11,7 +11,7 @@ import numpy as np
 from .stagec_loader_v1 import StageCTrackRecord, load_stageb_export_split_v1
 from .v1_core import ALL_STATUSES, PROCESSED_STATUSES, ExportContractError
 
-SCORER_BACKENDS = {"mil_v1", "labelset_proto_v1", "em_v1"}
+SCORER_BACKENDS = {"mil_v1", "labelset_proto_v1", "em_v1", "sinkhorn_v1"}
 DECODER_BACKENDS = {"independent", "coverage_greedy_v1", "otlite_v1"}
 EMPTY_LABELSET_POLICIES = {"use_all_prototypes", "error"}
 PROTOTYPE_SCHEMA_NAME_V1 = "wsovvis.stagec.label_prototypes.v1"
@@ -47,6 +47,14 @@ class StageC1EmConfig:
     temperature: float = 0.10
     iterations: int = 5
     prior_alpha: float = 1.0
+    eps: float = 1e-12
+
+
+@dataclass(frozen=True)
+class StageC1SinkhornConfig:
+    temperature: float = 0.10
+    iterations: int = 12
+    tolerance: float = 1e-6
     eps: float = 1e-12
 
 
@@ -186,6 +194,17 @@ def _validate_em_config(config: StageC1EmConfig) -> None:
     _require(float(config.prior_alpha) >= 0.0, "em.prior_alpha", "must be >= 0")
     _require(_is_number(config.eps), "em.eps", "must be numeric")
     _require(float(config.eps) > 0.0, "em.eps", "must be > 0")
+
+
+def _validate_sinkhorn_config(config: StageC1SinkhornConfig) -> None:
+    _require(_is_number(config.temperature), "sinkhorn.temperature", "must be numeric")
+    _require(float(config.temperature) > 0.0, "sinkhorn.temperature", "must be > 0")
+    _require(isinstance(config.iterations, int), "sinkhorn.iterations", "must be integer >= 1")
+    _require(int(config.iterations) >= 1, "sinkhorn.iterations", "must be integer >= 1")
+    _require(_is_number(config.tolerance), "sinkhorn.tolerance", "must be numeric")
+    _require(float(config.tolerance) >= 0.0, "sinkhorn.tolerance", "must be >= 0")
+    _require(_is_number(config.eps), "sinkhorn.eps", "must be numeric")
+    _require(float(config.eps) > 0.0, "sinkhorn.eps", "must be > 0")
 
 
 def _compute_track_score(track: StageCTrackRecord, config: StageC1MilConfig) -> float:
@@ -646,6 +665,72 @@ def _compute_em_posteriors(
         pi = pi / pi_sum
 
     return gamma, pi
+
+
+def _compute_sinkhorn_posteriors(
+    *,
+    score_matrix: np.ndarray,
+    temperature: float,
+    iterations: int,
+    tolerance: float,
+    eps: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    _require(score_matrix.ndim == 2, "sinkhorn.score_matrix", "must be rank-2")
+    _require(np.isfinite(score_matrix).all(), "sinkhorn.score_matrix", "must contain only finite values")
+    num_tracks, num_labels = score_matrix.shape
+    _require(num_labels > 0, "candidate_labels", "must be non-empty")
+    if num_tracks == 0:
+        return np.zeros((0, num_labels), dtype=np.float64), {
+            "converged": True,
+            "iterations_used": 0,
+            "row_mass_l1_error": 0.0,
+            "col_mass_l1_error": 0.0,
+            "target_col_mass": 0.0,
+            "posterior_entropy_mean": None,
+        }
+
+    score64 = score_matrix.astype(np.float64, copy=False)
+    row_max = np.max(score64, axis=1, keepdims=True)
+    stable = score64 - row_max
+    kernel = np.exp(stable / float(temperature))
+    kernel = np.maximum(kernel, float(eps))
+    _require(np.isfinite(kernel).all(), "sinkhorn.kernel", "must contain only finite values")
+
+    target_col_mass = float(num_tracks) / float(num_labels)
+    plan = kernel.astype(np.float64, copy=True)
+    converged = False
+    iterations_used = int(iterations)
+    row_mass_l1_error = float("inf")
+    col_mass_l1_error = float("inf")
+
+    for idx in range(int(iterations)):
+        row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(eps))
+        plan = plan / row_sums
+        col_sums = np.maximum(np.sum(plan, axis=0, keepdims=True), float(eps))
+        plan = plan * (target_col_mass / col_sums)
+
+        row_mass_l1_error = float(np.sum(np.abs(np.sum(plan, axis=1) - 1.0)))
+        col_mass_l1_error = float(np.sum(np.abs(np.sum(plan, axis=0) - target_col_mass)))
+        if max(row_mass_l1_error, col_mass_l1_error) <= float(tolerance):
+            converged = True
+            iterations_used = idx + 1
+            break
+
+    row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(eps))
+    posterior = plan / row_sums
+    row_mass_l1_error = float(np.sum(np.abs(np.sum(posterior, axis=1) - 1.0)))
+    col_mass_l1_error = float(np.sum(np.abs(np.sum(posterior, axis=0) - target_col_mass)))
+    clamped = np.maximum(posterior, float(eps))
+    row_entropy = -np.sum(clamped * np.log(clamped), axis=1)
+
+    return posterior, {
+        "converged": bool(converged),
+        "iterations_used": int(iterations_used),
+        "row_mass_l1_error": float(row_mass_l1_error),
+        "col_mass_l1_error": float(col_mass_l1_error),
+        "target_col_mass": float(target_col_mass),
+        "posterior_entropy_mean": float(np.mean(row_entropy)),
+    }
 
 
 def _track_tiebreak_key(track_id: str | int, row_index: int) -> tuple[int, str]:
@@ -1501,6 +1586,339 @@ def compute_stagec1_em_v1_scores(
     )
 
 
+def compute_stagec1_sinkhorn_v1_scores(
+    split_view: Any,
+    *,
+    prototype_inventory: StageCLabelPrototypeInventory,
+    labelset_lookup: Mapping[str, Sequence[tuple[int, int | str]]],
+    config: StageC1MilConfig | None = None,
+    empty_labelset_policy: str = "use_all_prototypes",
+    decoder_config: StageC1DecoderConfig | None = None,
+    sinkhorn_config: StageC1SinkhornConfig | None = None,
+) -> StageC1MilResult:
+    config = config or StageC1MilConfig()
+    decoder_config = decoder_config or StageC1DecoderConfig()
+    sinkhorn_config = sinkhorn_config or StageC1SinkhornConfig()
+    _validate_config(config)
+    _validate_decoder_config(decoder_config)
+    _validate_sinkhorn_config(sinkhorn_config)
+    _require(empty_labelset_policy in EMPTY_LABELSET_POLICIES, "empty_labelset_policy", f"must be one of {sorted(EMPTY_LABELSET_POLICIES)}")
+    _require(
+        int(getattr(split_view, "embedding_dim", -1)) == prototype_inventory.embedding_dim,
+        "prototype_manifest.embedding_dim",
+        "must match split embedding_dim",
+    )
+
+    all_videos, processed_with_tracks_video_ids, expected_track_keys = _iter_processed_with_tracks(split_view, config)
+    prototype_keys_all = tuple(sorted(prototype_inventory.labels_by_key.keys()))
+    proto = prototype_inventory.prototypes.astype(np.float64, copy=False)
+    proto_norms = np.linalg.norm(proto, axis=1, keepdims=True)
+    normalized_proto = proto / proto_norms
+
+    track_scores: list[StageC1TrackScoreRecord] = []
+    seen_keys: set[tuple[str, str | int]] = set()
+
+    videos_missing_labelset: list[str] = []
+    videos_with_nonempty_labelset = 0
+    videos_using_fallback = 0
+    fallback_tracks_total = 0
+    labelset_size_by_video: Dict[str, int] = {}
+    fallback_track_count_by_video: Dict[str, int] = {}
+    decoder_diag_by_video: Dict[str, Dict[str, Any]] = {}
+    sinkhorn_diag_by_video: Dict[str, Dict[str, Any]] = {}
+
+    for video_id in processed_with_tracks_video_ids:
+        raw_keys = tuple(labelset_lookup.get(video_id, ()))
+        labelset_size_by_video[video_id] = len(raw_keys)
+        if video_id not in labelset_lookup:
+            videos_missing_labelset.append(video_id)
+        if raw_keys:
+            videos_with_nonempty_labelset += 1
+
+        candidate_keys = tuple(sorted(key for key in raw_keys if key in prototype_inventory.row_index_by_key))
+        used_fallback = False
+        if not candidate_keys:
+            if empty_labelset_policy == "error":
+                raise _err(
+                    "labelset_lookup",
+                    (
+                        f"video '{video_id}' has empty candidate label intersection against prototype inventory "
+                        "under empty_labelset_policy='error'"
+                    ),
+                )
+            candidate_keys = prototype_keys_all
+            used_fallback = True
+            videos_using_fallback += 1
+
+        local_fallback_tracks = 0
+        local_track_ids: list[str | int] = []
+        local_row_indices: list[int] = []
+        local_cos_score_vectors: list[np.ndarray] = []
+        for track in split_view.iter_tracks(video_id):
+            track_id, row_index = _validate_track_identity(track, video_id)
+            key = (video_id, track_id)
+            _require(key not in seen_keys, "track.identity", f"duplicate (video_id, track_id) key {key}")
+            seen_keys.add(key)
+
+            score_vector = _compute_proto_track_score_vector(
+                embedding=track.embedding,
+                candidate_keys=candidate_keys,
+                inventory=prototype_inventory,
+                normalized_prototypes=normalized_proto,
+            )
+            if used_fallback:
+                local_fallback_tracks += 1
+                fallback_tracks_total += 1
+            local_track_ids.append(track_id)
+            local_row_indices.append(row_index)
+            local_cos_score_vectors.append(score_vector)
+
+        local_cos_score_matrix = (
+            np.vstack(local_cos_score_vectors) if local_cos_score_vectors else np.zeros((0, len(candidate_keys)), dtype=np.float64)
+        )
+        posterior_matrix, sinkhorn_diag = _compute_sinkhorn_posteriors(
+            score_matrix=local_cos_score_matrix,
+            temperature=float(sinkhorn_config.temperature),
+            iterations=int(sinkhorn_config.iterations),
+            tolerance=float(sinkhorn_config.tolerance),
+            eps=float(sinkhorn_config.eps),
+        )
+        sinkhorn_diag_by_video[video_id] = sinkhorn_diag
+
+        local_scorer_top1_keys: list[tuple[int, int | str]] = []
+        local_scorer_top1_scores: list[float] = []
+        local_scorer_margins: list[float] = []
+        for idx in range(len(local_track_ids)):
+            best_key, best_prob, _, best_margin = _best_label_from_weights(
+                weight_vector=posterior_matrix[idx, :],
+                candidate_keys=candidate_keys,
+            )
+            local_scorer_top1_keys.append(best_key)
+            local_scorer_top1_scores.append(float(best_prob))
+            local_scorer_margins.append(float(best_margin))
+
+        decoded_assignments, video_decoder_diag = _decode_video_assignments(
+            track_ids=local_track_ids,
+            row_indices=local_row_indices,
+            candidate_keys=candidate_keys,
+            score_matrix=posterior_matrix,
+            scorer_top1_keys=local_scorer_top1_keys,
+            scorer_top1_scores=local_scorer_top1_scores,
+            scorer_margins=local_scorer_margins,
+            decoder_config=decoder_config,
+        )
+        decoder_diag_by_video[video_id] = video_decoder_diag
+
+        for idx, track_id in enumerate(local_track_ids):
+            decoded = decoded_assignments[idx]
+            decoded_key = decoded["label_key"]
+            decoded_label_id = prototype_inventory.labels_by_key[decoded_key] if decoded_key is not None else None
+            track_scores.append(
+                StageC1TrackScoreRecord(
+                    video_id=video_id,
+                    track_id=track_id,
+                    row_index=local_row_indices[idx],
+                    status="processed_with_tracks",
+                    score=local_scorer_top1_scores[idx],
+                    predicted_label_id=prototype_inventory.labels_by_key[local_scorer_top1_keys[idx]],
+                    used_fallback_label_pool=used_fallback,
+                    decoder_predicted_label_id=decoded_label_id,
+                    decoder_assigned_bg=bool(decoded["assigned_bg"]),
+                    decoder_assignment_source=str(decoded["source"]),
+                    decoder_score=float(decoded["score"]),
+                    decoder_margin=float(decoded["margin"]),
+                    decoder_bg_reason=str(decoded["bg_reason"]) if decoded["bg_reason"] is not None else None,
+                    decoder_ot_prob=float(decoded["ot_prob"]) if decoded["ot_prob"] is not None else None,
+                )
+            )
+
+        fallback_track_count_by_video[video_id] = local_fallback_tracks
+
+    emitted_keys = _validate_emitted_order_and_non_empty(
+        track_scores=track_scores,
+        expected_track_keys=expected_track_keys,
+        processed_with_tracks_video_ids=processed_with_tracks_video_ids,
+    )
+
+    top_pred_labels_by_video: Dict[str, list[dict[str, Any]]] = {}
+    by_video: Dict[str, Dict[str, int]] = {}
+    for rec in track_scores:
+        if rec.predicted_label_id is None:
+            continue
+        video_map = by_video.setdefault(rec.video_id, {})
+        ckey = _canonical_label_key_text(rec.predicted_label_id)
+        video_map[ckey] = video_map.get(ckey, 0) + 1
+    for video_id, counts in by_video.items():
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        top_pred_labels_by_video[video_id] = [
+            {
+                "canonical_label_key": label_key,
+                "count": int(count),
+            }
+            for label_key, count in ranked[:3]
+        ]
+
+    per_video_summary = _build_per_video_summary(
+        track_scores,
+        top_k_per_video=config.top_k_per_video,
+        labelset_size_by_video=labelset_size_by_video,
+        fallback_track_count_by_video=fallback_track_count_by_video,
+        top_predicted_labels_by_video=top_pred_labels_by_video,
+        decoder_diag_by_video=decoder_diag_by_video,
+    )
+
+    for row in per_video_summary:
+        video_id = str(row["video_id"])
+        sinkhorn_diag = sinkhorn_diag_by_video.get(video_id, {})
+        row["sinkhorn_converged"] = bool(sinkhorn_diag.get("converged", False))
+        row["sinkhorn_iterations_used"] = int(sinkhorn_diag.get("iterations_used", 0))
+        row["sinkhorn_row_mass_l1_error"] = sinkhorn_diag.get("row_mass_l1_error")
+        row["sinkhorn_col_mass_l1_error"] = sinkhorn_diag.get("col_mass_l1_error")
+        row["sinkhorn_target_col_mass"] = sinkhorn_diag.get("target_col_mass")
+        row["sinkhorn_posterior_entropy_mean"] = sinkhorn_diag.get("posterior_entropy_mean")
+
+    decoder_total_bg = int(sum(int(diag["decoder_num_tracks_bg"]) for diag in decoder_diag_by_video.values()))
+    decoder_total_fg = int(sum(int(diag["decoder_num_tracks_fg"]) for diag in decoder_diag_by_video.values()))
+    decoder_coverage_target = int(sum(int(diag["decoder_coverage_target_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_coverage_hit = int(sum(int(diag["decoder_coverage_hit_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_tie_break_total = int(sum(int(diag["decoder_tie_break_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_coverage_skip_fg_min_total = int(
+        sum(int(diag["decoder_coverage_skip_fg_min_count"]) for diag in decoder_diag_by_video.values())
+    )
+    decoder_coverage_skip_bg_gate_total = int(
+        sum(int(diag["decoder_coverage_skip_bg_gate_count"]) for diag in decoder_diag_by_video.values())
+    )
+    decoder_fill_fg_total = int(sum(int(diag["decoder_fill_fg_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_fill_bg_total = int(sum(int(diag["decoder_fill_bg_count"]) for diag in decoder_diag_by_video.values()))
+    decoder_bg_reason_counts: dict[str, int] = {"score_threshold": 0, "min_margin": 0, "fg_score_min": 0, "ot_prob_min": 0}
+    for diag in decoder_diag_by_video.values():
+        reason_counts = diag.get("decoder_bg_reason_counts")
+        if isinstance(reason_counts, dict):
+            for key in ("score_threshold", "min_margin", "fg_score_min", "ot_prob_min"):
+                decoder_bg_reason_counts[key] += int(reason_counts.get(key, 0))
+    decoder_coverage_ratio = float(decoder_coverage_hit / decoder_coverage_target) if decoder_coverage_target > 0 else None
+    otlite_col_l1_values: list[float] = []
+    otlite_row_l1_values: list[float] = []
+    otlite_bg_ot_prob_count = 0
+    if decoder_config.backend == "otlite_v1":
+        for diag in decoder_diag_by_video.values():
+            col_err = diag.get("decoder_otlite_col_mass_l1_error")
+            row_err = diag.get("decoder_otlite_row_mass_l1_error")
+            if isinstance(col_err, (int, float)):
+                otlite_col_l1_values.append(float(col_err))
+            if isinstance(row_err, (int, float)):
+                otlite_row_l1_values.append(float(row_err))
+            otlite_bg_ot_prob_count += int(diag.get("decoder_otlite_bg_ot_prob_count", 0))
+
+    policy_version = "coverage_greedy_v1.r1b"
+    if decoder_config.backend == "otlite_v1":
+        policy_version = "otlite_v1.r2a"
+
+    sinkhorn_entropy_values: list[float] = []
+    sinkhorn_row_l1_values: list[float] = []
+    sinkhorn_col_l1_values: list[float] = []
+    sinkhorn_converged_videos = 0
+    for diag in sinkhorn_diag_by_video.values():
+        if bool(diag.get("converged", False)):
+            sinkhorn_converged_videos += 1
+        entropy = diag.get("posterior_entropy_mean")
+        row_l1 = diag.get("row_mass_l1_error")
+        col_l1 = diag.get("col_mass_l1_error")
+        if isinstance(entropy, (int, float)):
+            sinkhorn_entropy_values.append(float(entropy))
+        if isinstance(row_l1, (int, float)):
+            sinkhorn_row_l1_values.append(float(row_l1))
+        if isinstance(col_l1, (int, float)):
+            sinkhorn_col_l1_values.append(float(col_l1))
+
+    run_summary = _build_run_summary(
+        split_view=split_view,
+        track_scores=track_scores,
+        all_videos=all_videos,
+        expected_track_keys=expected_track_keys,
+        emitted_keys=emitted_keys,
+        scorer_backend="sinkhorn_v1",
+        extra={
+            "prototype_inventory": {
+                "schema_name": prototype_inventory.schema_name,
+                "schema_version": prototype_inventory.schema_version,
+                "num_labels": len(prototype_inventory.labels_by_key),
+                "embedding_dim": prototype_inventory.embedding_dim,
+                "dtype": prototype_inventory.dtype,
+                "array_key": prototype_inventory.array_key,
+            },
+            "labelset_coverage": {
+                "videos_with_nonempty_labelset": videos_with_nonempty_labelset,
+                "videos_missing_labelset": sorted(videos_missing_labelset),
+                "num_videos_missing_labelset": len(videos_missing_labelset),
+                "num_videos_using_fallback_label_pool": videos_using_fallback,
+                "num_tracks_scored_with_fallback_label_pool": fallback_tracks_total,
+                "empty_labelset_policy": empty_labelset_policy,
+            },
+            "label_conditioned_score_distribution": _as_stats([r.score for r in track_scores]),
+            "decoder_backend": decoder_config.backend,
+            "decoder_summary": {
+                "num_tracks_fg": decoder_total_fg,
+                "num_tracks_bg": decoder_total_bg,
+                "coverage_target_count": decoder_coverage_target,
+                "coverage_hit_count": decoder_coverage_hit,
+                "coverage_ratio": decoder_coverage_ratio,
+                "tie_break_count": decoder_tie_break_total,
+                "coverage_skip_fg_min_count": decoder_coverage_skip_fg_min_total,
+                "coverage_skip_bg_gate_count": decoder_coverage_skip_bg_gate_total,
+                "fill_fg_count": decoder_fill_fg_total,
+                "fill_bg_count": decoder_fill_bg_total,
+                "bg_reason_counts": decoder_bg_reason_counts,
+                "fg_score_min": float(decoder_config.fg_score_min),
+                "bg_score_threshold": decoder_config.bg_score_threshold,
+                "bg_min_margin": decoder_config.bg_min_margin,
+                "policy_version": policy_version,
+            },
+            "sinkhorn_summary": {
+                "temperature": float(sinkhorn_config.temperature),
+                "iterations": int(sinkhorn_config.iterations),
+                "tolerance": float(sinkhorn_config.tolerance),
+                "eps": float(sinkhorn_config.eps),
+                "videos_converged": int(sinkhorn_converged_videos),
+                "videos_total": int(len(sinkhorn_diag_by_video)),
+                "posterior_entropy_mean": (
+                    float(np.mean(np.asarray(sinkhorn_entropy_values, dtype=np.float64))) if sinkhorn_entropy_values else None
+                ),
+                "posterior_entropy_max": max(sinkhorn_entropy_values) if sinkhorn_entropy_values else None,
+                "row_mass_l1_error_mean": (
+                    float(np.mean(np.asarray(sinkhorn_row_l1_values, dtype=np.float64))) if sinkhorn_row_l1_values else None
+                ),
+                "row_mass_l1_error_max": max(sinkhorn_row_l1_values) if sinkhorn_row_l1_values else None,
+                "col_mass_l1_error_mean": (
+                    float(np.mean(np.asarray(sinkhorn_col_l1_values, dtype=np.float64))) if sinkhorn_col_l1_values else None
+                ),
+                "col_mass_l1_error_max": max(sinkhorn_col_l1_values) if sinkhorn_col_l1_values else None,
+                "policy_version": "sinkhorn_v1.r1",
+            },
+        },
+    )
+    if decoder_config.backend == "otlite_v1":
+        run_summary["decoder_summary"]["otlite_temperature"] = float(decoder_config.otlite_temperature)
+        run_summary["decoder_summary"]["otlite_iters"] = int(decoder_config.otlite_iters)
+        run_summary["decoder_summary"]["otlite_eps"] = float(decoder_config.otlite_eps)
+        run_summary["decoder_summary"]["otlite_ot_prob_min"] = decoder_config.otlite_ot_prob_min
+        run_summary["decoder_summary"]["otlite_col_mass_l1_error_mean"] = (
+            float(np.mean(np.asarray(otlite_col_l1_values, dtype=np.float64))) if otlite_col_l1_values else None
+        )
+        run_summary["decoder_summary"]["otlite_col_mass_l1_error_max"] = max(otlite_col_l1_values) if otlite_col_l1_values else None
+        run_summary["decoder_summary"]["otlite_row_mass_l1_error_mean"] = (
+            float(np.mean(np.asarray(otlite_row_l1_values, dtype=np.float64))) if otlite_row_l1_values else None
+        )
+        run_summary["decoder_summary"]["otlite_row_mass_l1_error_max"] = max(otlite_row_l1_values) if otlite_row_l1_values else None
+        run_summary["decoder_summary"]["otlite_bg_ot_prob_count"] = int(otlite_bg_ot_prob_count)
+
+    return StageC1MilResult(
+        track_scores=tuple(track_scores),
+        per_video_summary=tuple(per_video_summary),
+        run_summary=run_summary,
+    )
+
+
 def _build_per_video_summary(
     track_scores: Sequence[StageC1TrackScoreRecord],
     *,
@@ -1663,6 +2081,10 @@ def run_stagec1_mil_baseline_offline(
     em_iterations: int = 5,
     em_prior_alpha: float = 1.0,
     em_eps: float = 1e-12,
+    sinkhorn_temperature: float = 0.10,
+    sinkhorn_iterations: int = 12,
+    sinkhorn_tolerance: float = 1e-6,
+    sinkhorn_eps: float = 1e-12,
 ) -> Dict[str, Any]:
     _require(scorer_backend in SCORER_BACKENDS, "scorer_backend", f"must be one of {sorted(SCORER_BACKENDS)}")
     decoder_config = StageC1DecoderConfig(
@@ -1683,6 +2105,13 @@ def run_stagec1_mil_baseline_offline(
         eps=em_eps,
     )
     _validate_em_config(em_config)
+    sinkhorn_config = StageC1SinkhornConfig(
+        temperature=sinkhorn_temperature,
+        iterations=sinkhorn_iterations,
+        tolerance=sinkhorn_tolerance,
+        eps=sinkhorn_eps,
+    )
+    _validate_sinkhorn_config(sinkhorn_config)
     if scorer_backend == "mil_v1":
         _require(
             decoder_config.backend == "independent",
@@ -1752,7 +2181,7 @@ def run_stagec1_mil_baseline_offline(
             empty_labelset_policy=empty_labelset_policy,
             decoder_config=decoder_config,
         )
-    else:
+    elif scorer_backend == "em_v1":
         _require(labelset_json is not None, "labelset_json", "required when scorer_backend='em_v1'")
         _require(
             prototype_manifest_json is not None,
@@ -1769,6 +2198,24 @@ def run_stagec1_mil_baseline_offline(
             empty_labelset_policy=empty_labelset_policy,
             decoder_config=decoder_config,
             em_config=em_config,
+        )
+    else:
+        _require(labelset_json is not None, "labelset_json", "required when scorer_backend='sinkhorn_v1'")
+        _require(
+            prototype_manifest_json is not None,
+            "prototype_manifest_json",
+            "required when scorer_backend='sinkhorn_v1'",
+        )
+        inventory = load_stagec_label_prototype_inventory_v1(prototype_manifest_json)
+        labelset_lookup = load_stagec_labelset_lookup(labelset_json, labelset_key=labelset_key)
+        result = compute_stagec1_sinkhorn_v1_scores(
+            split_view,
+            prototype_inventory=inventory,
+            labelset_lookup=labelset_lookup,
+            config=config,
+            empty_labelset_policy=empty_labelset_policy,
+            decoder_config=decoder_config,
+            sinkhorn_config=sinkhorn_config,
         )
 
     artifact_paths = write_stagec1_mil_artifacts(result=result, output_dir=output_dir)
