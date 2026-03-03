@@ -151,6 +151,8 @@ def _evaluate_metrics_checks(
     on_rows: list[dict[str, Any]],
     total_loss_key: str,
     parity_tol: float,
+    expect_nonzero_on: bool = False,
+    nonzero_eps: float = 1e-12,
 ) -> dict[str, Any]:
     off_has_attr = any("loss_stage_d_attr" in row for row in off_rows)
     on_attr_values = [float(row["loss_stage_d_attr"]) for row in on_rows if "loss_stage_d_attr" in row]
@@ -162,17 +164,27 @@ def _evaluate_metrics_checks(
     total_diff = abs(off_total - on_total)
     parity_ok = total_diff <= parity_tol
     on_zero_ok = on_has_attr and abs(on_last_attr) <= parity_tol
-    checks_ok = (not off_has_attr) and on_zero_ok and parity_ok
+    on_nonzero_ok = on_has_attr and abs(on_last_attr) > nonzero_eps
+    on_total_increase = on_total - off_total
+    total_increase_ok = on_total_increase > nonzero_eps
+    checks_ok = (
+        (not off_has_attr)
+        and (on_nonzero_ok and total_increase_ok if expect_nonzero_on else (on_zero_ok and parity_ok))
+    )
 
     return {
+        "expect_nonzero_on": expect_nonzero_on,
         "off_has_attr": off_has_attr,
         "on_has_attr": on_has_attr,
         "on_last_attr": on_last_attr,
         "off_total": off_total,
         "on_total": on_total,
         "total_diff": total_diff,
+        "on_total_increase": on_total_increase,
         "parity_ok": parity_ok,
         "on_zero_ok": on_zero_ok,
+        "on_nonzero_ok": on_nonzero_ok,
+        "total_increase_ok": total_increase_ok,
         "checks_ok": checks_ok,
     }
 
@@ -181,7 +193,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Run D9 OFF/ON short entrypoint smoke and validate loss_stage_d_attr "
-            "absence/presence + weight=0 parity."
+            "absence/presence with either weight=0 parity or nonzero-weight ON-path checks."
         )
     )
     parser.add_argument(
@@ -253,6 +265,24 @@ def main() -> int:
         type=float,
         default=1e-9,
         help="Absolute tolerance for OFF/ON total loss parity",
+    )
+    parser.add_argument(
+        "--on-mode",
+        choices=("zero", "nonzero"),
+        default="zero",
+        help="ON-path semantic mode: zero (default sentinel) or nonzero (N3 smoke)",
+    )
+    parser.add_argument(
+        "--on-weight",
+        type=float,
+        default=None,
+        help="Explicit ON-path additive weight (default: 0.0 for zero mode, 0.25 for nonzero mode)",
+    )
+    parser.add_argument(
+        "--nonzero-eps",
+        type=float,
+        default=1e-12,
+        help="Strict positivity threshold for ON nonzero checks",
     )
     parser.add_argument(
         "--keep-output",
@@ -386,7 +416,14 @@ def main() -> int:
         "stage_d_attribution.objective_coupling.enabled=True",
         "stage_d_attribution.objective_coupling.weight=0.0",
         "stage_d_attribution.additive_loss_key.enabled=True",
-        "stage_d_attribution.additive_loss_key.weight=0.0",
+        (
+            f"stage_d_attribution.additive_loss_key.weight="
+            f"{args.on_weight if args.on_weight is not None else (0.25 if args.on_mode == 'nonzero' else 0.0)}"
+        ),
+        (
+            "stage_d_attribution.additive_loss_key.nonzero_semantics.enabled="
+            f"{'True' if args.on_mode == 'nonzero' else 'False'}"
+        ),
     ]
 
     if args.dry_run:
@@ -408,17 +445,25 @@ def main() -> int:
         on_rows=on_rows,
         total_loss_key=args.total_loss_key,
         parity_tol=args.parity_tol,
+        expect_nonzero_on=args.on_mode == "nonzero",
+        nonzero_eps=args.nonzero_eps,
     )
 
     print(f"D10_OFF_METRICS={off_metrics}")
     print(f"D10_ON_METRICS={on_metrics}")
+    print(f"D10_ON_MODE={args.on_mode}")
     print(f"D10_OFF_HAS_LOSS_STAGE_D_ATTR={results['off_has_attr']}")
     print(f"D10_ON_HAS_LOSS_STAGE_D_ATTR={results['on_has_attr']}")
     print(f"D10_ON_LOSS_STAGE_D_ATTR={results['on_last_attr']}")
     print(f"D10_OFF_TOTAL_LOSS={results['off_total']:.15f}")
     print(f"D10_ON_TOTAL_LOSS={results['on_total']:.15f}")
     print(f"D10_TOTAL_LOSS_DIFF={results['total_diff']:.15f}")
+    print(f"D10_TOTAL_LOSS_INCREASE={results['on_total_increase']:.15f}")
     print(f"D10_PARITY_TOL={args.parity_tol}")
+    print(f"D10_NONZERO_EPS={args.nonzero_eps}")
+    print(f"D10_ON_ZERO_OK={results['on_zero_ok']}")
+    print(f"D10_ON_NONZERO_OK={results['on_nonzero_ok']}")
+    print(f"D10_TOTAL_INCREASE_OK={results['total_increase_ok']}")
     print(f"D10_CHECKS_PASS={results['checks_ok']}")
 
     if results["checks_ok"]:

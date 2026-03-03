@@ -58,6 +58,45 @@ def test_evaluate_metrics_checks_total_loss_parity_within_tolerance() -> None:
     assert out["checks_ok"] is True
 
 
+def test_evaluate_metrics_checks_nonzero_mode_requires_nonzero_attr_and_total_increase() -> None:
+    helper = _load_helper_module()
+    off_rows = [{"total_loss": 1.5}]
+    on_rows = [{"loss_stage_d_attr": 0.25, "total_loss": 1.75}]
+
+    out = helper._evaluate_metrics_checks(
+        off_rows=off_rows,
+        on_rows=on_rows,
+        total_loss_key="total_loss",
+        parity_tol=1e-9,
+        expect_nonzero_on=True,
+        nonzero_eps=1e-12,
+    )
+
+    assert out["expect_nonzero_on"] is True
+    assert out["on_nonzero_ok"] is True
+    assert out["total_increase_ok"] is True
+    assert out["checks_ok"] is True
+
+
+def test_evaluate_metrics_checks_nonzero_mode_fails_when_attr_is_zero() -> None:
+    helper = _load_helper_module()
+    off_rows = [{"total_loss": 1.5}]
+    on_rows = [{"loss_stage_d_attr": 0.0, "total_loss": 1.5}]
+
+    out = helper._evaluate_metrics_checks(
+        off_rows=off_rows,
+        on_rows=on_rows,
+        total_loss_key="total_loss",
+        parity_tol=1e-9,
+        expect_nonzero_on=True,
+        nonzero_eps=1e-12,
+    )
+
+    assert out["on_nonzero_ok"] is False
+    assert out["total_increase_ok"] is False
+    assert out["checks_ok"] is False
+
+
 def test_load_metrics_rows_fail_fast_on_missing_or_bad_json(tmp_path: Path) -> None:
     helper = _load_helper_module()
     missing = tmp_path / "missing.json"
