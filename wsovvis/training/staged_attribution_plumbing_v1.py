@@ -740,7 +740,15 @@ def apply_stage_d_additive_loss_key(
             result["gate_status"]["loss_key_conflict"] = True
             result["skip_reason"] = "loss_key_conflict"
             return result
-        loss_dict[loss_key] = 0.0
+        zero_value: Any = 0.0
+        for existing_loss in loss_dict.values():
+            # Training loss dicts are usually tensors; preserve scalar tensor type/device
+            # so trainer reduction/metrics paths remain stable at the real integration hook.
+            new_zeros = getattr(existing_loss, "new_zeros", None)
+            if callable(new_zeros):
+                zero_value = new_zeros(())
+                break
+        loss_dict[loss_key] = zero_value
         result["planned_loss"]["apply_mode"] = "loss_dict_insert_zero"
         result["diagnostics"]["inserted_into_loss_dict"] = True
     else:

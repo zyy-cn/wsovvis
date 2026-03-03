@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 
 from wsovvis.training import (
     StageDAttributionPlumbingError,
@@ -409,3 +410,84 @@ def test_stage_d6_additive_loss_key_uses_placeholder_when_loss_dict_missing() ->
     assert d6["diagnostics"]["inserted_into_loss_dict"] is False
     assert d6["diagnostics"]["used_placeholder_path"] is True
     assert d6["planned_loss"]["apply_mode"] == "placeholder_zero"
+
+
+def test_stage_d7_real_hook_default_off_parity_keeps_loss_dict_unchanged() -> None:
+    losses: dict[str, torch.Tensor] = {"loss_mask": torch.tensor(1.0)}
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {"enabled": False},
+            "stage_d_attribution_coupling": {"applied": False},
+        },
+        losses,
+    )
+    assert d6["applied"] is False
+    assert d6["skip_reason"] == "stage_d_attribution_disabled"
+    assert "loss_stage_d_attr" not in losses
+    assert float(losses["loss_mask"].item()) == pytest.approx(1.0)
+
+
+def test_stage_d7_real_hook_weight_zero_inserts_tensor_zero_observable_noop() -> None:
+    losses: dict[str, torch.Tensor] = {"loss_mask": torch.tensor(1.0)}
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {"enabled": True, "weight": 0.0},
+            },
+            "stage_d_attribution_coupling": {"applied": True},
+        },
+        losses,
+    )
+    assert d6["applied"] is True
+    assert d6["skip_reason"] == "none"
+    assert d6["diagnostics"]["inserted_into_loss_dict"] is True
+    assert d6["diagnostics"]["weight_zero_noop_observed"] is True
+    assert isinstance(losses["loss_stage_d_attr"], torch.Tensor)
+    assert float(losses["loss_stage_d_attr"].item()) == pytest.approx(0.0)
+
+
+def test_stage_d7_real_hook_skip_closed_when_prereq_missing() -> None:
+    losses: dict[str, torch.Tensor] = {"loss_ce": torch.tensor(2.0)}
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {"enabled": True, "weight": 1.0},
+            },
+            "stage_d_attribution_coupling": {"applied": False},
+        },
+        losses,
+    )
+    assert d6["applied"] is False
+    assert d6["skip_reason"] == "d5_coupling_not_applied"
+    assert "loss_stage_d_attr" not in losses
+
+
+def test_stage_d7_real_hook_duplicate_call_is_single_insertion_with_conflict_skip() -> None:
+    losses: dict[str, torch.Tensor] = {"loss_ce": torch.tensor(2.0)}
+    first = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {"enabled": True, "weight": 1.0},
+            },
+            "stage_d_attribution_coupling": {"applied": True},
+        },
+        losses,
+    )
+    second = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {"enabled": True, "weight": 1.0},
+            },
+            "stage_d_attribution_coupling": {"applied": True},
+        },
+        losses,
+    )
+    assert first["applied"] is True
+    assert second["applied"] is False
+    assert second["skip_reason"] == "loss_key_conflict"
+    assert second["gate_status"]["loss_key_conflict"] is True
+    assert list(losses.keys()).count("loss_stage_d_attr") == 1

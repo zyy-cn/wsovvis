@@ -4,8 +4,10 @@
 # ------------------------------------------------------------------------
 
 
+import json
 import math
 import numpy as np
+import os
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -26,9 +28,23 @@ from .data.coco import convert_coco_poly_to_mask
 import torchvision.ops as ops
 from .util.misc import nested_tensor_from_tensor_list
 from .models.clip_output import Videos, Clips
+from wsovvis.training import apply_stage_d_additive_loss_key
 
 __all__ = ["SeqFormer"]
 
+
+def _load_wsovvis_stage_d_cfg_from_env() -> dict:
+    cfg_path = os.environ.get("WSOVVIS_CFG_JSON", "")
+    if not cfg_path:
+        return {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
 
 
 
@@ -212,6 +228,7 @@ class SeqFormer(nn.Module):
         self.to(self.device)
 
         self.merge_device = "cpu" if self.merge_on_cpu else self.device
+        self.wsovvis_stage_d_cfg = _load_wsovvis_stage_d_cfg_from_env()
 
     def forward(self, batched_inputs):
         """
@@ -237,6 +254,10 @@ class SeqFormer(nn.Module):
             for k in loss_dict.keys():
                 if k in weight_dict:
                     loss_dict[k] *= weight_dict[k]
+            d6_result = apply_stage_d_additive_loss_key(self.wsovvis_stage_d_cfg, loss_dict)
+            stage_d_runtime = self.wsovvis_stage_d_cfg.get("stage_d_attribution_runtime")
+            if isinstance(stage_d_runtime, dict):
+                stage_d_runtime["d6_additive_loss_key"] = d6_result
             return loss_dict
         else:
             
@@ -462,4 +483,3 @@ class SeqFormer(nn.Module):
                     images.append(self.normalizer(video["image"][idx].to(self.device)))
             images = ImageList.from_tensors(images)
         return images
-
