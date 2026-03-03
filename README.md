@@ -15,6 +15,7 @@ WSOVVIS is an ongoing research/engineering project for weakly-supervised open-vo
 - ⚙️ Stage D layered fast gate (N10 helper-first + optional pilot quick-check smoke): `tools/run_stage_d10_layered_fast_gate.sh`
 - ⚙️ Stage D canonical replay entry (N11 sequence in one command): `tools/run_stage_d11_canonical_replay.sh`
 - ⚙️ Stage D quick CI mirror pipeline (N13 helper fast gate + N11 replay): `tools/run_stage_d13_ci_quick_pipeline.sh`
+- 📘 Stage D CI-ready quick-pipeline gate policy (N14): `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`
 - 📘 Session handoff (post-closure): `docs/SESSION_HANDOFF_STAGE_D_CLOSURE.md`
 - ▶️ Next recommended direction: **research-facing nonzero supervision semantics** under new gated milestone planning
 - Progress log: `docs/PROJECT_PROGRESS.md`

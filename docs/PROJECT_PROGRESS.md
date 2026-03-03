@@ -734,6 +734,43 @@ Implement a tooling/docs/CI wiring acceleration step that adds a branch-local CI
 
 ---
 
+## 2026-03-03 — N14 completed (formal-CI-ready prep + Stage D quick gate policy)
+
+### Scope
+Tooling/docs/policy hardening only for formal CI adoption readiness of Stage D quick pipeline gates.
+
+### Completed
+- Added formal-CI-ready gate-policy doc:
+  - `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`
+  - documents explicit 3-tier gate policy:
+    - helper-only fast gate
+    - N13 quick pipeline (helper + replay)
+    - broader checks escalation conditions
+- Added CI-ready invocation snippets with deterministic prerequisites:
+  - conda-first `wsovvis`
+  - `python -m pytest --version` preflight
+  - safe `PYTHONPATH` form using `${PYTHONPATH:-}`
+- Reinforced output-path discipline with copy/paste clause:
+  - required `codex/<task_dir>/xx_output.txt`
+  - forbidden repo-root `./xx_output.txt`
+- Updated continuity pointers:
+  - `README.md`
+  - `docs/STAGE_D_SMOKE_HELPER_QUICKCHECK.md`
+  - `docs/SESSION_HANDOFF_STAGE_D_CLOSURE.md`
+
+### Validation
+- Local GPU-free targeted check:
+  - `python -m pytest -q tests/test_stage_d13_ci_quick_pipeline_v1.py`
+- No semantic/runtime training checks added; wrappers are reused unchanged.
+
+### Notes
+- Non-goals preserved:
+  - no training/loss/objective semantic changes
+  - no Stage C/D schema changes
+  - no long training/performance runs
+
+---
+
 ## Validation evidence highlights (through Stage D closure + N13)
 
 ### Canonical remote validation discipline (preserved)

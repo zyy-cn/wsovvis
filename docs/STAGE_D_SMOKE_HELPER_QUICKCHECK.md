@@ -22,6 +22,9 @@ N12 adds a replay wrapper for the N11 canonical sequence:
 N13 adds a branch-local CI mirror pipeline:
 - `tools/run_stage_d13_ci_quick_pipeline.sh`
 
+N14 adds formal-CI-ready policy guidance for gate selection:
+- `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`
+
 N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
 - nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
@@ -56,6 +59,12 @@ Branch-local CI mirror for quick pipeline wiring (N13):
 
 ```bash
 bash tools/run_stage_d13_ci_quick_pipeline.sh
+```
+
+N14 gate policy reference (formal-CI-ready decision criteria):
+
+```bash
+cat docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md
 ```
 
 Zero-mode (compatibility sentinel, default):
