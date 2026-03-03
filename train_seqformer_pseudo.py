@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 from sacred import Experiment
 from sacred.observers import FileStorageObserver
 
+from wsovvis.training import resolve_stage_d_attribution_plumbing
 
 ex = Experiment("wsovvis_seqformer")
 
@@ -95,6 +96,9 @@ def _default_cfg():
         "embedding_normalization": "none",
         "emit_video_index": True,
         "overwrite": False,
+    }
+    stage_d_attribution = {
+        "enabled": False,
     }
 
     # distributed
@@ -344,6 +348,7 @@ def run(
     resume,
     eval_only,
     feature_export,
+    stage_d_attribution,
     num_gpus,
     num_machines,
     machine_rank,
@@ -357,6 +362,11 @@ def run(
     output_dir = os.path.join(run_dir, "d2")
     os.makedirs(output_dir, exist_ok=True)
 
+    resolved_stage_d_attribution = resolve_stage_d_attribution_plumbing(
+        stage_d_attribution,
+        repo_root=Path(__file__).resolve().parent,
+    )
+
     cfg_dict = {
         "d2_cfg_path": d2_cfg_path,
         "d2_opts": d2_opts,
@@ -366,6 +376,7 @@ def run(
         "resume": resume,
         "eval_only": eval_only,
         "feature_export": feature_export,
+        "stage_d_attribution": resolved_stage_d_attribution,
     }
 
     # Write cfg_dict to disk and expose via env var so worker processes can load it
