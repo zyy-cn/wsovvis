@@ -4,17 +4,19 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  tools/run_stage_d10_quick_checks.sh [--repo-root <path>] [--python-bin <path>]
+  tools/run_stage_d10_quick_checks.sh [--repo-root <path>] [--python-bin <path>] [--on-mode <zero|nonzero>] [--on-weight <float>]
 
 Runs Stage D10/D11 helper quick checks:
   1) helper --help
-  2) helper --dry-run
+  2) helper --dry-run (zero compatibility sentinel or nonzero semantic mode)
   3) GPU-free pytest: tests/test_stage_d9_smoke_helper_v1.py
 USAGE
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="python"
+on_mode="zero"
+on_weight=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,6 +28,20 @@ while [[ $# -gt 0 ]]; do
     --python-bin)
       [[ $# -ge 2 ]] || { echo "Missing value for --python-bin" >&2; exit 2; }
       python_bin="$2"
+      shift 2
+      ;;
+    --on-mode)
+      [[ $# -ge 2 ]] || { echo "Missing value for --on-mode" >&2; exit 2; }
+      on_mode="$2"
+      if [[ "$on_mode" != "zero" && "$on_mode" != "nonzero" ]]; then
+        echo "Invalid --on-mode '$on_mode' (expected: zero|nonzero)" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    --on-weight)
+      [[ $# -ge 2 ]] || { echo "Missing value for --on-weight" >&2; exit 2; }
+      on_weight="$2"
       shift 2
       ;;
     -h|--help)
@@ -47,6 +63,13 @@ run() {
 
 cd "$repo_root"
 
+helper_dry_run_cmd=(
+  "$python_bin" tools/run_stage_d9_smoke_helper.py --repo-root "$repo_root" --dry-run --on-mode "$on_mode"
+)
+if [[ -n "$on_weight" ]]; then
+  helper_dry_run_cmd+=(--on-weight "$on_weight")
+fi
+
 run "$python_bin" tools/run_stage_d9_smoke_helper.py --help
-run "$python_bin" tools/run_stage_d9_smoke_helper.py --repo-root "$repo_root" --dry-run
+run "${helper_dry_run_cmd[@]}"
 run "$python_bin" -m pytest -q tests/test_stage_d9_smoke_helper_v1.py

@@ -1,7 +1,7 @@
-# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12)
+# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12/N4)
 
 ## Purpose
-`tools/run_stage_d9_smoke_helper.py` is the Stage D10 helper that wraps the real `train_seqformer_pseudo.py` entrypoint for OFF/ON smoke verification with strict no-op assertions.
+`tools/run_stage_d9_smoke_helper.py` is the Stage D10 helper that wraps the real `train_seqformer_pseudo.py` entrypoint for OFF/ON smoke verification.
 
 Stage D11 reinforced this helper with:
 - parser/assertion extraction for GPU-free tests
@@ -10,8 +10,14 @@ Stage D11 reinforced this helper with:
 Stage D12 adds a reproducible quick-check command path:
 - `tools/run_stage_d10_quick_checks.sh`
 
+N4 extends this same path with first-class ON-mode selection:
+- zero-mode quick check (compatibility/regression sentinel)
+- nonzero-mode quick check (semantic validation of nonzero additive-loss path)
+
 ## Canonical quick-check commands
 From repo root:
+
+Zero-mode (compatibility sentinel, default):
 
 ```bash
 tools/run_stage_d10_quick_checks.sh
@@ -21,15 +27,33 @@ Equivalent explicit commands:
 
 ```bash
 python tools/run_stage_d9_smoke_helper.py --help
-python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run
+python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode zero
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 ```
 
+Nonzero-mode (semantic validation path):
+
+```bash
+tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25
+```
+
+Equivalent explicit commands:
+
+```bash
+python tools/run_stage_d9_smoke_helper.py --help
+python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode nonzero --on-weight 0.25
+python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
+```
+
+## When to run which mode
+- Run zero-mode when you need a compatibility/regression sentinel that preserves OFF/ON no-op expectations (`loss_stage_d_attr` remains effectively zero in ON path).
+- Run nonzero-mode when you need semantic validation that ON path is wired for nonzero additive-loss behavior (`nonzero_semantics.enabled=True` and `weight>0` present in command wiring).
+
 ## OFF-path vs ON-path smoke expectations
-When running real OFF/ON smoke (non-dry-run):
+When running real OFF/ON smoke (non-dry-run), expectations depend on ON mode:
 - OFF path (`stage_d_attribution.enabled=False`): no `loss_stage_d_attr` metric key
-- ON path (`stage_d_attribution.enabled=True` and coupling/loss-key `weight=0.0`): `loss_stage_d_attr` appears and remains ~0
-- OFF vs ON `total_loss` remains parity-equal within tolerance (`--parity-tol`, default `1e-9`)
+- ON zero-mode (`--on-mode zero`, `weight=0.0`): `loss_stage_d_attr` appears and remains ~0, and OFF/ON total-loss parity remains within `--parity-tol`
+- ON nonzero-mode (`--on-mode nonzero`, `weight>0`): `loss_stage_d_attr` is nonzero and ON total loss increases vs OFF path
 
 These checks are reported as `D10_*` lines by the helper.
 
@@ -42,8 +66,8 @@ conda activate wsovvis
 python -m pytest --version
 export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:${PYTHONPATH:-}"
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
-python tools/run_stage_d9_smoke_helper.py --help
-python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run
+tools/run_stage_d10_quick_checks.sh
+tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25
 ```
 
 Notes:
