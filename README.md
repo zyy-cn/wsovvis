@@ -9,6 +9,7 @@ WSOVVIS is an ongoing research/engineering project for weakly-supervised open-vo
 - ✅ P3 core completed (Stage B track feature export v1 producer + validator + focused tests; canonical remote validation passed)
 - ▶️ Next recommended step: **P3.1a (Bridge Spec)** for real Stage B output → exporter input integration
 - Progress log: `docs/PROJECT_PROGRESS.md`
+- Stage D helper quick-check runbook (D10/D11/D12): `docs/STAGE_D_SMOKE_HELPER_QUICKCHECK.md`
 - Long-term Codex workflow reference (including Git/remote validation + `github-via-gpu` push routing): `codex/WSOVVIS_CODEX_WORKFLOW_README.md`
 - Reusable prompt/policy specs for concise future prompts: `codex/specs/`
 - Cold-start Codex workflow entry (new session startup order / precedence rules): `codex/START_HERE.md`
