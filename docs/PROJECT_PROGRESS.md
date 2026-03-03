@@ -699,7 +699,42 @@ Package the N11 canonical sequence into a reusable replay entry for CI-stage or 
 
 ---
 
-## Validation evidence highlights (through Stage D closure)
+## 2026-03-03 — N13 completed (bundled quick-pipeline wiring + output-path discipline hardening)
+
+### Scope
+Implement a tooling/docs/CI wiring acceleration step that adds a branch-local CI mirror entry for N11 replay, plus output-path discipline hardening and continuity sync.
+
+### Completed
+- Added branch-local quick pipeline wrapper:
+  - `tools/run_stage_d13_ci_quick_pipeline.sh`
+  - step 1: `tools/run_stage_d9_helper_tests_quick.sh`
+  - step 2: `tools/run_stage_d11_canonical_replay.sh`
+- Added GPU-free wrapper test:
+  - `tests/test_stage_d13_ci_quick_pipeline_v1.py`
+  - validates helper->replay ordering and replay arg pass-through (`--on-weight`, `--pilot-scale`)
+- Updated continuity docs:
+  - README tooling list includes N13 quick pipeline wrapper
+  - Stage D runbook includes N13 command and common failure-mode guidance for misplaced `xx_output.txt`
+  - prompt-template/spec guidance now explicitly requires output files under `codex/<task_dir>/xx_output.txt` and forbids repo-root output files
+
+### Validation
+- Local checks:
+  - shell syntax check: `bash -n tools/run_stage_d13_ci_quick_pipeline.sh`
+  - targeted pytest: `python -m pytest -q tests/test_stage_d13_ci_quick_pipeline_v1.py tests/test_stage_d11_canonical_replay_v1.py`
+- Canonical remote light validation (conda-first):
+  - `python -m pytest --version` preflight
+  - dual `${PYTHONPATH:-}` in both `--env-cmd` and `--cmd`
+  - quick pipeline invocation: `bash tools/run_stage_d13_ci_quick_pipeline.sh`
+
+### Notes
+- Non-goals preserved:
+  - no new loss semantics or nonzero modes
+  - no Stage C/D schema changes
+  - no long training/performance runs
+
+---
+
+## Validation evidence highlights (through Stage D closure + N13)
 
 ### Canonical remote validation discipline (preserved)
 - Canonical remote host/path usage remained consistent in PASS evidence:

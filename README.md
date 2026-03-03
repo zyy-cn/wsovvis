@@ -14,6 +14,7 @@ WSOVVIS is an ongoing research/engineering project for weakly-supervised open-vo
 - ⚙️ Stage D helper coverage quick entry (local/CI mirror): `tools/run_stage_d9_helper_tests_quick.sh`
 - ⚙️ Stage D layered fast gate (N10 helper-first + optional pilot quick-check smoke): `tools/run_stage_d10_layered_fast_gate.sh`
 - ⚙️ Stage D canonical replay entry (N11 sequence in one command): `tools/run_stage_d11_canonical_replay.sh`
+- ⚙️ Stage D quick CI mirror pipeline (N13 helper fast gate + N11 replay): `tools/run_stage_d13_ci_quick_pipeline.sh`
 - 📘 Session handoff (post-closure): `docs/SESSION_HANDOFF_STAGE_D_CLOSURE.md`
 - ▶️ Next recommended direction: **research-facing nonzero supervision semantics** under new gated milestone planning
 - Progress log: `docs/PROJECT_PROGRESS.md`
@@ -23,3 +24,7 @@ WSOVVIS is an ongoing research/engineering project for weakly-supervised open-vo
 
 ## Notes
 This README intentionally keeps the status summary brief. Detailed milestone history and workflow operating procedures are maintained in the linked documents above.
+
+Codex output-path discipline for task reports:
+- required form: `codex/<task_dir>/xx_output.txt` (sibling to the task prompt)
+- writing `xx_output.txt` at repo root is not allowed

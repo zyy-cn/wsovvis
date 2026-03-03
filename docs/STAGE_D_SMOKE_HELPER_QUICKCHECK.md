@@ -1,4 +1,4 @@
-# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12/N4/N7)
+# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12/N4/N7/N13)
 
 ## Purpose
 `tools/run_stage_d9_smoke_helper.py` is the Stage D10 helper that wraps the real `train_seqformer_pseudo.py` entrypoint for OFF/ON smoke verification.
@@ -18,6 +18,9 @@ N10 adds a layered fast-gate entry that composes helper coverage first, then opt
 
 N12 adds a replay wrapper for the N11 canonical sequence:
 - `tools/run_stage_d11_canonical_replay.sh`
+
+N13 adds a branch-local CI mirror pipeline:
+- `tools/run_stage_d13_ci_quick_pipeline.sh`
 
 N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
@@ -47,6 +50,12 @@ Canonical N11 replay sequence (N12 bundled entry):
 
 ```bash
 bash tools/run_stage_d11_canonical_replay.sh
+```
+
+Branch-local CI mirror for quick pipeline wiring (N13):
+
+```bash
+bash tools/run_stage_d13_ci_quick_pipeline.sh
 ```
 
 Zero-mode (compatibility sentinel, default):
@@ -117,6 +126,7 @@ tools/run_stage_d9_helper_tests_quick.sh
 bash tools/run_stage_d10_layered_fast_gate.sh
 bash tools/run_stage_d10_layered_fast_gate.sh --with-pilot-smoke --pilot-on-mode pilot --pilot-on-weight 0.25 --pilot-scale 1e-6
 bash tools/run_stage_d11_canonical_replay.sh
+bash tools/run_stage_d13_ci_quick_pipeline.sh
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 tools/run_stage_d10_quick_checks.sh
 tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25
@@ -139,3 +149,8 @@ Notes:
 3. Quoting pitfalls in remote commands
 - Cause: nested quoting around overrides and `PYTHONPATH`.
 - Fix: prefer `tools/remote_verify_wsovvis.sh` and keep commands simple; use `${PYTHONPATH:-}` in both env and command contexts.
+
+4. Task output written to repo root (`xx_output.txt`)
+- Cause: using relative output names without task-directory prefix.
+- Fix: always write outputs to `codex/<task_dir>/xx_output.txt` in the same folder as the prompt.
+- Example (current task style): `codex/2026030304_staged_nonzero_semantics/13_output.txt`
