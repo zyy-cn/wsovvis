@@ -402,9 +402,15 @@ def run(
         stage_d_attribution,
         repo_root=Path(__file__).resolve().parent,
     )
-    if isinstance(stage_d_attribution, dict) and "objective_coupling" in stage_d_attribution:
-        resolved_stage_d_attribution = dict(resolved_stage_d_attribution)
-        resolved_stage_d_attribution["objective_coupling"] = stage_d_attribution["objective_coupling"]
+    if isinstance(stage_d_attribution, dict):
+        # Preserve Stage D additive config blocks that are runtime-only and not part
+        # of D1 artifact-resolution fields.
+        passthrough_keys = ("objective_coupling", "additive_loss_key")
+        if any(key in stage_d_attribution for key in passthrough_keys):
+            resolved_stage_d_attribution = dict(resolved_stage_d_attribution)
+            for key in passthrough_keys:
+                if key in stage_d_attribution:
+                    resolved_stage_d_attribution[key] = stage_d_attribution[key]
     stage_d_runtime = consume_stage_d_attribution_config(resolved_stage_d_attribution)
     stage_d_consumption = build_stage_d_attribution_consumption_boundary(
         {
