@@ -527,7 +527,45 @@ Close the Stage C4 offline attribution expansion milestone with additive-only sc
 
 ---
 
-## Validation evidence highlights (through Stage C4 closure)
+## 2026-03-03 — Stage D1-D12 closure completed (unified track docs-sync closure)
+
+### Scope
+Close Stage D with a documentation/continuity pass after D1-D12 completion, and lock canonical validation discipline and handoff clarity for future sessions.
+
+### Completed
+- Consolidated Stage D1-D12 as complete in project status and closure docs.
+- Explicitly marked D12 complete:
+  - quick-check wiring (`tools/run_stage_d10_quick_checks.sh`)
+  - helper/runbook reinforcement (`docs/STAGE_D_SMOKE_HELPER_QUICKCHECK.md`)
+- Codified Stage D canonical constraints for ongoing work:
+  - default-OFF compatibility
+  - skip-closed behavior
+  - additive-only integration style
+  - conda-first canonical remote validation (`wsovvis`)
+  - dual `PYTHONPATH` with `${PYTHONPATH:-}`
+  - D10 helper + D12 quick-check wrapper as standard tooling checks
+- Added closure/handoff artifacts for future-session continuity:
+  - `docs/STAGE_D_CLOSURE_MEMO_D1_D12.md`
+  - `docs/SESSION_HANDOFF_STAGE_D_CLOSURE.md`
+
+### Validation
+- Docs-only closure task; no training behavior changes.
+- Full GPU smoke not required for this closure step.
+- Local docs consistency checks are the preferred validation mode for this milestone update.
+
+### Notes
+- Stage D closure here is documentation/discipline closure for D1-D12, not a new feature milestone.
+- Non-goals remain unchanged:
+  - no new training/loss/objective semantics
+  - no Stage C/D schema changes
+  - no Stage D13+ feature implementation in this step
+- Candidate next directions (not implemented in this closure):
+  - research-facing nonzero supervision semantics under explicit new gates
+  - longer smoke/training validation depth once next milestone is approved
+
+---
+
+## Validation evidence highlights (through Stage D closure)
 
 ### Canonical remote validation discipline (preserved)
 - Canonical remote host/path usage remained consistent in PASS evidence:
@@ -611,14 +649,16 @@ Close the Stage C4 offline attribution expansion milestone with additive-only sc
 - ✅ Stage C2 completed (labelset_proto_v1 offline baseline + canonical remote pytest + real-artifact smoke + determinism)
 - ✅ Stage C3 completed (global decoder baseline + alternatives + comparison closure; default remains `independent`)
 - ✅ Stage C4 completed (offline attribution expansion line: `em_v1`, `sinkhorn_v1`, C4.3 `bg` + `unk-fg` gating, parity + determinism closure)
-- ▶️ Current state: **Stage C4 milestone closed (offline attribution expansion line)**
-- ▶️ Next recommended step: **Stage D planning/spec-lock for training-loop integration boundaries and acceptance gates**
+- ✅ Stage D1-D12 completed (unified integration line through helper/runbook/quick-check reinforcement)
+- ✅ Stage D12 completed (quick-check wiring + runbook/docs reinforcement)
+- ▶️ Current state: **Stage D closure complete (docs-sync + continuity lock)**
+- ▶️ Next candidate direction (research-facing): **nonzero supervision semantics under a new gated Stage D follow-up**
+- ▶️ Next candidate direction (feature-facing): **longer smoke/training validation and CI depth expansion without changing current semantics**
 
-### Why Stage D planning next
-With C4 offline attribution expansion closed under additive/default-OFF/parity/determinism constraints, the next highest-leverage step is to define Stage D integration boundaries and acceptance gates before enabling training-loop coupling.
-
-### Stage D preconditions and remaining out-of-scope items
-- Training-loop / Stage D implementation is still not started in this milestone.
-- Optional future C-line refinements (outside C4 closure):
-  - C4.3-C style coverage/slack redesign,
-  - further non-run18 cohort expansion for broader stress/evidence before policy shifts.
+### Stage D closure constraints (must remain true)
+- default-OFF compatibility remains mandatory.
+- skip-closed behavior remains mandatory.
+- additive-only integration style remains mandatory.
+- canonical remote validation remains conda-first on `gpu4090d` / `/home/zyy/code/wsovvis_runner` with `wsovvis` env.
+- dual `PYTHONPATH` form must preserve `${PYTHONPATH:-}`.
+- D10 helper + D12 quick-check wrapper are the standard validation tools for Stage D tooling checks.
