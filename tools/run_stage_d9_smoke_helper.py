@@ -46,6 +46,10 @@ d2_opts:
   - False
   - MODEL.WEIGHTS
   - \"{weights_path}\"
+  - DATASETS.TEST
+  - ()
+  - TEST.EVAL_PERIOD
+  - 0
   - SOLVER.MAX_ITER
   - 1
   - SOLVER.IMS_PER_BATCH
