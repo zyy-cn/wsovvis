@@ -40,8 +40,6 @@ d2_cfg_path: third_party/VNext/projects/SeqFormer/configs/vnext_dinov2_ytvis.yam
 d2_opts:
   - DATASETS.TRAIN
   - (\"ytvis_wsovvis_lvvis_pseudo_train\",)
-  - DATASETS.TEST
-  - (\"ytvis_wsovvis_lvvis_val_agnostic\",)
   - MODEL.SeqFormer.NUM_CLASSES
   - 1
   - MODEL.SeqFormer.MULTI_CLS_ON
@@ -59,7 +57,7 @@ data:
   train_name: ytvis_wsovvis_lvvis_pseudo_train
   train_json: "{train_json}"
   train_img_root: "{train_img_root}"
-  val_name: ytvis_wsovvis_lvvis_val_agnostic
+  val_name: null
   val_json: "{val_json}"
   val_img_root: "{val_img_root}"
   num_classes: 1
