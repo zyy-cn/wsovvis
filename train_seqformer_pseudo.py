@@ -28,6 +28,7 @@ from sacred import Experiment
 from sacred.observers import FileStorageObserver
 
 from wsovvis.training import (
+    apply_stage_d_additive_loss_key,
     build_stage_d_attribution_consumption_boundary,
     build_stage_d_objective_coupling_decision,
     consume_stage_d_attribution_config,
@@ -297,10 +298,13 @@ def _main_worker(*args):
     cfg_dict["stage_d_attribution_consumption"] = stage_d_consumption
     stage_d_coupling = build_stage_d_objective_coupling_decision(cfg_dict)
     cfg_dict["stage_d_attribution_coupling"] = stage_d_coupling
+    stage_d_d6_loss_key = apply_stage_d_additive_loss_key(cfg_dict)
+    cfg_dict["stage_d_attribution_d6_loss_key"] = stage_d_d6_loss_key
     stage_d_runtime = cfg_dict.get("stage_d_attribution_runtime")
     if isinstance(stage_d_runtime, dict):
         stage_d_runtime["d4_consume_boundary"] = stage_d_consumption
         stage_d_runtime["d5_objective_coupling"] = stage_d_coupling
+        stage_d_runtime["d6_additive_loss_key"] = stage_d_d6_loss_key
     if stage_d_consumption.get("enabled", False):
         print(
             "[stage_d_attribution:d4] consume boundary "
@@ -312,6 +316,12 @@ def _main_worker(*args):
             f"eligible={stage_d_coupling.get('eligible')} "
             f"applied={stage_d_coupling.get('applied')} "
             f"skip_reason={stage_d_coupling.get('skip_reason')}"
+        )
+        print(
+            "[stage_d_attribution:d6] additive loss key "
+            f"eligible={stage_d_d6_loss_key.get('eligible')} "
+            f"applied={stage_d_d6_loss_key.get('applied')} "
+            f"skip_reason={stage_d_d6_loss_key.get('skip_reason')}"
         )
 
     d2_cfg = _setup_cfg(
@@ -409,8 +419,17 @@ def run(
             "stage_d_attribution_consumption": stage_d_consumption,
         }
     )
+    stage_d_d6_loss_key = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": resolved_stage_d_attribution,
+            "stage_d_attribution_runtime": stage_d_runtime,
+            "stage_d_attribution_consumption": stage_d_consumption,
+            "stage_d_attribution_coupling": stage_d_coupling,
+        }
+    )
     stage_d_runtime["d4_consume_boundary"] = stage_d_consumption
     stage_d_runtime["d5_objective_coupling"] = stage_d_coupling
+    stage_d_runtime["d6_additive_loss_key"] = stage_d_d6_loss_key
     if stage_d_runtime.get("enabled", False):
         summary = stage_d_runtime.get("summary", {}) or {}
         print(
@@ -424,6 +443,12 @@ def run(
             f"eligible={stage_d_coupling.get('eligible')} "
             f"applied={stage_d_coupling.get('applied')} "
             f"skip_reason={stage_d_coupling.get('skip_reason')}"
+        )
+        print(
+            "[stage_d_attribution:d6] additive loss key "
+            f"eligible={stage_d_d6_loss_key.get('eligible')} "
+            f"applied={stage_d_d6_loss_key.get('applied')} "
+            f"skip_reason={stage_d_d6_loss_key.get('skip_reason')}"
         )
 
     cfg_dict = {
@@ -439,6 +464,7 @@ def run(
         "stage_d_attribution_runtime": stage_d_runtime,
         "stage_d_attribution_consumption": stage_d_consumption,
         "stage_d_attribution_coupling": stage_d_coupling,
+        "stage_d_attribution_d6_loss_key": stage_d_d6_loss_key,
     }
 
     # Write cfg_dict to disk and expose via env var so worker processes can load it

@@ -7,6 +7,7 @@ import pytest
 
 from wsovvis.training import (
     StageDAttributionPlumbingError,
+    apply_stage_d_additive_loss_key,
     build_stage_d_attribution_consumption_boundary,
     build_stage_d_objective_coupling_decision,
     consume_stage_d_attribution_config,
@@ -326,3 +327,85 @@ def test_stage_d5_objective_coupling_enabled_invalid_runtime_boundary_skip_close
     assert coupling["gate_status"]["d4_boundary_ready"] is False
     assert coupling["diagnostics"]["considered"] is False
     assert coupling["planned_loss"]["loss_value"] == 0.0
+
+
+def test_stage_d6_additive_loss_key_default_off_is_skip_closed() -> None:
+    losses: dict[str, float] = {"loss_mask": 1.0}
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {"enabled": False},
+            "stage_d_attribution_coupling": {"applied": False},
+        },
+        losses,
+    )
+    assert d6["application_version"] == "d6_additive_loss_key_v1"
+    assert d6["enabled_by_config"] is False
+    assert d6["eligible"] is False
+    assert d6["applied"] is False
+    assert d6["skip_reason"] == "stage_d_attribution_disabled"
+    assert d6["diagnostics"]["inserted_into_loss_dict"] is False
+    assert "loss_stage_d_attr" not in losses
+
+
+def test_stage_d6_additive_loss_key_weight_zero_inserts_observable_noop() -> None:
+    losses: dict[str, float] = {"loss_mask": 1.0}
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {"enabled": True, "weight": 0.0},
+            },
+            "stage_d_attribution_coupling": {"applied": True},
+        },
+        losses,
+    )
+    assert d6["enabled_by_config"] is True
+    assert d6["eligible"] is True
+    assert d6["applied"] is True
+    assert d6["skip_reason"] == "none"
+    assert d6["planned_loss"]["loss_key"] == "loss_stage_d_attr"
+    assert d6["planned_loss"]["loss_weight"] == 0.0
+    assert d6["planned_loss"]["apply_mode"] == "loss_dict_insert_zero"
+    assert d6["diagnostics"]["applied"] is True
+    assert d6["diagnostics"]["inserted_into_loss_dict"] is True
+    assert d6["diagnostics"]["weight_zero_noop_observed"] is True
+    assert losses["loss_stage_d_attr"] == 0.0
+
+
+def test_stage_d6_additive_loss_key_requires_d5_applied_and_skip_closed_when_missing() -> None:
+    losses: dict[str, float] = {}
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {"enabled": True, "weight": 1.0},
+            },
+            "stage_d_attribution_coupling": {"applied": False},
+        },
+        losses,
+    )
+    assert d6["enabled_by_config"] is True
+    assert d6["eligible"] is False
+    assert d6["applied"] is False
+    assert d6["skip_reason"] == "d5_coupling_not_applied"
+    assert d6["gate_status"]["d5_coupling_applied"] is False
+    assert "loss_stage_d_attr" not in losses
+
+
+def test_stage_d6_additive_loss_key_uses_placeholder_when_loss_dict_missing() -> None:
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {"enabled": True, "weight": 1.0},
+            },
+            "stage_d_attribution_coupling": {"applied": True},
+        },
+    )
+    assert d6["enabled_by_config"] is True
+    assert d6["eligible"] is True
+    assert d6["applied"] is True
+    assert d6["skip_reason"] == "none"
+    assert d6["diagnostics"]["inserted_into_loss_dict"] is False
+    assert d6["diagnostics"]["used_placeholder_path"] is True
+    assert d6["planned_loss"]["apply_mode"] == "placeholder_zero"

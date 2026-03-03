@@ -651,3 +651,103 @@ def build_stage_d_objective_coupling_decision(cfg_dict: Mapping[str, Any] | None
     result["skip_reason"] = "none"
     result["diagnostics"]["applied"] = True
     return result
+
+
+def apply_stage_d_additive_loss_key(
+    cfg_dict: Mapping[str, Any] | None,
+    loss_dict: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply Stage D6 additive loss-key path behind strict, skip-closed gates.
+
+    D6 remains additive and default-OFF. When all gates pass, this function
+    writes a deterministic zero-valued entry under `loss_stage_d_attr` to either
+    the provided loss dict or a placeholder payload when no loss dict is passed.
+    """
+
+    loss_key = "loss_stage_d_attr"
+    result = {
+        "application_version": "d6_additive_loss_key_v1",
+        "enabled_by_config": False,
+        "eligible": False,
+        "applied": False,
+        "skip_reason": "invalid_cfg_dict_type",
+        "gate_status": {
+            "stage_d_enabled": False,
+            "d5_coupling_applied": False,
+            "weight_valid": False,
+            "weight_gate_satisfied": False,
+            "loss_dict_available": isinstance(loss_dict, dict),
+            "loss_key_conflict": False,
+        },
+        "planned_loss": {
+            "loss_key": loss_key,
+            "loss_weight": 0.0,
+            "loss_value": 0.0,
+            "apply_mode": "not_applied",
+            "effective_training_delta": 0.0,
+        },
+        "diagnostics": {
+            "considered": False,
+            "applied": False,
+            "inserted_into_loss_dict": False,
+            "used_placeholder_path": False,
+            "weight_zero_noop_observed": False,
+        },
+    }
+
+    if not isinstance(cfg_dict, Mapping):
+        return result
+
+    raw_config = cfg_dict.get("stage_d_attribution", {})
+    coupling = cfg_dict.get("stage_d_attribution_coupling", {})
+    d6_cfg = raw_config.get("additive_loss_key", {}) if isinstance(raw_config, Mapping) else {}
+
+    d6_enabled_raw = d6_cfg.get("enabled", False) if isinstance(d6_cfg, Mapping) else False
+    if not isinstance(d6_enabled_raw, bool):
+        result["skip_reason"] = "invalid_d6_enabled_field"
+        return result
+    result["enabled_by_config"] = bool(d6_enabled_raw)
+
+    weight = d6_cfg.get("weight", 0.0) if isinstance(d6_cfg, Mapping) else 0.0
+    if not _is_number(weight) or float(weight) < 0.0:
+        result["skip_reason"] = "invalid_d6_weight"
+        return result
+    result["gate_status"]["weight_valid"] = True
+    result["gate_status"]["weight_gate_satisfied"] = True
+    result["planned_loss"]["loss_weight"] = float(weight)
+    result["diagnostics"]["weight_zero_noop_observed"] = float(weight) == 0.0
+
+    stage_d_enabled = isinstance(raw_config, Mapping) and raw_config.get("enabled") is True
+    result["gate_status"]["stage_d_enabled"] = bool(stage_d_enabled)
+    if not stage_d_enabled:
+        result["skip_reason"] = "stage_d_attribution_disabled"
+        return result
+
+    d5_coupling_applied = isinstance(coupling, Mapping) and coupling.get("applied") is True
+    result["gate_status"]["d5_coupling_applied"] = bool(d5_coupling_applied)
+    if not d5_coupling_applied:
+        result["skip_reason"] = "d5_coupling_not_applied"
+        return result
+
+    result["eligible"] = True
+    result["diagnostics"]["considered"] = True
+    if not result["enabled_by_config"]:
+        result["skip_reason"] = "disabled_by_config"
+        return result
+
+    if isinstance(loss_dict, dict):
+        if loss_key in loss_dict:
+            result["gate_status"]["loss_key_conflict"] = True
+            result["skip_reason"] = "loss_key_conflict"
+            return result
+        loss_dict[loss_key] = 0.0
+        result["planned_loss"]["apply_mode"] = "loss_dict_insert_zero"
+        result["diagnostics"]["inserted_into_loss_dict"] = True
+    else:
+        result["planned_loss"]["apply_mode"] = "placeholder_zero"
+        result["diagnostics"]["used_placeholder_path"] = True
+
+    result["applied"] = True
+    result["skip_reason"] = "none"
+    result["diagnostics"]["applied"] = True
+    return result
