@@ -79,6 +79,34 @@ dist_url: tcp://127.0.0.1:29500
     path.write_text(text, encoding="utf-8")
 
 
+def _build_tiny_eval_json(*, source_train_json: Path, output_json: Path) -> Path:
+    data = json.loads(source_train_json.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError(f"unexpected train json type: {type(data)!r}")
+    videos = data.get("videos")
+    if not isinstance(videos, list) or not videos:
+        raise RuntimeError("train json has no videos to build tiny eval dataset")
+    first_video = videos[0]
+    if not isinstance(first_video, dict):
+        raise RuntimeError("train json first video is not an object")
+
+    tiny_video = {
+        "id": first_video.get("id", 1),
+        "width": first_video["width"],
+        "height": first_video["height"],
+        "length": first_video["length"],
+        "file_names": first_video["file_names"],
+    }
+    tiny = {
+        "videos": [tiny_video],
+        "annotations": [],
+        "categories": [{"id": 1, "name": "object"}],
+    }
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(tiny), encoding="utf-8")
+    return output_json
+
+
 def _run(cmd: list[str], cwd: Path) -> None:
     print("RUN:", " ".join(cmd), flush=True)
     proc = subprocess.run(cmd, cwd=str(cwd), check=False)
@@ -241,26 +269,24 @@ def main() -> int:
             ]
         )
     )
-    val_json = (
-        args.val_json
-        if args.val_json is not None
-        else _resolve_existing_path(
-            [
-                repo_root / "data/LV-VIS/annotations/lvvis_val_agnostic.json",
-                live_root / "data/LV-VIS/annotations/lvvis_val_agnostic.json",
-            ]
+    if args.val_json is not None:
+        val_json = args.val_json
+    else:
+        val_json = _build_tiny_eval_json(
+            source_train_json=train_json.resolve(),
+            output_json=output_root / "tiny_eval_ytvis.json",
         )
-    )
-    val_img_root = (
-        args.val_img_root
-        if args.val_img_root is not None
-        else _resolve_existing_path(
+    if args.val_img_root is not None:
+        val_img_root = args.val_img_root
+    elif args.val_json is None:
+        val_img_root = train_img_root
+    else:
+        val_img_root = _resolve_existing_path(
             [
                 repo_root / "data/LV-VIS/val/JPEGImages",
                 live_root / "data/LV-VIS/val/JPEGImages",
             ]
         )
-    )
 
     _write_smoke_config(
         config_path,
