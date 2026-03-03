@@ -45,6 +45,17 @@ def test_stage_d_plumbing_default_off_is_compatible(tmp_path: Path) -> None:
     assert consumed["enabled"] is False
     assert consumed["mode"] == "disabled_noop"
     assert consumed["consumed"] is True
+    assert consumed["runtime_diag_version"] == "d3_runtime_v1"
+    assert consumed["consumer_status"] == "skipped"
+    assert consumed["skip_reason"] == "disabled_by_config"
+    assert consumed["compatibility"]["default_off_compatible"] is True
+    assert consumed["compatibility"]["training_objective_affected"] is False
+    assert consumed["summary_counters"] == {
+        "rows_validated": 0,
+        "rows_expected": 0,
+        "videos_count": 0,
+        "tracks_count": 0,
+    }
     assert consumed["counters"]["enabled_config_consumed"] == 0
     assert consumed["counters"]["objective_changes"] == 0
     assert consumed["counters"]["loss_changes"] == 0
@@ -88,8 +99,24 @@ def test_stage_d_consumer_enabled_nominal_is_noop_with_diagnostics(tmp_path: Pat
     assert consumed["enabled"] is True
     assert consumed["mode"] == "enabled_noop"
     assert consumed["consumed"] is True
+    assert consumed["runtime_diag_version"] == "d3_runtime_v1"
+    assert consumed["consumer_status"] == "loaded"
+    assert consumed["skip_reason"] == "none"
+    assert consumed["compatibility"]["default_off_compatible"] is True
+    assert consumed["compatibility"]["training_objective_affected"] is False
     assert consumed["summary"]["embedding_dim"] == 256
     assert consumed["track_score_rows_validated"] == 2
+    assert consumed["summary_counters"] == {
+        "rows_validated": 2,
+        "rows_expected": 2,
+        "videos_count": 2,
+        "tracks_count": 2,
+    }
+    assert consumed["provenance"]["source_kind"] == "stagec_artifact"
+    assert consumed["provenance"]["scorer_backend"] == "mil_v1"
+    assert consumed["provenance"]["embedding_dim"] == 256
+    assert consumed["provenance"]["run_summary_path"] == consumed["stagec_run_summary_path"]
+    assert consumed["provenance"]["track_scores_path"] == consumed["stagec_track_scores_path"]
     assert consumed["counters"]["enabled_config_consumed"] == 1
     assert consumed["counters"]["objective_changes"] == 0
     assert consumed["counters"]["loss_changes"] == 0

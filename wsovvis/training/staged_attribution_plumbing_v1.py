@@ -239,7 +239,7 @@ def resolve_stage_d_attribution_plumbing(raw: Mapping[str, Any] | None, *, repo_
 
 
 def consume_stage_d_attribution_config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Build deterministic D2 runtime diagnostics from already-resolved config.
+    """Build deterministic Stage D runtime diagnostics from already-resolved config.
 
     This is intentionally no-op for training semantics: no loss/objective behavior
     is changed. It only emits structured diagnostics proving config consumption.
@@ -253,8 +253,21 @@ def consume_stage_d_attribution_config(raw: Mapping[str, Any] | None) -> dict[st
         return {
             "enabled": False,
             "consumer_hook_version": "d2_noop_v1",
+            "runtime_diag_version": "d3_runtime_v1",
             "mode": "disabled_noop",
             "consumed": True,
+            "consumer_status": "skipped",
+            "skip_reason": "disabled_by_config",
+            "compatibility": {
+                "default_off_compatible": True,
+                "training_objective_affected": False,
+            },
+            "summary_counters": {
+                "rows_validated": 0,
+                "rows_expected": 0,
+                "videos_count": 0,
+                "tracks_count": 0,
+            },
             "counters": {
                 "config_consumed": 1,
                 "enabled_config_consumed": 0,
@@ -298,20 +311,42 @@ def consume_stage_d_attribution_config(raw: Mapping[str, Any] | None) -> dict[st
             "required integer >= 0",
         )
 
+    rows_validated = int(track_score_rows_validated)
+    rows_expected = int(summary["num_tracks_scored"])
     return {
         "enabled": True,
         "consumer_hook_version": "d2_noop_v1",
+        "runtime_diag_version": "d3_runtime_v1",
         "mode": "enabled_noop",
         "consumed": True,
+        "consumer_status": "loaded",
+        "skip_reason": "none",
         "stagec_run_summary_path": run_summary_path,
         "stagec_track_scores_path": track_scores_path,
         "summary": {
             "scorer_backend": str(summary["scorer_backend"]),
             "split": str(summary["split"]),
             "embedding_dim": int(summary["embedding_dim"]),
-            "num_tracks_scored": int(summary["num_tracks_scored"]),
+            "num_tracks_scored": rows_expected,
         },
-        "track_score_rows_validated": int(track_score_rows_validated),
+        "track_score_rows_validated": rows_validated,
+        "compatibility": {
+            "default_off_compatible": True,
+            "training_objective_affected": False,
+        },
+        "summary_counters": {
+            "rows_validated": rows_validated,
+            "rows_expected": rows_expected,
+            "videos_count": rows_validated,
+            "tracks_count": rows_validated,
+        },
+        "provenance": {
+            "source_kind": "stagec_artifact",
+            "scorer_backend": str(summary["scorer_backend"]),
+            "embedding_dim": int(summary["embedding_dim"]),
+            "run_summary_path": run_summary_path,
+            "track_scores_path": track_scores_path,
+        },
         "counters": {
             "config_consumed": 1,
             "enabled_config_consumed": 1,

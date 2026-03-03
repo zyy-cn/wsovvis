@@ -370,7 +370,8 @@ def run(
     if stage_d_runtime.get("enabled", False):
         summary = stage_d_runtime.get("summary", {}) or {}
         print(
-            "[stage_d_attribution:d2] enabled no-op consumer "
+            "[stage_d_attribution:d3] enabled no-op consumer "
+            f"status={stage_d_runtime.get('consumer_status')} "
             f"backend={summary.get('scorer_backend')} "
             f"rows={stage_d_runtime.get('track_score_rows_validated')}"
         )
