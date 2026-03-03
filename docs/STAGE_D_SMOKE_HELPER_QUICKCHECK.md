@@ -13,6 +13,9 @@ Stage D12 adds a reproducible quick-check command path:
 N9 adds a local/CI mirror entry for helper coverage:
 - `tools/run_stage_d9_helper_tests_quick.sh`
 
+N10 adds a layered fast-gate entry that composes helper coverage first, then optional pilot-capable quick-check smoke:
+- `tools/run_stage_d10_layered_fast_gate.sh`
+
 N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
 - nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
@@ -21,10 +24,20 @@ N4+N7 extend this same path with first-class ON-mode selection:
 ## Canonical quick-check commands
 From repo root:
 
-Helper coverage fast path (local/CI, pytest-capable):
+Helper coverage fast path (local/CI, pytest-capable, recommended first gate):
 
 ```bash
 tools/run_stage_d9_helper_tests_quick.sh
+```
+
+Layered fast gate (runs helper coverage first, and optionally pilot-capable quick-check smoke):
+
+```bash
+# default: helper coverage only (fastest)
+bash tools/run_stage_d10_layered_fast_gate.sh
+
+# include pilot quick-check smoke after helper coverage
+bash tools/run_stage_d10_layered_fast_gate.sh --with-pilot-smoke --pilot-on-mode pilot --pilot-on-weight 0.25 --pilot-scale 1e-6
 ```
 
 Zero-mode (compatibility sentinel, default):
@@ -92,6 +105,8 @@ conda activate wsovvis
 python -m pytest --version
 export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:${PYTHONPATH:-}"
 tools/run_stage_d9_helper_tests_quick.sh
+bash tools/run_stage_d10_layered_fast_gate.sh
+bash tools/run_stage_d10_layered_fast_gate.sh --with-pilot-smoke --pilot-on-mode pilot --pilot-on-weight 0.25 --pilot-scale 1e-6
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 tools/run_stage_d10_quick_checks.sh
 tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25

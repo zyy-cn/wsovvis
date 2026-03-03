@@ -12,6 +12,7 @@ WSOVVIS is an ongoing research/engineering project for weakly-supervised open-vo
 - 📘 Stage D closure memo: `docs/STAGE_D_CLOSURE_MEMO_D1_D12.md`
 - 📘 Stage D quick-check runbook (D10/D11/D12/N4 zero+nonzero modes): `docs/STAGE_D_SMOKE_HELPER_QUICKCHECK.md`
 - ⚙️ Stage D helper coverage quick entry (local/CI mirror): `tools/run_stage_d9_helper_tests_quick.sh`
+- ⚙️ Stage D layered fast gate (N10 helper-first + optional pilot quick-check smoke): `tools/run_stage_d10_layered_fast_gate.sh`
 - 📘 Session handoff (post-closure): `docs/SESSION_HANDOFF_STAGE_D_CLOSURE.md`
 - ▶️ Next recommended direction: **research-facing nonzero supervision semantics** under new gated milestone planning
 - Progress log: `docs/PROJECT_PROGRESS.md`

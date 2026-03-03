@@ -632,6 +632,40 @@ Harden and operationalize N6 pilot mode in existing Stage D quick-check tooling/
 
 ---
 
+## 2026-03-03 — N10 completed (layered fast gate composition and continuity lock)
+
+### Scope
+Add a lightweight layered Stage D fast gate that runs helper coverage first, then optionally runs pilot-capable quick-check smoke, without changing Stage D semantics.
+
+### Completed
+- Added `tools/run_stage_d10_layered_fast_gate.sh`:
+  - step 1 (always): `tools/run_stage_d9_helper_tests_quick.sh`
+  - step 2 (optional via `--with-pilot-smoke`): `tools/run_stage_d10_quick_checks.sh` with pass-through pilot-mode options
+  - fail-fast CLI guardrails for invalid/partial pilot arguments
+  - concise stage markers for helper coverage and optional pilot quick-check execution
+- Added GPU-free command-wiring tests:
+  - `tests/test_stage_d10_layered_fast_gate_v1.py`
+  - validates sequencing, argument forwarding, and fail-fast argument checks
+- Updated docs/readme continuity pointers to lock recommended validation order:
+  - helper coverage fast gate first
+  - then layered/quick-check smoke as needed
+
+### Validation
+- Local targeted pytest:
+  - `python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py tests/test_stage_d10_layered_fast_gate_v1.py`
+- Canonical remote lightweight verification:
+  - conda-first `wsovvis`
+  - `python -m pytest --version` preflight
+  - layered fast gate run with helper-only and helper+pilot smoke forms
+
+### Notes
+- Non-goals preserved:
+  - no Stage C/D schema changes
+  - no new loss/objective/training semantics
+  - no refactor of N1-N9 interfaces
+
+---
+
 ## Validation evidence highlights (through Stage D closure)
 
 ### Canonical remote validation discipline (preserved)
