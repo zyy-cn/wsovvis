@@ -29,6 +29,7 @@ from sacred.observers import FileStorageObserver
 
 from wsovvis.training import (
     build_stage_d_attribution_consumption_boundary,
+    build_stage_d_objective_coupling_decision,
     consume_stage_d_attribution_config,
     resolve_stage_d_attribution_plumbing,
 )
@@ -294,14 +295,23 @@ def _main_worker(*args):
 
     stage_d_consumption = build_stage_d_attribution_consumption_boundary(cfg_dict)
     cfg_dict["stage_d_attribution_consumption"] = stage_d_consumption
+    stage_d_coupling = build_stage_d_objective_coupling_decision(cfg_dict)
+    cfg_dict["stage_d_attribution_coupling"] = stage_d_coupling
     stage_d_runtime = cfg_dict.get("stage_d_attribution_runtime")
     if isinstance(stage_d_runtime, dict):
         stage_d_runtime["d4_consume_boundary"] = stage_d_consumption
+        stage_d_runtime["d5_objective_coupling"] = stage_d_coupling
     if stage_d_consumption.get("enabled", False):
         print(
             "[stage_d_attribution:d4] consume boundary "
             f"status={stage_d_consumption.get('consume_status')} "
             f"skip_reason={stage_d_consumption.get('skip_reason')}"
+        )
+        print(
+            "[stage_d_attribution:d5] objective coupling "
+            f"eligible={stage_d_coupling.get('eligible')} "
+            f"applied={stage_d_coupling.get('applied')} "
+            f"skip_reason={stage_d_coupling.get('skip_reason')}"
         )
 
     d2_cfg = _setup_cfg(
@@ -389,7 +399,15 @@ def run(
             "stage_d_attribution_runtime": stage_d_runtime,
         }
     )
+    stage_d_coupling = build_stage_d_objective_coupling_decision(
+        {
+            "stage_d_attribution": resolved_stage_d_attribution,
+            "stage_d_attribution_runtime": stage_d_runtime,
+            "stage_d_attribution_consumption": stage_d_consumption,
+        }
+    )
     stage_d_runtime["d4_consume_boundary"] = stage_d_consumption
+    stage_d_runtime["d5_objective_coupling"] = stage_d_coupling
     if stage_d_runtime.get("enabled", False):
         summary = stage_d_runtime.get("summary", {}) or {}
         print(
@@ -397,6 +415,12 @@ def run(
             f"status={stage_d_runtime.get('consumer_status')} "
             f"backend={summary.get('scorer_backend')} "
             f"rows={stage_d_runtime.get('track_score_rows_validated')}"
+        )
+        print(
+            "[stage_d_attribution:d5] objective coupling "
+            f"eligible={stage_d_coupling.get('eligible')} "
+            f"applied={stage_d_coupling.get('applied')} "
+            f"skip_reason={stage_d_coupling.get('skip_reason')}"
         )
 
     cfg_dict = {
@@ -411,6 +435,7 @@ def run(
         "stage_d_attribution": resolved_stage_d_attribution,
         "stage_d_attribution_runtime": stage_d_runtime,
         "stage_d_attribution_consumption": stage_d_consumption,
+        "stage_d_attribution_coupling": stage_d_coupling,
     }
 
     # Write cfg_dict to disk and expose via env var so worker processes can load it

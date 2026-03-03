@@ -8,6 +8,7 @@ import pytest
 from wsovvis.training import (
     StageDAttributionPlumbingError,
     build_stage_d_attribution_consumption_boundary,
+    build_stage_d_objective_coupling_decision,
     consume_stage_d_attribution_config,
     resolve_stage_d_attribution_plumbing,
 )
@@ -234,3 +235,93 @@ def test_stage_d4_consume_boundary_enabled_invalid_runtime_skip_closed() -> None
     assert boundary["objective_placeholder"]["ready_for_objective_coupling"] is False
     assert boundary["counters"]["boundary_active"] == 0
     assert boundary["counters"]["boundary_skipped"] == 1
+
+
+def test_stage_d5_objective_coupling_default_off_is_skip_closed() -> None:
+    coupling = build_stage_d_objective_coupling_decision(
+        {
+            "stage_d_attribution": {"enabled": False},
+            "stage_d_attribution_runtime": {"enabled": False, "runtime_diag_version": "d3_runtime_v1"},
+            "stage_d_attribution_consumption": {"enabled": False, "consume_status": "skipped"},
+        }
+    )
+    assert coupling["coupling_version"] == "d5_objective_coupling_v1"
+    assert coupling["enabled_by_config"] is False
+    assert coupling["eligible"] is False
+    assert coupling["applied"] is False
+    assert coupling["skip_reason"] == "stage_d_attribution_disabled"
+    assert coupling["gate_status"]["stage_d_enabled"] is False
+    assert coupling["gate_status"]["d4_boundary_ready"] is False
+    assert coupling["diagnostics"]["considered"] is False
+    assert coupling["diagnostics"]["applied"] is False
+    assert coupling["planned_loss"]["loss_value"] == 0.0
+
+
+def test_stage_d5_objective_coupling_enabled_valid_runtime_reaches_apply_path(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "stagec_out"
+    _write_stagec_artifacts(artifact_root, num_tracks_scored=2, embedding_dim=256)
+    resolved = resolve_stage_d_attribution_plumbing(
+        {
+            "enabled": True,
+            "stagec_artifact_root": str(artifact_root),
+            "objective_coupling": {"enabled": True},
+        },
+        repo_root=tmp_path,
+    )
+    runtime = consume_stage_d_attribution_config(resolved)
+    boundary = build_stage_d_attribution_consumption_boundary(
+        {"stage_d_attribution": resolved, "stage_d_attribution_runtime": runtime}
+    )
+
+    coupling = build_stage_d_objective_coupling_decision(
+        {
+            "stage_d_attribution": resolved,
+            "stage_d_attribution_runtime": runtime,
+            "stage_d_attribution_consumption": boundary,
+        }
+    )
+    assert coupling["enabled_by_config"] is True
+    assert coupling["eligible"] is True
+    assert coupling["applied"] is True
+    assert coupling["skip_reason"] == "none"
+    assert coupling["gate_status"]["stage_d_enabled"] is True
+    assert coupling["gate_status"]["d4_boundary_ready"] is True
+    assert coupling["gate_status"]["runtime_fields_valid"] is True
+    assert coupling["gate_status"]["runtime_boundary_consistent"] is True
+    assert coupling["diagnostics"]["considered"] is True
+    assert coupling["diagnostics"]["applied"] is True
+    assert coupling["planned_loss"]["loss_key"] == "loss_stage_d_attribution_coupling"
+    assert coupling["planned_loss"]["apply_mode"] == "no_op_placeholder"
+    assert coupling["planned_loss"]["loss_value"] == 0.0
+
+
+def test_stage_d5_objective_coupling_enabled_invalid_runtime_boundary_skip_closed() -> None:
+    boundary = build_stage_d_attribution_consumption_boundary(
+        {
+            "stage_d_attribution": {"enabled": True, "objective_coupling": {"enabled": True}},
+            "stage_d_attribution_runtime": {
+                "enabled": True,
+                "runtime_diag_version": "d3_runtime_v1",
+                "summary": {"scorer_backend": "mil_v1", "embedding_dim": 256, "num_tracks_scored": 2},
+            },
+        }
+    )
+    coupling = build_stage_d_objective_coupling_decision(
+        {
+            "stage_d_attribution": {"enabled": True, "objective_coupling": {"enabled": True}},
+            "stage_d_attribution_runtime": {
+                "enabled": True,
+                "runtime_diag_version": "d3_runtime_v1",
+                "summary": {"scorer_backend": "mil_v1", "embedding_dim": 256, "num_tracks_scored": 2},
+            },
+            "stage_d_attribution_consumption": boundary,
+        }
+    )
+    assert coupling["enabled_by_config"] is True
+    assert coupling["eligible"] is False
+    assert coupling["applied"] is False
+    assert coupling["skip_reason"] == "d4_boundary_not_ready"
+    assert coupling["gate_status"]["stage_d_enabled"] is True
+    assert coupling["gate_status"]["d4_boundary_ready"] is False
+    assert coupling["diagnostics"]["considered"] is False
+    assert coupling["planned_loss"]["loss_value"] == 0.0

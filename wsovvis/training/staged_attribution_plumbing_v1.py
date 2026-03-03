@@ -532,3 +532,122 @@ def build_stage_d_attribution_consumption_boundary(cfg_dict: Mapping[str, Any] |
         "loss_changes": 0,
     }
     return result
+
+
+def build_stage_d_objective_coupling_decision(cfg_dict: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Build Stage D5 minimal objective-coupling decision diagnostics.
+
+    This function intentionally does not mutate model loss/objective. It only
+    computes a deterministic, skip-closed coupling decision and emits a
+    placeholder plan that can be consumed by later stages.
+    """
+
+    coupling_version = "d5_objective_coupling_v1"
+    loss_key = "loss_stage_d_attribution_coupling"
+    result = {
+        "coupling_version": coupling_version,
+        "enabled_by_config": False,
+        "eligible": False,
+        "applied": False,
+        "skip_reason": "invalid_cfg_dict_type",
+        "gate_status": {
+            "stage_d_enabled": False,
+            "d4_boundary_ready": False,
+            "runtime_fields_valid": False,
+            "runtime_boundary_consistent": False,
+        },
+        "policy": {
+            "skip_closed": True,
+            "default_off_parity_required": True,
+        },
+        "planned_loss": {
+            "loss_key": loss_key,
+            "loss_value": 0.0,
+            "loss_weight": 0.0,
+            "apply_mode": "no_op_placeholder",
+        },
+        "diagnostics": {
+            "considered": False,
+            "applied": False,
+            "objective_changes": 0,
+            "loss_changes": 0,
+        },
+    }
+
+    if not isinstance(cfg_dict, Mapping):
+        return result
+
+    raw_config = cfg_dict.get("stage_d_attribution", {})
+    raw_runtime = cfg_dict.get("stage_d_attribution_runtime", {})
+    raw_boundary = cfg_dict.get("stage_d_attribution_consumption", {})
+
+    objective_cfg = raw_config.get("objective_coupling", {}) if isinstance(raw_config, Mapping) else {}
+    objective_enabled_raw = objective_cfg.get("enabled", False) if isinstance(objective_cfg, Mapping) else False
+    if not isinstance(objective_enabled_raw, bool):
+        result["skip_reason"] = "invalid_objective_coupling_enabled_field"
+        return result
+    result["enabled_by_config"] = bool(objective_enabled_raw)
+
+    weight = objective_cfg.get("weight", 0.0) if isinstance(objective_cfg, Mapping) else 0.0
+    if not _is_number(weight) or float(weight) < 0.0:
+        result["skip_reason"] = "invalid_objective_coupling_weight"
+        return result
+    result["planned_loss"]["loss_weight"] = float(weight)
+
+    stage_d_enabled = isinstance(raw_config, Mapping) and raw_config.get("enabled") is True
+    result["gate_status"]["stage_d_enabled"] = bool(stage_d_enabled)
+    if not stage_d_enabled:
+        result["skip_reason"] = "stage_d_attribution_disabled"
+        return result
+
+    boundary_ready = (
+        isinstance(raw_boundary, Mapping)
+        and raw_boundary.get("enabled") is True
+        and raw_boundary.get("consume_status") == "active_noop"
+        and raw_boundary.get("skip_reason") == "none"
+        and isinstance(raw_boundary.get("objective_placeholder"), Mapping)
+        and raw_boundary["objective_placeholder"].get("ready_for_objective_coupling") is True
+    )
+    result["gate_status"]["d4_boundary_ready"] = bool(boundary_ready)
+    if not boundary_ready:
+        result["skip_reason"] = "d4_boundary_not_ready"
+        return result
+
+    runtime_fields_valid = (
+        isinstance(raw_runtime, Mapping)
+        and raw_runtime.get("enabled") is True
+        and isinstance(raw_runtime.get("summary"), Mapping)
+        and isinstance(raw_runtime.get("track_score_rows_validated"), int)
+        and raw_runtime.get("track_score_rows_validated") >= 0
+    )
+    result["gate_status"]["runtime_fields_valid"] = bool(runtime_fields_valid)
+    if not runtime_fields_valid:
+        result["skip_reason"] = "runtime_missing_or_invalid"
+        return result
+
+    runtime_summary = raw_runtime["summary"]
+    boundary_summary = raw_boundary.get("summary", {}) if isinstance(raw_boundary, Mapping) else {}
+    rows_runtime = int(raw_runtime["track_score_rows_validated"])
+    rows_boundary = raw_boundary.get("track_score_rows_validated")
+    runtime_boundary_consistent = (
+        isinstance(boundary_summary, Mapping)
+        and runtime_summary.get("scorer_backend") == boundary_summary.get("scorer_backend")
+        and runtime_summary.get("embedding_dim") == boundary_summary.get("embedding_dim")
+        and runtime_summary.get("num_tracks_scored") == boundary_summary.get("num_tracks_scored")
+        and rows_boundary == rows_runtime
+    )
+    result["gate_status"]["runtime_boundary_consistent"] = bool(runtime_boundary_consistent)
+    if not runtime_boundary_consistent:
+        result["skip_reason"] = "runtime_boundary_mismatch"
+        return result
+
+    result["eligible"] = True
+    result["diagnostics"]["considered"] = True
+    if not result["enabled_by_config"]:
+        result["skip_reason"] = "disabled_by_config"
+        return result
+
+    result["applied"] = True
+    result["skip_reason"] = "none"
+    result["diagnostics"]["applied"] = True
+    return result
