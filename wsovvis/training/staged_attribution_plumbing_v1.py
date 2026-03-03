@@ -354,3 +354,181 @@ def consume_stage_d_attribution_config(raw: Mapping[str, Any] | None) -> dict[st
             "loss_changes": 0,
         },
     }
+
+
+def build_stage_d_attribution_consumption_boundary(cfg_dict: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Build Stage D4 attribution consumption boundary for training-path use.
+
+    This boundary is additive and no-op by design for D4: it never changes loss or
+    optimization behavior. It deterministically records consume/skip policy and
+    emits a placeholder payload for future objective coupling stages.
+    """
+
+    boundary_version = "d4_consume_boundary_v1"
+    placeholder_version = "d4_objective_placeholder_v1"
+    default_result = {
+        "consume_boundary_version": boundary_version,
+        "enabled": False,
+        "consume_status": "skipped",
+        "skip_reason": "disabled_by_config",
+        "policy": {
+            "enabled_runtime_invalid_action": "skip_closed",
+            "hard_fail_on_runtime_invalid": False,
+        },
+        "guard_flags": {
+            "cfg_mapping_valid": True,
+            "config_enabled_field_valid": True,
+            "runtime_mapping_present": False,
+            "runtime_shape_valid_for_enabled": False,
+        },
+        "runtime_diag_version": "unknown",
+        "consumer_status_seen": "unknown",
+        "compatibility": {
+            "default_off_compatible": True,
+            "training_objective_affected": False,
+        },
+        "objective_placeholder": {
+            "interface_version": placeholder_version,
+            "coupling_status": "noop",
+            "ready_for_objective_coupling": False,
+            "objective_inputs": {
+                "scorer_backend": None,
+                "embedding_dim": None,
+                "rows_validated": 0,
+            },
+        },
+        "counters": {
+            "boundary_applied": 1,
+            "boundary_active": 0,
+            "boundary_skipped": 1,
+            "objective_changes": 0,
+            "loss_changes": 0,
+        },
+    }
+
+    if not isinstance(cfg_dict, Mapping):
+        result = dict(default_result)
+        result["skip_reason"] = "invalid_cfg_dict_type"
+        result["guard_flags"] = dict(default_result["guard_flags"])
+        result["guard_flags"]["cfg_mapping_valid"] = False
+        return result
+
+    raw_config = cfg_dict.get("stage_d_attribution", {})
+    raw_runtime = cfg_dict.get("stage_d_attribution_runtime", {})
+
+    config_enabled_field_valid = isinstance(raw_config, Mapping) and isinstance(raw_config.get("enabled", False), bool)
+    config_enabled = bool(raw_config.get("enabled", False)) if config_enabled_field_valid else False
+
+    runtime_mapping_present = isinstance(raw_runtime, Mapping)
+    runtime_diag_version = str(raw_runtime.get("runtime_diag_version", "unknown")) if runtime_mapping_present else "unknown"
+    consumer_status_seen = str(raw_runtime.get("consumer_status", "unknown")) if runtime_mapping_present else "unknown"
+
+    guard_flags = {
+        "cfg_mapping_valid": True,
+        "config_enabled_field_valid": bool(config_enabled_field_valid),
+        "runtime_mapping_present": bool(runtime_mapping_present),
+        "runtime_shape_valid_for_enabled": False,
+    }
+
+    result = {
+        "consume_boundary_version": boundary_version,
+        "enabled": bool(config_enabled),
+        "consume_status": "skipped",
+        "skip_reason": "disabled_by_config",
+        "policy": {
+            "enabled_runtime_invalid_action": "skip_closed",
+            "hard_fail_on_runtime_invalid": False,
+        },
+        "guard_flags": guard_flags,
+        "runtime_diag_version": runtime_diag_version,
+        "consumer_status_seen": consumer_status_seen,
+        "compatibility": {
+            "default_off_compatible": True,
+            "training_objective_affected": False,
+        },
+        "objective_placeholder": {
+            "interface_version": placeholder_version,
+            "coupling_status": "noop",
+            "ready_for_objective_coupling": False,
+            "objective_inputs": {
+                "scorer_backend": None,
+                "embedding_dim": None,
+                "rows_validated": 0,
+            },
+        },
+        "counters": {
+            "boundary_applied": 1,
+            "boundary_active": 0,
+            "boundary_skipped": 1,
+            "objective_changes": 0,
+            "loss_changes": 0,
+        },
+    }
+
+    if not config_enabled_field_valid:
+        result["skip_reason"] = "invalid_config_enabled_field"
+        return result
+    if not config_enabled:
+        return result
+
+    result["skip_reason"] = "runtime_missing_or_invalid_for_enabled_config"
+    if not runtime_mapping_present:
+        return result
+
+    runtime_required = (
+        isinstance(raw_runtime.get("enabled"), bool)
+        and raw_runtime.get("enabled") is True
+        and isinstance(raw_runtime.get("stagec_run_summary_path"), str)
+        and bool(raw_runtime.get("stagec_run_summary_path"))
+        and isinstance(raw_runtime.get("stagec_track_scores_path"), str)
+        and bool(raw_runtime.get("stagec_track_scores_path"))
+        and isinstance(raw_runtime.get("summary"), Mapping)
+        and isinstance(raw_runtime.get("track_score_rows_validated"), int)
+        and raw_runtime.get("track_score_rows_validated") >= 0
+    )
+    if not runtime_required:
+        return result
+
+    summary = raw_runtime["summary"]
+    summary_required = (
+        isinstance(summary.get("scorer_backend"), str)
+        and bool(summary.get("scorer_backend"))
+        and isinstance(summary.get("embedding_dim"), int)
+        and summary.get("embedding_dim") >= 0
+        and isinstance(summary.get("num_tracks_scored"), int)
+        and summary.get("num_tracks_scored") >= 0
+    )
+    if not summary_required:
+        return result
+
+    guard_flags["runtime_shape_valid_for_enabled"] = True
+    rows_validated = int(raw_runtime["track_score_rows_validated"])
+    result["consume_status"] = "active_noop"
+    result["skip_reason"] = "none"
+    result["objective_placeholder"] = {
+        "interface_version": placeholder_version,
+        "coupling_status": "noop",
+        "ready_for_objective_coupling": True,
+        "objective_inputs": {
+            "scorer_backend": str(summary["scorer_backend"]),
+            "embedding_dim": int(summary["embedding_dim"]),
+            "rows_validated": rows_validated,
+        },
+    }
+    result["stagec_run_summary_path"] = str(raw_runtime["stagec_run_summary_path"])
+    result["stagec_track_scores_path"] = str(raw_runtime["stagec_track_scores_path"])
+    result["summary"] = {
+        "scorer_backend": str(summary["scorer_backend"]),
+        "split": str(summary.get("split", "")),
+        "embedding_dim": int(summary["embedding_dim"]),
+        "num_tracks_scored": int(summary["num_tracks_scored"]),
+    }
+    result["track_score_rows_validated"] = rows_validated
+    result["counters"] = {
+        "boundary_applied": 1,
+        "boundary_active": 1,
+        "boundary_skipped": 0,
+        "objective_changes": 0,
+        "loss_changes": 0,
+    }
+    return result

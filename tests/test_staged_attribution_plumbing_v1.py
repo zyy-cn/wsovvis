@@ -7,6 +7,7 @@ import pytest
 
 from wsovvis.training import (
     StageDAttributionPlumbingError,
+    build_stage_d_attribution_consumption_boundary,
     consume_stage_d_attribution_config,
     resolve_stage_d_attribution_plumbing,
 )
@@ -160,3 +161,76 @@ def test_stage_d_plumbing_fail_fast_on_embedding_dim_mismatch(tmp_path: Path) ->
             {"enabled": True, "stagec_artifact_root": str(artifact_root), "expected_embedding_dim": 128},
             repo_root=tmp_path,
         )
+
+
+def test_stage_d4_consume_boundary_default_off_is_explicit_skip() -> None:
+    boundary = build_stage_d_attribution_consumption_boundary(
+        {
+            "stage_d_attribution": {"enabled": False},
+            "stage_d_attribution_runtime": {"enabled": False, "runtime_diag_version": "d3_runtime_v1"},
+        }
+    )
+    assert boundary["consume_boundary_version"] == "d4_consume_boundary_v1"
+    assert boundary["enabled"] is False
+    assert boundary["consume_status"] == "skipped"
+    assert boundary["skip_reason"] == "disabled_by_config"
+    assert boundary["compatibility"]["default_off_compatible"] is True
+    assert boundary["compatibility"]["training_objective_affected"] is False
+    assert boundary["objective_placeholder"]["coupling_status"] == "noop"
+    assert boundary["objective_placeholder"]["ready_for_objective_coupling"] is False
+    assert boundary["counters"]["boundary_active"] == 0
+    assert boundary["counters"]["objective_changes"] == 0
+    assert boundary["counters"]["loss_changes"] == 0
+
+
+def test_stage_d4_consume_boundary_enabled_valid_runtime_active_noop(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "stagec_out"
+    _write_stagec_artifacts(artifact_root, num_tracks_scored=2, embedding_dim=256)
+    resolved = resolve_stage_d_attribution_plumbing(
+        {"enabled": True, "stagec_artifact_root": str(artifact_root)},
+        repo_root=tmp_path,
+    )
+    runtime = consume_stage_d_attribution_config(resolved)
+
+    boundary = build_stage_d_attribution_consumption_boundary(
+        {
+            "stage_d_attribution": resolved,
+            "stage_d_attribution_runtime": runtime,
+        }
+    )
+    assert boundary["enabled"] is True
+    assert boundary["consume_status"] == "active_noop"
+    assert boundary["skip_reason"] == "none"
+    assert boundary["guard_flags"]["runtime_shape_valid_for_enabled"] is True
+    assert boundary["summary"]["scorer_backend"] == "mil_v1"
+    assert boundary["track_score_rows_validated"] == 2
+    assert boundary["objective_placeholder"]["interface_version"] == "d4_objective_placeholder_v1"
+    assert boundary["objective_placeholder"]["coupling_status"] == "noop"
+    assert boundary["objective_placeholder"]["ready_for_objective_coupling"] is True
+    assert boundary["counters"]["boundary_active"] == 1
+    assert boundary["counters"]["objective_changes"] == 0
+    assert boundary["counters"]["loss_changes"] == 0
+
+
+def test_stage_d4_consume_boundary_enabled_invalid_runtime_skip_closed() -> None:
+    boundary = build_stage_d_attribution_consumption_boundary(
+        {
+            "stage_d_attribution": {"enabled": True},
+            "stage_d_attribution_runtime": {
+                "enabled": True,
+                "runtime_diag_version": "d3_runtime_v1",
+                "summary": {"scorer_backend": "mil_v1", "embedding_dim": 256, "num_tracks_scored": 2},
+            },
+        }
+    )
+    assert boundary["enabled"] is True
+    assert boundary["consume_status"] == "skipped"
+    assert boundary["skip_reason"] == "runtime_missing_or_invalid_for_enabled_config"
+    assert boundary["policy"]["enabled_runtime_invalid_action"] == "skip_closed"
+    assert boundary["policy"]["hard_fail_on_runtime_invalid"] is False
+    assert boundary["guard_flags"]["runtime_mapping_present"] is True
+    assert boundary["guard_flags"]["runtime_shape_valid_for_enabled"] is False
+    assert boundary["objective_placeholder"]["coupling_status"] == "noop"
+    assert boundary["objective_placeholder"]["ready_for_objective_coupling"] is False
+    assert boundary["counters"]["boundary_active"] == 0
+    assert boundary["counters"]["boundary_skipped"] == 1

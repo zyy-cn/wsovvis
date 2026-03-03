@@ -27,7 +27,11 @@ from typing import Any, Dict, List, Optional
 from sacred import Experiment
 from sacred.observers import FileStorageObserver
 
-from wsovvis.training import consume_stage_d_attribution_config, resolve_stage_d_attribution_plumbing
+from wsovvis.training import (
+    build_stage_d_attribution_consumption_boundary,
+    consume_stage_d_attribution_config,
+    resolve_stage_d_attribution_plumbing,
+)
 
 ex = Experiment("wsovvis_seqformer")
 
@@ -288,6 +292,18 @@ def _main_worker(*args):
 
     register_wsovvis_datasets(cfg_dict["data"])
 
+    stage_d_consumption = build_stage_d_attribution_consumption_boundary(cfg_dict)
+    cfg_dict["stage_d_attribution_consumption"] = stage_d_consumption
+    stage_d_runtime = cfg_dict.get("stage_d_attribution_runtime")
+    if isinstance(stage_d_runtime, dict):
+        stage_d_runtime["d4_consume_boundary"] = stage_d_consumption
+    if stage_d_consumption.get("enabled", False):
+        print(
+            "[stage_d_attribution:d4] consume boundary "
+            f"status={stage_d_consumption.get('consume_status')} "
+            f"skip_reason={stage_d_consumption.get('skip_reason')}"
+        )
+
     d2_cfg = _setup_cfg(
         d2_cfg_path=cfg_dict["d2_cfg_path"],
         d2_opts=cfg_dict.get("d2_opts", []),
@@ -367,6 +383,13 @@ def run(
         repo_root=Path(__file__).resolve().parent,
     )
     stage_d_runtime = consume_stage_d_attribution_config(resolved_stage_d_attribution)
+    stage_d_consumption = build_stage_d_attribution_consumption_boundary(
+        {
+            "stage_d_attribution": resolved_stage_d_attribution,
+            "stage_d_attribution_runtime": stage_d_runtime,
+        }
+    )
+    stage_d_runtime["d4_consume_boundary"] = stage_d_consumption
     if stage_d_runtime.get("enabled", False):
         summary = stage_d_runtime.get("summary", {}) or {}
         print(
@@ -387,6 +410,7 @@ def run(
         "feature_export": feature_export,
         "stage_d_attribution": resolved_stage_d_attribution,
         "stage_d_attribution_runtime": stage_d_runtime,
+        "stage_d_attribution_consumption": stage_d_consumption,
     }
 
     # Write cfg_dict to disk and expose via env var so worker processes can load it
