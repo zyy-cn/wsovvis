@@ -16,6 +16,9 @@ N9 adds a local/CI mirror entry for helper coverage:
 N10 adds a layered fast-gate entry that composes helper coverage first, then optional pilot-capable quick-check smoke:
 - `tools/run_stage_d10_layered_fast_gate.sh`
 
+N12 adds a replay wrapper for the N11 canonical sequence:
+- `tools/run_stage_d11_canonical_replay.sh`
+
 N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
 - nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
@@ -38,6 +41,12 @@ bash tools/run_stage_d10_layered_fast_gate.sh
 
 # include pilot quick-check smoke after helper coverage
 bash tools/run_stage_d10_layered_fast_gate.sh --with-pilot-smoke --pilot-on-mode pilot --pilot-on-weight 0.25 --pilot-scale 1e-6
+```
+
+Canonical N11 replay sequence (N12 bundled entry):
+
+```bash
+bash tools/run_stage_d11_canonical_replay.sh
 ```
 
 Zero-mode (compatibility sentinel, default):
@@ -107,6 +116,7 @@ export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:${PYTHONP
 tools/run_stage_d9_helper_tests_quick.sh
 bash tools/run_stage_d10_layered_fast_gate.sh
 bash tools/run_stage_d10_layered_fast_gate.sh --with-pilot-smoke --pilot-on-mode pilot --pilot-on-weight 0.25 --pilot-scale 1e-6
+bash tools/run_stage_d11_canonical_replay.sh
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 tools/run_stage_d10_quick_checks.sh
 tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25

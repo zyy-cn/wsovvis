@@ -666,6 +666,39 @@ Add a lightweight layered Stage D fast gate that runs helper coverage first, the
 
 ---
 
+## 2026-03-03 — N12 completed (CI-stage canonical replay wrapper for N11 sequence)
+
+### Scope
+Package the N11 canonical sequence into a reusable replay entry for CI-stage or operator replay use, with minimal wiring tests/docs continuity only.
+
+### Completed
+- Added `tools/run_stage_d11_canonical_replay.sh`:
+  - step 1: runs `tools/run_stage_d10_layered_fast_gate.sh`
+  - step 2: runs real helper smoke `tools/run_stage_d9_smoke_helper.py --on-mode pilot --pilot-scale 1e-6`
+  - supports deterministic argument pass-through for helper smoke knobs (`--output-root`, `--config-path`, `--stagec-artifact-root`, `--on-weight`, `--pilot-scale`, `--keep-output`)
+- Added GPU-free sequencing/passthrough tests:
+  - `tests/test_stage_d11_canonical_replay_v1.py`
+  - validates stage ordering and wrapper-to-helper argument forwarding
+- Updated continuity docs/readme pointers:
+  - README tooling list includes the new replay entry
+  - Stage D runbook includes the bundled replay command in canonical quick-check commands
+
+### Validation
+- Local targeted pytest:
+  - `python -m pytest -q tests/test_stage_d11_canonical_replay_v1.py tests/test_stage_d10_layered_fast_gate_v1.py tests/test_stage_d9_smoke_helper_v1.py`
+- Canonical remote validation (conda-first) executed via `tools/remote_verify_wsovvis.sh` with:
+  - required preflight `python -m pytest --version`
+  - dual `${PYTHONPATH:-}` usage in both `--env-cmd` and `--cmd`
+  - replay entry invocation `bash tools/run_stage_d11_canonical_replay.sh`
+
+### Notes
+- Non-goals preserved:
+  - no new loss semantics or pilot modes
+  - no Stage C/D schema changes
+  - no refactor of N1-N11 interfaces
+
+---
+
 ## Validation evidence highlights (through Stage D closure)
 
 ### Canonical remote validation discipline (preserved)
