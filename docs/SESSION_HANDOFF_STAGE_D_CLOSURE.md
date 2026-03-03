@@ -29,6 +29,7 @@
 - Progress ledger: `docs/PROJECT_PROGRESS.md`
 - Stage D closure memo: `docs/STAGE_D_CLOSURE_MEMO_D1_D12.md`
 - Stage D quick-check runbook: `docs/STAGE_D_SMOKE_HELPER_QUICKCHECK.md`
+- N4 continuity pointer: use the canonical zero/nonzero quick-check commands recorded in `docs/PROJECT_PROGRESS.md` (2026-03-03 N4 entry).
 - Workflow policy baseline:
   - `codex/WSOVVIS_CODEX_WORKFLOW_README.md`
   - `codex/specs/*`

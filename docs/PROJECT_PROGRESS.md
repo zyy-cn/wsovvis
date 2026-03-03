@@ -565,6 +565,37 @@ Close Stage D with a documentation/continuity pass after D1-D12 completion, and 
 
 ---
 
+## 2026-03-03 — N4 completed (nonzero quick-check wiring / runbook continuity lock)
+
+### Scope
+Record the Stage D nonzero-semantics N4 continuity point (tooling/docs-only), preserving existing training semantics and helper behavior.
+
+### Completed
+- Logged N4 completion as docs/tooling continuity only (no training/loss semantics change).
+- Locked canonical quick-check command forms for ON-mode zero vs ON-mode nonzero:
+  - zero-mode quick check (ON-mode zero):
+    - `tools/run_stage_d10_quick_checks.sh`
+    - `python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode zero`
+  - nonzero-mode quick check (ON-mode nonzero, explicit weight):
+    - `tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25`
+    - `python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode nonzero --on-weight 0.25`
+- Reinforced continuity that N3/N4 validation discipline remains canonical:
+  - conda-first `wsovvis` activation
+  - `python -m pytest --version` preflight
+  - dual `PYTHONPATH` with `${PYTHONPATH:-}`
+  - canonical runner path `/home/zyy/code/wsovvis_runner`
+
+### Validation
+- Docs-only continuity update (no executable behavior change required for this step).
+
+### Notes
+- Non-goals preserved:
+  - no helper behavior changes
+  - no new tests
+  - no schema/training semantics changes
+
+---
+
 ## Validation evidence highlights (through Stage D closure)
 
 ### Canonical remote validation discipline (preserved)
