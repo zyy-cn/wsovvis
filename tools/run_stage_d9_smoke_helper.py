@@ -17,6 +17,30 @@ from pathlib import Path
 from typing import Any
 
 
+def _require_mapping(value: Any, *, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{field_name} must be an object")
+    return value
+
+
+def _require_bool(value: Any, *, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise RuntimeError(f"{field_name} must be a boolean")
+    return value
+
+
+def _require_str(value: Any, *, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _require_number(value: Any, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"{field_name} must be numeric")
+    return float(value)
+
+
 def _resolve_existing_path(candidates: list[Path]) -> Path:
     for candidate in candidates:
         if candidate.exists():
@@ -143,6 +167,119 @@ def _find_metrics_file(run_dir: Path) -> Path:
     if not candidates:
         raise FileNotFoundError(f"no metrics.json under {run_dir}")
     return candidates[-1]
+
+
+def _load_runtime_cfg(run_dir: Path) -> dict[str, Any]:
+    cfg_path = run_dir / "cfg_runtime.json"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"missing runtime cfg file: {cfg_path}")
+    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg = _require_mapping(payload, field_name="cfg_runtime.json")
+    return cfg
+
+
+def _evaluate_pilot_diagnostics_checks(
+    *,
+    on_mode: str,
+    on_runtime_cfg: dict[str, Any],
+    expected_weight: float,
+    pilot_scale: float | None,
+    value_tol: float = 1e-12,
+) -> dict[str, Any]:
+    if on_mode != "pilot":
+        return {
+            "enabled": False,
+            "checks_ok": True,
+            "reason": "not_pilot_mode",
+        }
+
+    d6 = _require_mapping(
+        on_runtime_cfg.get("stage_d_attribution_d6_loss_key"),
+        field_name="stage_d_attribution_d6_loss_key",
+    )
+    diagnostics = _require_mapping(d6.get("diagnostics"), field_name="stage_d_attribution_d6_loss_key.diagnostics")
+    planned_loss = _require_mapping(d6.get("planned_loss"), field_name="stage_d_attribution_d6_loss_key.planned_loss")
+
+    nonzero_mode = _require_str(d6.get("nonzero_semantics_mode"), field_name="stage_d_attribution_d6_loss_key.nonzero_semantics_mode")
+    if nonzero_mode != "gradient_coupled_pilot_v1":
+        raise RuntimeError(
+            "stage_d_attribution_d6_loss_key.nonzero_semantics_mode must be gradient_coupled_pilot_v1 for pilot mode"
+        )
+    nonzero_enabled = _require_bool(
+        d6.get("nonzero_semantics_enabled_by_config"),
+        field_name="stage_d_attribution_d6_loss_key.nonzero_semantics_enabled_by_config",
+    )
+    if not nonzero_enabled:
+        raise RuntimeError("pilot mode requires nonzero semantics to be enabled by config")
+
+    loss_weight = _require_number(planned_loss.get("loss_weight"), field_name="stage_d_attribution_d6_loss_key.planned_loss.loss_weight")
+    if abs(loss_weight - expected_weight) > value_tol:
+        raise RuntimeError(
+            "stage_d_attribution_d6_loss_key.planned_loss.loss_weight mismatch: "
+            f"expected {expected_weight}, got {loss_weight}"
+        )
+
+    gradient_scale = _require_number(
+        planned_loss.get("gradient_coupled_scale"),
+        field_name="stage_d_attribution_d6_loss_key.planned_loss.gradient_coupled_scale",
+    )
+    if pilot_scale is not None and abs(gradient_scale - float(pilot_scale)) > value_tol:
+        raise RuntimeError(
+            "stage_d_attribution_d6_loss_key.planned_loss.gradient_coupled_scale mismatch: "
+            f"expected {pilot_scale}, got {gradient_scale}"
+        )
+
+    pilot_applied = _require_bool(
+        diagnostics.get("gradient_coupled_pilot_applied"),
+        field_name="stage_d_attribution_d6_loss_key.diagnostics.gradient_coupled_pilot_applied",
+    )
+    pilot_state = _require_str(
+        diagnostics.get("gradient_coupled_pilot_state"),
+        field_name="stage_d_attribution_d6_loss_key.diagnostics.gradient_coupled_pilot_state",
+    )
+    pilot_skip_reason = _require_str(
+        diagnostics.get("gradient_coupled_pilot_skip_reason"),
+        field_name="stage_d_attribution_d6_loss_key.diagnostics.gradient_coupled_pilot_skip_reason",
+    )
+    nonzero_state = _require_str(
+        diagnostics.get("nonzero_semantics_state"),
+        field_name="stage_d_attribution_d6_loss_key.diagnostics.nonzero_semantics_state",
+    )
+    nonzero_skip_reason = _require_str(
+        diagnostics.get("nonzero_skip_reason"),
+        field_name="stage_d_attribution_d6_loss_key.diagnostics.nonzero_skip_reason",
+    )
+
+    if pilot_applied:
+        if pilot_state != "applied" or pilot_skip_reason != "none":
+            raise RuntimeError("pilot diagnostics inconsistent: applied=True requires pilot_state=applied and pilot_skip_reason=none")
+        if nonzero_state != "nonzero_applied" or nonzero_skip_reason != "none":
+            raise RuntimeError(
+                "pilot diagnostics inconsistent: applied=True requires nonzero_semantics_state=nonzero_applied and nonzero_skip_reason=none"
+            )
+    else:
+        if pilot_state != "skipped":
+            raise RuntimeError("pilot diagnostics inconsistent: applied=False requires pilot_state=skipped")
+        if pilot_skip_reason == "none":
+            raise RuntimeError("pilot diagnostics inconsistent: applied=False requires a non-none pilot skip reason")
+        if nonzero_state != "skipped":
+            raise RuntimeError("pilot diagnostics inconsistent: applied=False requires nonzero_semantics_state=skipped")
+        if nonzero_skip_reason == "none":
+            raise RuntimeError("pilot diagnostics inconsistent: applied=False requires a non-none nonzero skip reason")
+
+    return {
+        "enabled": True,
+        "checks_ok": True,
+        "nonzero_mode": nonzero_mode,
+        "nonzero_enabled": nonzero_enabled,
+        "loss_weight": loss_weight,
+        "gradient_coupled_scale": gradient_scale,
+        "pilot_applied": pilot_applied,
+        "pilot_state": pilot_state,
+        "pilot_skip_reason": pilot_skip_reason,
+        "nonzero_state": nonzero_state,
+        "nonzero_skip_reason": nonzero_skip_reason,
+    }
 
 
 def _evaluate_metrics_checks(
@@ -416,6 +553,7 @@ def main() -> int:
         str(config_path),
     ]
 
+    effective_on_weight = args.on_weight if args.on_weight is not None else (0.25 if args.on_mode in ("nonzero", "pilot") else 0.0)
     on_cmd = [
         args.python_bin,
         str(train_script),
@@ -428,10 +566,7 @@ def main() -> int:
         "stage_d_attribution.objective_coupling.enabled=True",
         "stage_d_attribution.objective_coupling.weight=0.0",
         "stage_d_attribution.additive_loss_key.enabled=True",
-        (
-            f"stage_d_attribution.additive_loss_key.weight="
-            f"{args.on_weight if args.on_weight is not None else (0.25 if args.on_mode in ('nonzero', 'pilot') else 0.0)}"
-        ),
+        f"stage_d_attribution.additive_loss_key.weight={effective_on_weight}",
         "stage_d_attribution.additive_loss_key.nonzero_semantics.enabled="
         f"{'True' if args.on_mode in ('nonzero', 'pilot') else 'False'}",
     ]
@@ -467,6 +602,7 @@ def main() -> int:
     on_metrics = _find_metrics_file(on_dir)
     off_rows = _load_metrics_rows(off_metrics)
     on_rows = _load_metrics_rows(on_metrics)
+    on_runtime_cfg = _load_runtime_cfg(on_metrics.parent.parent)
 
     results = _evaluate_metrics_checks(
         off_rows=off_rows,
@@ -476,9 +612,16 @@ def main() -> int:
         expect_nonzero_on=args.on_mode in ("nonzero", "pilot"),
         nonzero_eps=args.nonzero_eps,
     )
+    pilot_results = _evaluate_pilot_diagnostics_checks(
+        on_mode=args.on_mode,
+        on_runtime_cfg=on_runtime_cfg,
+        expected_weight=float(effective_on_weight),
+        pilot_scale=args.pilot_scale,
+    )
 
     print(f"D10_OFF_METRICS={off_metrics}")
     print(f"D10_ON_METRICS={on_metrics}")
+    print(f"D10_ON_RUNTIME_CFG={on_metrics.parent.parent / 'cfg_runtime.json'}")
     print(f"D10_ON_MODE={args.on_mode}")
     print(f"D10_OFF_HAS_LOSS_STAGE_D_ATTR={results['off_has_attr']}")
     print(f"D10_ON_HAS_LOSS_STAGE_D_ATTR={results['on_has_attr']}")
@@ -492,6 +635,18 @@ def main() -> int:
     print(f"D10_ON_ZERO_OK={results['on_zero_ok']}")
     print(f"D10_ON_NONZERO_OK={results['on_nonzero_ok']}")
     print(f"D10_TOTAL_INCREASE_OK={results['total_increase_ok']}")
+    print(f"D10_PILOT_DIAGNOSTICS_CHECK_ENABLED={pilot_results['enabled']}")
+    print(f"D10_PILOT_DIAGNOSTICS_CHECKS_PASS={pilot_results['checks_ok']}")
+    if pilot_results["enabled"]:
+        print(f"D10_PILOT_NONZERO_MODE={pilot_results['nonzero_mode']}")
+        print(f"D10_PILOT_NONZERO_ENABLED={pilot_results['nonzero_enabled']}")
+        print(f"D10_PILOT_LOSS_WEIGHT={pilot_results['loss_weight']}")
+        print(f"D10_PILOT_SCALE={pilot_results['gradient_coupled_scale']}")
+        print(f"D10_PILOT_APPLIED={pilot_results['pilot_applied']}")
+        print(f"D10_PILOT_STATE={pilot_results['pilot_state']}")
+        print(f"D10_PILOT_SKIP_REASON={pilot_results['pilot_skip_reason']}")
+        print(f"D10_PILOT_NONZERO_STATE={pilot_results['nonzero_state']}")
+        print(f"D10_PILOT_NONZERO_SKIP_REASON={pilot_results['nonzero_skip_reason']}")
     print(f"D10_CHECKS_PASS={results['checks_ok']}")
 
     if results["checks_ok"]:

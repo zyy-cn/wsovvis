@@ -97,6 +97,80 @@ def test_evaluate_metrics_checks_nonzero_mode_fails_when_attr_is_zero() -> None:
     assert out["checks_ok"] is False
 
 
+def test_evaluate_pilot_diagnostics_checks_passes_with_applied_payload() -> None:
+    helper = _load_helper_module()
+    on_runtime_cfg = {
+        "stage_d_attribution_d6_loss_key": {
+            "nonzero_semantics_mode": "gradient_coupled_pilot_v1",
+            "nonzero_semantics_enabled_by_config": True,
+            "planned_loss": {
+                "loss_weight": 0.25,
+                "gradient_coupled_scale": 1e-6,
+            },
+            "diagnostics": {
+                "gradient_coupled_pilot_applied": True,
+                "gradient_coupled_pilot_state": "applied",
+                "gradient_coupled_pilot_skip_reason": "none",
+                "nonzero_semantics_state": "nonzero_applied",
+                "nonzero_skip_reason": "none",
+            },
+        }
+    }
+
+    out = helper._evaluate_pilot_diagnostics_checks(
+        on_mode="pilot",
+        on_runtime_cfg=on_runtime_cfg,
+        expected_weight=0.25,
+        pilot_scale=1e-6,
+    )
+
+    assert out["enabled"] is True
+    assert out["checks_ok"] is True
+    assert out["pilot_applied"] is True
+    assert out["pilot_state"] == "applied"
+
+
+def test_evaluate_pilot_diagnostics_checks_fail_fast_on_missing_fields() -> None:
+    helper = _load_helper_module()
+    on_runtime_cfg = {
+        "stage_d_attribution_d6_loss_key": {
+            "nonzero_semantics_mode": "gradient_coupled_pilot_v1",
+            "nonzero_semantics_enabled_by_config": True,
+            "planned_loss": {
+                "loss_weight": 0.25,
+                "gradient_coupled_scale": 1e-6,
+            },
+            "diagnostics": {
+                "gradient_coupled_pilot_applied": False,
+                # missing gradient_coupled_pilot_state
+                "gradient_coupled_pilot_skip_reason": "gradient_coupled_reference_unavailable",
+                "nonzero_semantics_state": "skipped",
+                "nonzero_skip_reason": "gradient_coupled_reference_unavailable",
+            },
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="gradient_coupled_pilot_state"):
+        helper._evaluate_pilot_diagnostics_checks(
+            on_mode="pilot",
+            on_runtime_cfg=on_runtime_cfg,
+            expected_weight=0.25,
+            pilot_scale=1e-6,
+        )
+
+
+def test_evaluate_pilot_diagnostics_checks_noop_for_non_pilot_mode() -> None:
+    helper = _load_helper_module()
+    out = helper._evaluate_pilot_diagnostics_checks(
+        on_mode="zero",
+        on_runtime_cfg={},
+        expected_weight=0.0,
+        pilot_scale=None,
+    )
+    assert out["enabled"] is False
+    assert out["checks_ok"] is True
+
+
 def test_load_metrics_rows_fail_fast_on_missing_or_bad_json(tmp_path: Path) -> None:
     helper = _load_helper_module()
     missing = tmp_path / "missing.json"
