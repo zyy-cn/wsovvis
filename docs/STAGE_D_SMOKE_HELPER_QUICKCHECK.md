@@ -100,6 +100,13 @@ python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 ```
 
+## Prompt-template output clause (copy/paste)
+For task prompts and runbooks that request `xx_output.txt`, include this exact rule:
+
+```text
+Write the full report to codex/<task_dir>/xx_output.txt (sibling to the prompt file). Writing xx_output.txt at repo root is not allowed.
+```
+
 ## When to run which mode
 - Run zero-mode when you need a compatibility/regression sentinel that preserves OFF/ON no-op expectations (`loss_stage_d_attr` remains effectively zero in ON path).
 - Run nonzero-mode when you need semantic validation that ON path is wired for constant nonzero additive-loss behavior (`nonzero_semantics.enabled=True` and `weight>0` present in command wiring).
