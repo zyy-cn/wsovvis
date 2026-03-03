@@ -370,6 +370,7 @@ def test_stage_d6_additive_loss_key_weight_zero_inserts_observable_noop() -> Non
     assert d6["diagnostics"]["applied"] is True
     assert d6["diagnostics"]["inserted_into_loss_dict"] is True
     assert d6["diagnostics"]["weight_zero_noop_observed"] is True
+    assert d6["diagnostics"]["nonzero_semantics_state"] == "zero_weight_noop"
     assert losses["loss_stage_d_attr"] == 0.0
 
 
@@ -391,6 +392,53 @@ def test_stage_d6_additive_loss_key_requires_d5_applied_and_skip_closed_when_mis
     assert d6["skip_reason"] == "d5_coupling_not_applied"
     assert d6["gate_status"]["d5_coupling_applied"] is False
     assert "loss_stage_d_attr" not in losses
+
+
+def test_stage_d6_additive_loss_key_nonzero_weight_path_requires_d4_and_applies_nonzero(tmp_path: Path) -> None:
+    cfg_dict = _build_stage_d8_enabled_cfg(tmp_path, weight=0.25, nonzero_semantics_enabled=True)
+    losses: dict[str, torch.Tensor] = {"loss_mask": torch.tensor(1.0)}
+    d6 = apply_stage_d_additive_loss_key(cfg_dict, losses)
+
+    assert d6["applied"] is True
+    assert d6["skip_reason"] == "none"
+    assert d6["gate_status"]["stage_d_enabled"] is True
+    assert d6["gate_status"]["d4_boundary_ready"] is True
+    assert d6["gate_status"]["d5_coupling_applied"] is True
+    assert d6["gate_status"]["nonzero_prereqs_satisfied"] is True
+    assert d6["planned_loss"]["apply_mode"] == "loss_dict_insert_nonzero"
+    assert d6["planned_loss"]["loss_weight"] == pytest.approx(0.25)
+    assert d6["planned_loss"]["loss_value"] == pytest.approx(0.25)
+    assert d6["diagnostics"]["nonzero_semantics_state"] == "nonzero_applied"
+    assert d6["diagnostics"]["nonzero_skip_reason"] == "none"
+    assert isinstance(losses["loss_stage_d_attr"], torch.Tensor)
+    assert float(losses["loss_stage_d_attr"].item()) == pytest.approx(0.25)
+
+
+def test_stage_d6_additive_loss_key_nonzero_enabled_without_d4_boundary_is_observable_skip_closed() -> None:
+    losses: dict[str, torch.Tensor] = {"loss_mask": torch.tensor(1.0)}
+    d6 = apply_stage_d_additive_loss_key(
+        {
+            "stage_d_attribution": {
+                "enabled": True,
+                "additive_loss_key": {
+                    "enabled": True,
+                    "weight": 0.25,
+                    "nonzero_semantics": {"enabled": True},
+                },
+            },
+            "stage_d_attribution_coupling": {"applied": True},
+        },
+        losses,
+    )
+    assert d6["applied"] is True
+    assert d6["skip_reason"] == "none"
+    assert d6["gate_status"]["d4_boundary_ready"] is False
+    assert d6["gate_status"]["nonzero_prereqs_satisfied"] is False
+    assert d6["planned_loss"]["apply_mode"] == "loss_dict_insert_zero"
+    assert d6["diagnostics"]["nonzero_semantics_state"] == "skipped"
+    assert d6["diagnostics"]["nonzero_skip_reason"] == "d4_boundary_not_ready"
+    assert isinstance(losses["loss_stage_d_attr"], torch.Tensor)
+    assert float(losses["loss_stage_d_attr"].item()) == pytest.approx(0.0)
 
 
 def test_stage_d6_additive_loss_key_uses_placeholder_when_loss_dict_missing() -> None:
@@ -493,7 +541,12 @@ def test_stage_d7_real_hook_duplicate_call_is_single_insertion_with_conflict_ski
     assert list(losses.keys()).count("loss_stage_d_attr") == 1
 
 
-def _build_stage_d8_enabled_cfg(tmp_path: Path, *, weight: float = 0.0) -> dict[str, object]:
+def _build_stage_d8_enabled_cfg(
+    tmp_path: Path,
+    *,
+    weight: float = 0.0,
+    nonzero_semantics_enabled: bool = False,
+) -> dict[str, object]:
     artifact_root = tmp_path / "stagec_out_d8"
     _write_stagec_artifacts(artifact_root, num_tracks_scored=2, embedding_dim=256)
     resolved = resolve_stage_d_attribution_plumbing(
@@ -501,14 +554,22 @@ def _build_stage_d8_enabled_cfg(tmp_path: Path, *, weight: float = 0.0) -> dict[
             "enabled": True,
             "stagec_artifact_root": str(artifact_root),
             "objective_coupling": {"enabled": True, "weight": 0.0},
-            "additive_loss_key": {"enabled": True, "weight": weight},
+            "additive_loss_key": {
+                "enabled": True,
+                "weight": weight,
+                "nonzero_semantics": {"enabled": nonzero_semantics_enabled},
+            },
         },
         repo_root=tmp_path,
     )
     resolved = {
         **resolved,
         "objective_coupling": {"enabled": True, "weight": 0.0},
-        "additive_loss_key": {"enabled": True, "weight": weight},
+        "additive_loss_key": {
+            "enabled": True,
+            "weight": weight,
+            "nonzero_semantics": {"enabled": nonzero_semantics_enabled},
+        },
     }
     runtime = consume_stage_d_attribution_config(resolved)
     boundary = build_stage_d_attribution_consumption_boundary(

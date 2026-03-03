@@ -668,14 +668,17 @@ def apply_stage_d_additive_loss_key(
     result = {
         "application_version": "d6_additive_loss_key_v1",
         "enabled_by_config": False,
+        "nonzero_semantics_enabled_by_config": False,
         "eligible": False,
         "applied": False,
         "skip_reason": "invalid_cfg_dict_type",
         "gate_status": {
             "stage_d_enabled": False,
+            "d4_boundary_ready": False,
             "d5_coupling_applied": False,
             "weight_valid": False,
             "weight_gate_satisfied": False,
+            "nonzero_prereqs_satisfied": False,
             "loss_dict_available": isinstance(loss_dict, dict),
             "loss_key_conflict": False,
         },
@@ -692,6 +695,8 @@ def apply_stage_d_additive_loss_key(
             "inserted_into_loss_dict": False,
             "used_placeholder_path": False,
             "weight_zero_noop_observed": False,
+            "nonzero_semantics_state": "skipped",
+            "nonzero_skip_reason": "not_considered",
         },
     }
 
@@ -705,28 +710,66 @@ def apply_stage_d_additive_loss_key(
     d6_enabled_raw = d6_cfg.get("enabled", False) if isinstance(d6_cfg, Mapping) else False
     if not isinstance(d6_enabled_raw, bool):
         result["skip_reason"] = "invalid_d6_enabled_field"
+        result["diagnostics"]["nonzero_semantics_state"] = "disabled"
+        result["diagnostics"]["nonzero_skip_reason"] = "invalid_d6_enabled_field"
         return result
     result["enabled_by_config"] = bool(d6_enabled_raw)
+    if not result["enabled_by_config"]:
+        result["diagnostics"]["nonzero_semantics_state"] = "disabled"
+        result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
+
+    nonzero_cfg = d6_cfg.get("nonzero_semantics", {}) if isinstance(d6_cfg, Mapping) else {}
+    nonzero_enabled_raw = nonzero_cfg.get("enabled", False) if isinstance(nonzero_cfg, Mapping) else False
+    if not isinstance(nonzero_enabled_raw, bool):
+        result["skip_reason"] = "invalid_nonzero_semantics_enabled_field"
+        result["diagnostics"]["nonzero_semantics_state"] = "disabled"
+        result["diagnostics"]["nonzero_skip_reason"] = "invalid_nonzero_semantics_enabled_field"
+        return result
+    result["nonzero_semantics_enabled_by_config"] = bool(nonzero_enabled_raw)
+    if result["enabled_by_config"] and not result["nonzero_semantics_enabled_by_config"]:
+        result["diagnostics"]["nonzero_semantics_state"] = "disabled"
+        result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
 
     weight = d6_cfg.get("weight", 0.0) if isinstance(d6_cfg, Mapping) else 0.0
     if not _is_number(weight) or float(weight) < 0.0:
         result["skip_reason"] = "invalid_d6_weight"
+        result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+        result["diagnostics"]["nonzero_skip_reason"] = "invalid_d6_weight"
         return result
+    weight_value = float(weight)
     result["gate_status"]["weight_valid"] = True
     result["gate_status"]["weight_gate_satisfied"] = True
-    result["planned_loss"]["loss_weight"] = float(weight)
-    result["diagnostics"]["weight_zero_noop_observed"] = float(weight) == 0.0
+    result["planned_loss"]["loss_weight"] = weight_value
+    result["diagnostics"]["weight_zero_noop_observed"] = weight_value == 0.0
+    if weight_value == 0.0:
+        result["diagnostics"]["nonzero_semantics_state"] = "zero_weight_noop"
+        result["diagnostics"]["nonzero_skip_reason"] = "weight_zero"
 
     stage_d_enabled = isinstance(raw_config, Mapping) and raw_config.get("enabled") is True
     result["gate_status"]["stage_d_enabled"] = bool(stage_d_enabled)
     if not stage_d_enabled:
         result["skip_reason"] = "stage_d_attribution_disabled"
+        result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+        result["diagnostics"]["nonzero_skip_reason"] = "stage_d_attribution_disabled"
         return result
+
+    boundary = cfg_dict.get("stage_d_attribution_consumption", {})
+    d4_boundary_ready = (
+        isinstance(boundary, Mapping)
+        and boundary.get("enabled") is True
+        and boundary.get("consume_status") == "active_noop"
+        and boundary.get("skip_reason") == "none"
+        and isinstance(boundary.get("guard_flags"), Mapping)
+        and boundary["guard_flags"].get("runtime_shape_valid_for_enabled") is True
+    )
+    result["gate_status"]["d4_boundary_ready"] = bool(d4_boundary_ready)
 
     d5_coupling_applied = isinstance(coupling, Mapping) and coupling.get("applied") is True
     result["gate_status"]["d5_coupling_applied"] = bool(d5_coupling_applied)
     if not d5_coupling_applied:
         result["skip_reason"] = "d5_coupling_not_applied"
+        result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+        result["diagnostics"]["nonzero_skip_reason"] = "d5_coupling_not_applied"
         return result
 
     result["eligible"] = True
@@ -735,24 +778,67 @@ def apply_stage_d_additive_loss_key(
         result["skip_reason"] = "disabled_by_config"
         return result
 
+    use_nonzero_semantics = bool(
+        result["nonzero_semantics_enabled_by_config"]
+        and weight_value > 0.0
+        and d4_boundary_ready
+        and d5_coupling_applied
+    )
+    result["gate_status"]["nonzero_prereqs_satisfied"] = bool(use_nonzero_semantics)
+    if result["nonzero_semantics_enabled_by_config"] and weight_value > 0.0 and not d4_boundary_ready:
+        result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+        result["diagnostics"]["nonzero_skip_reason"] = "d4_boundary_not_ready"
+
     if isinstance(loss_dict, dict):
         if loss_key in loss_dict:
             result["gate_status"]["loss_key_conflict"] = True
             result["skip_reason"] = "loss_key_conflict"
+            result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+            result["diagnostics"]["nonzero_skip_reason"] = "loss_key_conflict"
             return result
         zero_value: Any = 0.0
+        scalar_factory: Any = None
         for existing_loss in loss_dict.values():
             # Training loss dicts are usually tensors; preserve scalar tensor type/device
             # so trainer reduction/metrics paths remain stable at the real integration hook.
             new_zeros = getattr(existing_loss, "new_zeros", None)
             if callable(new_zeros):
                 zero_value = new_zeros(())
+                scalar_factory = new_zeros
                 break
-        loss_dict[loss_key] = zero_value
-        result["planned_loss"]["apply_mode"] = "loss_dict_insert_zero"
+        loss_value: Any = zero_value
+        if use_nonzero_semantics:
+            if callable(scalar_factory):
+                loss_value = scalar_factory(()) + weight_value
+            else:
+                loss_value = weight_value
+            result["planned_loss"]["loss_value"] = weight_value
+            result["planned_loss"]["effective_training_delta"] = weight_value
+            result["planned_loss"]["apply_mode"] = "loss_dict_insert_nonzero"
+            result["diagnostics"]["nonzero_semantics_state"] = "nonzero_applied"
+            result["diagnostics"]["nonzero_skip_reason"] = "none"
+        else:
+            result["planned_loss"]["apply_mode"] = "loss_dict_insert_zero"
+            if result["diagnostics"]["nonzero_semantics_state"] == "skipped":
+                if result["diagnostics"]["nonzero_skip_reason"] == "not_considered":
+                    result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
+            elif result["diagnostics"]["nonzero_semantics_state"] not in {"disabled", "zero_weight_noop"}:
+                result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+                result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
+        loss_dict[loss_key] = loss_value
         result["diagnostics"]["inserted_into_loss_dict"] = True
     else:
-        result["planned_loss"]["apply_mode"] = "placeholder_zero"
+        if use_nonzero_semantics:
+            result["planned_loss"]["loss_value"] = weight_value
+            result["planned_loss"]["effective_training_delta"] = weight_value
+            result["planned_loss"]["apply_mode"] = "placeholder_nonzero"
+            result["diagnostics"]["nonzero_semantics_state"] = "nonzero_applied"
+            result["diagnostics"]["nonzero_skip_reason"] = "none"
+        else:
+            result["planned_loss"]["apply_mode"] = "placeholder_zero"
+            if result["diagnostics"]["nonzero_semantics_state"] not in {"disabled", "zero_weight_noop", "skipped"}:
+                result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+                result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
         result["diagnostics"]["used_placeholder_path"] = True
 
     result["applied"] = True
