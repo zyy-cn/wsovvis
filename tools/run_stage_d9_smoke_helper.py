@@ -145,6 +145,38 @@ def _find_metrics_file(run_dir: Path) -> Path:
     return candidates[-1]
 
 
+def _evaluate_metrics_checks(
+    *,
+    off_rows: list[dict[str, Any]],
+    on_rows: list[dict[str, Any]],
+    total_loss_key: str,
+    parity_tol: float,
+) -> dict[str, Any]:
+    off_has_attr = any("loss_stage_d_attr" in row for row in off_rows)
+    on_attr_values = [float(row["loss_stage_d_attr"]) for row in on_rows if "loss_stage_d_attr" in row]
+    on_has_attr = len(on_attr_values) > 0
+    on_last_attr = on_attr_values[-1] if on_attr_values else math.nan
+
+    off_total = _extract_last_numeric(off_rows, total_loss_key)
+    on_total = _extract_last_numeric(on_rows, total_loss_key)
+    total_diff = abs(off_total - on_total)
+    parity_ok = total_diff <= parity_tol
+    on_zero_ok = on_has_attr and abs(on_last_attr) <= parity_tol
+    checks_ok = (not off_has_attr) and on_zero_ok and parity_ok
+
+    return {
+        "off_has_attr": off_has_attr,
+        "on_has_attr": on_has_attr,
+        "on_last_attr": on_last_attr,
+        "off_total": off_total,
+        "on_total": on_total,
+        "total_diff": total_diff,
+        "parity_ok": parity_ok,
+        "on_zero_ok": on_zero_ok,
+        "checks_ok": checks_ok,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -227,6 +259,12 @@ def main() -> int:
         action="store_true",
         help="Do not delete existing output-root before running",
     )
+    parser.add_argument(
+        "--dry-run",
+        "--print-commands-only",
+        action="store_true",
+        help="Print resolved OFF/ON train commands and exit without executing",
+    )
     args = parser.parse_args()
 
     repo_root = args.repo_root.resolve()
@@ -239,54 +277,80 @@ def main() -> int:
         shutil.rmtree(output_root)
 
     live_root = repo_root.parent / "wsovvis_live"
-    weights_path = (
-        args.weights_path
-        if args.weights_path is not None
-        else _resolve_existing_path(
-            [
-                repo_root / "runs/wsovvis_seqformer/15/d2/model_0005999.pth",
-                live_root / "runs/wsovvis_seqformer/15/d2/model_0005999.pth",
-            ]
+    if args.dry_run:
+        weights_path = (
+            args.weights_path
+            if args.weights_path is not None
+            else repo_root / "runs/wsovvis_seqformer/15/d2/model_0005999.pth"
         )
-    )
-    train_json = (
-        args.train_json
-        if args.train_json is not None
-        else _resolve_existing_path(
-            [
-                repo_root / "outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json",
-                live_root / "outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json",
-            ]
+        train_json = (
+            args.train_json
+            if args.train_json is not None
+            else repo_root / "outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json"
         )
-    )
-    train_img_root = (
-        args.train_img_root
-        if args.train_img_root is not None
-        else _resolve_existing_path(
-            [
-                repo_root / "data/LV-VIS/train/JPEGImages",
-                live_root / "data/LV-VIS/train/JPEGImages",
-            ]
+        train_img_root = (
+            args.train_img_root
+            if args.train_img_root is not None
+            else repo_root / "data/LV-VIS/train/JPEGImages"
         )
-    )
-    if args.val_json is not None:
-        val_json = args.val_json
+        val_json = (
+            args.val_json if args.val_json is not None else output_root / "tiny_eval_ytvis.json"
+        )
+        if args.val_img_root is not None:
+            val_img_root = args.val_img_root
+        elif args.val_json is None:
+            val_img_root = train_img_root
+        else:
+            val_img_root = repo_root / "data/LV-VIS/val/JPEGImages"
     else:
-        val_json = _build_tiny_eval_json(
-            source_train_json=train_json.resolve(),
-            output_json=output_root / "tiny_eval_ytvis.json",
+        weights_path = (
+            args.weights_path
+            if args.weights_path is not None
+            else _resolve_existing_path(
+                [
+                    repo_root / "runs/wsovvis_seqformer/15/d2/model_0005999.pth",
+                    live_root / "runs/wsovvis_seqformer/15/d2/model_0005999.pth",
+                ]
+            )
         )
-    if args.val_img_root is not None:
-        val_img_root = args.val_img_root
-    elif args.val_json is None:
-        val_img_root = train_img_root
-    else:
-        val_img_root = _resolve_existing_path(
-            [
-                repo_root / "data/LV-VIS/val/JPEGImages",
-                live_root / "data/LV-VIS/val/JPEGImages",
-            ]
+        train_json = (
+            args.train_json
+            if args.train_json is not None
+            else _resolve_existing_path(
+                [
+                    repo_root / "outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json",
+                    live_root / "outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json",
+                ]
+            )
         )
+        train_img_root = (
+            args.train_img_root
+            if args.train_img_root is not None
+            else _resolve_existing_path(
+                [
+                    repo_root / "data/LV-VIS/train/JPEGImages",
+                    live_root / "data/LV-VIS/train/JPEGImages",
+                ]
+            )
+        )
+        if args.val_json is not None:
+            val_json = args.val_json
+        else:
+            val_json = _build_tiny_eval_json(
+                source_train_json=train_json.resolve(),
+                output_json=output_root / "tiny_eval_ytvis.json",
+            )
+        if args.val_img_root is not None:
+            val_img_root = args.val_img_root
+        elif args.val_json is None:
+            val_img_root = train_img_root
+        else:
+            val_img_root = _resolve_existing_path(
+                [
+                    repo_root / "data/LV-VIS/val/JPEGImages",
+                    live_root / "data/LV-VIS/val/JPEGImages",
+                ]
+            )
 
     _write_smoke_config(
         config_path,
@@ -325,6 +389,12 @@ def main() -> int:
         "stage_d_attribution.additive_loss_key.weight=0.0",
     ]
 
+    if args.dry_run:
+        print("D10_DRY_RUN=1")
+        print("D10_OFF_CMD=" + " ".join(off_cmd))
+        print("D10_ON_CMD=" + " ".join(on_cmd))
+        return 0
+
     _run(off_cmd, cwd=repo_root)
     _run(on_cmd, cwd=repo_root)
 
@@ -333,31 +403,25 @@ def main() -> int:
     off_rows = _load_metrics_rows(off_metrics)
     on_rows = _load_metrics_rows(on_metrics)
 
-    off_has_attr = any("loss_stage_d_attr" in row for row in off_rows)
-    on_attr_values = [float(row["loss_stage_d_attr"]) for row in on_rows if "loss_stage_d_attr" in row]
-    on_has_attr = len(on_attr_values) > 0
-    on_last_attr = on_attr_values[-1] if on_attr_values else math.nan
-
-    off_total = _extract_last_numeric(off_rows, args.total_loss_key)
-    on_total = _extract_last_numeric(on_rows, args.total_loss_key)
-    total_diff = abs(off_total - on_total)
-    parity_ok = total_diff <= args.parity_tol
-
-    on_zero_ok = on_has_attr and abs(on_last_attr) <= args.parity_tol
-    checks_ok = (not off_has_attr) and on_zero_ok and parity_ok
+    results = _evaluate_metrics_checks(
+        off_rows=off_rows,
+        on_rows=on_rows,
+        total_loss_key=args.total_loss_key,
+        parity_tol=args.parity_tol,
+    )
 
     print(f"D10_OFF_METRICS={off_metrics}")
     print(f"D10_ON_METRICS={on_metrics}")
-    print(f"D10_OFF_HAS_LOSS_STAGE_D_ATTR={off_has_attr}")
-    print(f"D10_ON_HAS_LOSS_STAGE_D_ATTR={on_has_attr}")
-    print(f"D10_ON_LOSS_STAGE_D_ATTR={on_last_attr}")
-    print(f"D10_OFF_TOTAL_LOSS={off_total:.15f}")
-    print(f"D10_ON_TOTAL_LOSS={on_total:.15f}")
-    print(f"D10_TOTAL_LOSS_DIFF={total_diff:.15f}")
+    print(f"D10_OFF_HAS_LOSS_STAGE_D_ATTR={results['off_has_attr']}")
+    print(f"D10_ON_HAS_LOSS_STAGE_D_ATTR={results['on_has_attr']}")
+    print(f"D10_ON_LOSS_STAGE_D_ATTR={results['on_last_attr']}")
+    print(f"D10_OFF_TOTAL_LOSS={results['off_total']:.15f}")
+    print(f"D10_ON_TOTAL_LOSS={results['on_total']:.15f}")
+    print(f"D10_TOTAL_LOSS_DIFF={results['total_diff']:.15f}")
     print(f"D10_PARITY_TOL={args.parity_tol}")
-    print(f"D10_CHECKS_PASS={checks_ok}")
+    print(f"D10_CHECKS_PASS={results['checks_ok']}")
 
-    if checks_ok:
+    if results["checks_ok"]:
         return 0
     return 1
 
