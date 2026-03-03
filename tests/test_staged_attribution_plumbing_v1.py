@@ -491,3 +491,89 @@ def test_stage_d7_real_hook_duplicate_call_is_single_insertion_with_conflict_ski
     assert second["skip_reason"] == "loss_key_conflict"
     assert second["gate_status"]["loss_key_conflict"] is True
     assert list(losses.keys()).count("loss_stage_d_attr") == 1
+
+
+def _build_stage_d8_enabled_cfg(tmp_path: Path, *, weight: float = 0.0) -> dict[str, object]:
+    artifact_root = tmp_path / "stagec_out_d8"
+    _write_stagec_artifacts(artifact_root, num_tracks_scored=2, embedding_dim=256)
+    resolved = resolve_stage_d_attribution_plumbing(
+        {
+            "enabled": True,
+            "stagec_artifact_root": str(artifact_root),
+            "objective_coupling": {"enabled": True, "weight": 0.0},
+            "additive_loss_key": {"enabled": True, "weight": weight},
+        },
+        repo_root=tmp_path,
+    )
+    resolved = {
+        **resolved,
+        "objective_coupling": {"enabled": True, "weight": 0.0},
+        "additive_loss_key": {"enabled": True, "weight": weight},
+    }
+    runtime = consume_stage_d_attribution_config(resolved)
+    boundary = build_stage_d_attribution_consumption_boundary(
+        {"stage_d_attribution": resolved, "stage_d_attribution_runtime": runtime}
+    )
+    coupling = build_stage_d_objective_coupling_decision(
+        {
+            "stage_d_attribution": resolved,
+            "stage_d_attribution_runtime": runtime,
+            "stage_d_attribution_consumption": boundary,
+        }
+    )
+    return {
+        "stage_d_attribution": resolved,
+        "stage_d_attribution_runtime": runtime,
+        "stage_d_attribution_consumption": boundary,
+        "stage_d_attribution_coupling": coupling,
+    }
+
+
+def test_stage_d8_short_training_smoke_default_off_two_steps_stable() -> None:
+    for _ in range(2):
+        losses: dict[str, torch.Tensor] = {
+            "loss_mask": torch.tensor(1.0),
+            "loss_dice": torch.tensor(0.5),
+        }
+        d6 = apply_stage_d_additive_loss_key(
+            {
+                "stage_d_attribution": {"enabled": False},
+                "stage_d_attribution_coupling": {"applied": False},
+            },
+            losses,
+        )
+        # Trainer-style scalar loss reduction and logging conversion.
+        reduced = sum(losses.values())
+        logged = {name: float(value.item()) for name, value in losses.items()}
+
+        assert d6["applied"] is False
+        assert d6["skip_reason"] == "stage_d_attribution_disabled"
+        assert "loss_stage_d_attr" not in losses
+        assert float(reduced.item()) == pytest.approx(1.5)
+        assert logged == {"loss_mask": pytest.approx(1.0), "loss_dice": pytest.approx(0.5)}
+
+
+def test_stage_d8_short_training_smoke_enabled_weight_zero_two_steps_stable(tmp_path: Path) -> None:
+    cfg_dict = _build_stage_d8_enabled_cfg(tmp_path, weight=0.0)
+    coupling = cfg_dict["stage_d_attribution_coupling"]
+    assert isinstance(coupling, dict)
+    assert coupling["applied"] is True
+
+    for _ in range(2):
+        losses: dict[str, torch.Tensor] = {
+            "loss_mask": torch.tensor(1.0),
+            "loss_dice": torch.tensor(0.5),
+        }
+        d6 = apply_stage_d_additive_loss_key(cfg_dict, losses)
+        reduced = sum(losses.values())
+        logged = {name: float(value.item()) for name, value in losses.items()}
+
+        assert d6["applied"] is True
+        assert d6["skip_reason"] == "none"
+        assert d6["gate_status"]["d5_coupling_applied"] is True
+        assert d6["diagnostics"]["weight_zero_noop_observed"] is True
+        assert list(losses.keys()).count("loss_stage_d_attr") == 1
+        assert isinstance(losses["loss_stage_d_attr"], torch.Tensor)
+        assert float(losses["loss_stage_d_attr"].item()) == pytest.approx(0.0)
+        assert float(reduced.item()) == pytest.approx(1.5)
+        assert logged["loss_stage_d_attr"] == pytest.approx(0.0)
