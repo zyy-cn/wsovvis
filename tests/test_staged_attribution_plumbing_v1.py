@@ -638,3 +638,42 @@ def test_stage_d8_short_training_smoke_enabled_weight_zero_two_steps_stable(tmp_
         assert float(losses["loss_stage_d_attr"].item()) == pytest.approx(0.0)
         assert float(reduced.item()) == pytest.approx(1.5)
         assert logged["loss_stage_d_attr"] == pytest.approx(0.0)
+
+
+def test_stage_d8_nonzero_semantics_integration_lock_reduced_loss_delta_equals_weight(tmp_path: Path) -> None:
+    weight = 0.25
+    tolerance = 1e-6
+    baseline_cfg = _build_stage_d8_enabled_cfg(tmp_path, weight=weight, nonzero_semantics_enabled=False)
+    nonzero_cfg = _build_stage_d8_enabled_cfg(tmp_path, weight=weight, nonzero_semantics_enabled=True)
+
+    baseline_losses: dict[str, torch.Tensor] = {
+        "loss_mask": torch.tensor(1.0),
+        "loss_dice": torch.tensor(0.5),
+    }
+    nonzero_losses: dict[str, torch.Tensor] = {
+        "loss_mask": torch.tensor(1.0),
+        "loss_dice": torch.tensor(0.5),
+    }
+    baseline_d6 = apply_stage_d_additive_loss_key(baseline_cfg, baseline_losses)
+    nonzero_d6 = apply_stage_d_additive_loss_key(nonzero_cfg, nonzero_losses)
+    baseline_reduced = sum(baseline_losses.values())
+    nonzero_reduced = sum(nonzero_losses.values())
+    actual_delta = float((nonzero_reduced - baseline_reduced).item())
+
+    assert baseline_d6["applied"] is True
+    assert baseline_d6["skip_reason"] == "none"
+    assert baseline_d6["gate_status"]["d4_boundary_ready"] is True
+    assert baseline_d6["gate_status"]["d5_coupling_applied"] is True
+    assert baseline_d6["gate_status"]["nonzero_prereqs_satisfied"] is False
+    assert baseline_d6["diagnostics"]["nonzero_semantics_state"] == "disabled"
+    assert float(baseline_reduced.item()) == pytest.approx(1.5, abs=tolerance)
+
+    assert nonzero_d6["applied"] is True
+    assert nonzero_d6["skip_reason"] == "none"
+    assert nonzero_d6["gate_status"]["d4_boundary_ready"] is True
+    assert nonzero_d6["gate_status"]["d5_coupling_applied"] is True
+    assert nonzero_d6["gate_status"]["nonzero_prereqs_satisfied"] is True
+    assert nonzero_d6["diagnostics"]["nonzero_semantics_state"] == "nonzero_applied"
+    assert float(nonzero_losses["loss_stage_d_attr"].item()) == pytest.approx(weight, abs=tolerance)
+
+    assert actual_delta == pytest.approx(weight, abs=tolerance)
