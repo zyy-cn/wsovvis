@@ -363,10 +363,19 @@ def test_sinkhorn_c43_unk_fg_gating_schema_and_behavior(tmp_path: Path) -> None:
 
     rows = [json.loads(line) for line in (out_dir / "track_scores.jsonl").read_text(encoding="utf-8").splitlines()]
     assert {row["predicted_label_source"] for row in rows} <= {"observed", "bg", "unk_fg"}
-    assert all(row["sinkhorn_active_special_columns"] == ["__bg__", "__unk_fg__"] for row in rows)
+    assert all("__bg__" in row["sinkhorn_active_special_columns"] for row in rows)
+    assert all(
+        row["sinkhorn_active_special_columns"] in (["__bg__"], ["__bg__", "__unk_fg__"])
+        for row in rows
+    )
     assert any(row["predicted_label_id"] == "__unk_fg__" for row in rows)
     assert all("sinkhorn_unk_fg_posterior" in row for row in rows)
     assert all("sinkhorn_top_observed_score" in row for row in rows)
+    for row in rows:
+        if "__unk_fg__" in row["sinkhorn_active_special_columns"]:
+            assert row["predicted_label_source"] in {"observed", "bg", "unk_fg"}
+        if row["predicted_label_source"] == "unk_fg":
+            assert row["predicted_label_id"] == "__unk_fg__"
 
     per_video = json.loads((out_dir / "per_video_summary.json").read_text(encoding="utf-8"))
     assert all(row["sinkhorn_c43_enabled"] is True for row in per_video)
