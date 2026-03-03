@@ -771,7 +771,38 @@ Tooling/docs/policy hardening only for formal CI adoption readiness of Stage D q
 
 ---
 
-## Validation evidence highlights (through Stage D closure + N13)
+## 2026-03-03 — N15 completed (platform-specific lightweight CI wiring for Stage D quick pipeline)
+
+### Scope
+Add a lightweight platform-specific CI wiring artifact for Stage D quick-pipeline gates without introducing any Stage D semantic/runtime behavior changes.
+
+### Completed
+- Added repository-local CI-ready template:
+  - `docs/runbooks/tools/ci_examples/stage_d_quick_pipeline.github_actions.yml`
+  - wires a `stage-d-quick-pipeline` job to `bash tools/run_stage_d13_ci_quick_pipeline.sh`
+  - includes deterministic prerequisites (`conda`, `python -m pytest --version`, safe `PYTHONPATH`)
+- Updated continuity/docs pointers:
+  - `README.md`
+  - `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`
+  - `docs/STAGE_D_SMOKE_HELPER_QUICKCHECK.md`
+  - `docs/SESSION_HANDOFF_STAGE_D_CLOSURE.md`
+
+### Validation
+- Local best-effort checks:
+  - `bash -n tools/run_stage_d13_ci_quick_pipeline.sh`
+  - `bash tools/run_stage_d13_ci_quick_pipeline.sh --help`
+  - `python -m pytest -q tests/test_stage_d13_ci_quick_pipeline_v1.py`
+- Remote canonical light validation was not executed in N15 (tooling/docs-only scope, no runtime semantic deltas).
+
+### Notes
+- Non-goals preserved:
+  - no training/loss/objective semantic changes
+  - no Stage C/D schema changes
+  - no long training/performance runs
+
+---
+
+## Validation evidence highlights (through Stage D closure + N15)
 
 ### Canonical remote validation discipline (preserved)
 - Canonical remote host/path usage remained consistent in PASS evidence:

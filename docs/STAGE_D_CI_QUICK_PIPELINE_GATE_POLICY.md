@@ -64,6 +64,19 @@ tools/run_stage_d9_helper_tests_quick.sh
 bash tools/run_stage_d13_ci_quick_pipeline.sh
 ```
 
+## N15 Platform CI Wiring Example
+Repository-local CI-ready example (GitHub Actions format):
+- `docs/runbooks/tools/ci_examples/stage_d_quick_pipeline.github_actions.yml`
+
+Usage:
+1. Copy template to `.github/workflows/stage_d_quick_pipeline.yml` in CI-enabled mirrors.
+2. Keep the gate command unchanged:
+   - `bash tools/run_stage_d13_ci_quick_pipeline.sh`
+3. Preserve deterministic prerequisites in the job:
+   - conda-first `wsovvis`
+   - `python -m pytest --version`
+   - `PYTHONPATH` export with `${PYTHONPATH:-}`
+
 ## Output Artifact Path Discipline (copy/paste)
 Use this exact clause in prompts/runbooks:
 

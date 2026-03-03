@@ -1,0 +1,35 @@
+name: Stage-D Quick Pipeline Gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - staged-nonzero-semantics
+
+jobs:
+  stage-d-quick-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: wsovvis
+          auto-activate-base: false
+          python-version: "3.10"
+
+      - name: Install Python dependencies
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          pip install -r requirements.txt
+
+      - name: Stage-D quick pipeline gate (N13 entry)
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          python -m pytest --version
+          export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:${PYTHONPATH:-}"
+          bash tools/run_stage_d13_ci_quick_pipeline.sh

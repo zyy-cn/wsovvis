@@ -1,10 +1,11 @@
-# Session Handoff: Stage D Closure Complete (D1-D12) + N13/N14 Tooling Wiring
+# Session Handoff: Stage D Closure Complete (D1-D12) + N13/N14/N15 Tooling Wiring
 
 ## Current status snapshot
 - Stage D1-D12 is completed and closed for this milestone.
 - D12 is complete (quick-check wiring + runbook/docs reinforcement).
 - N13 is complete (branch-local CI quick-pipeline wiring + output-path discipline hardening).
 - N14 is complete (formal-CI-ready quick-pipeline prep + explicit Stage D gate policy).
+- N15 is complete (platform-specific lightweight CI wiring template for Stage D quick pipeline).
 - Current state remains tooling/docs continuity lock, not new training behavior implementation.
 
 ## What is stable and must be preserved
@@ -18,6 +19,8 @@
   - `tools/run_stage_d13_ci_quick_pipeline.sh`
 - N14 gate policy reference:
   - `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`
+- N15 CI wiring template reference:
+  - `docs/runbooks/tools/ci_examples/stage_d_quick_pipeline.github_actions.yml`
 
 ## Canonical remote validation discipline (authoritative)
 - Host alias: `gpu4090d`
@@ -41,6 +44,7 @@
 - N4 continuity pointer: use the canonical zero/nonzero quick-check commands recorded in `docs/PROJECT_PROGRESS.md` (2026-03-03 N4 entry).
 - N13 continuity pointer: use `tools/run_stage_d13_ci_quick_pipeline.sh` as the nearest CI mirror wiring point on this branch.
 - N14 continuity pointer: apply the helper-only / N13 quick-pipeline / escalation policy from `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`.
+- N15 continuity pointer: use `docs/runbooks/tools/ci_examples/stage_d_quick_pipeline.github_actions.yml` when copying quick-pipeline wiring into CI-enabled mirrors.
 - Workflow policy baseline:
   - `codex/WSOVVIS_CODEX_WORKFLOW_README.md`
   - `codex/specs/*`
