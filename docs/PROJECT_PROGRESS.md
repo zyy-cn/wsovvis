@@ -403,7 +403,39 @@ Implement and validate the first Stage C offline attribution baseline (MIL-first
 
 ### Notes
 - Stage C1 baseline is complete as the first offline attribution milestone.
-- Recommended next step is Stage C1.r1: real-artifact smoke and baseline diagnostics hardening before Stage C2 EM baseline work.
+- Historical next-step note (at C1 completion time): Stage C1.r1 real-artifact smoke and diagnostics hardening.
+- Current state has advanced beyond this note (Stage C1.r1, Stage C2 baseline, and Stage C3 closure are complete; see entries below).
+
+---
+
+## 2026-03-01 — Stage C2 completed (labelset_proto_v1 offline baseline + real-artifact smoke + determinism)
+
+### Scope
+Implement and validate Stage C2 labelset/prototype-conditioned offline attribution baseline (`labelset_proto_v1`) as an additive scorer backend on top of the existing Stage C entrypoint, preserving Stage C1 default behavior.
+
+### Completed
+- Added scorer backend dispatch with default-preserving `mil_v1` path and new `labelset_proto_v1` path.
+- Added prototype manifest + NPZ loading/validation and per-video labelset conditioning flow.
+- Preserved existing artifact contracts and Stage C1 compatibility while adding diagnostics fields additively.
+- Completed Stage C2.r1b canonical real-artifact smoke rerun and deterministic double-run equality checks after canonical-runner symlink preflight/relink.
+
+### Validation
+- Canonical remote focused pytest passed (`16 passed`) with branch/commit equality:
+  - branch: `codex/stagec2-r1-labelset-proto-baseline-impl-v1`
+  - commit/remote HEAD: `e01da646e0e46ae5e8cff4491eea57587a3882ee`
+- Real-artifact smoke on canonical runner passed using rebuilt run18 sample export split with deterministic artifact equality for:
+  - `track_scores.jsonl`
+  - `per_video_summary.json`
+  - `run_summary.json`
+
+### Key references
+- Stage C2.r1 implementation evidence: `codex/2026030109_stagec2_r0_labelset_proto_baseline_plan_tier2_3/04_output.txt`
+- Stage C2.r1b repair-and-redo closure evidence: `codex/2026030109_stagec2_r0_labelset_proto_baseline_plan_tier2_3/05_output.txt`
+- Stage C2 task-pack closure summary: `codex/2026030109_stagec2_r0_labelset_proto_baseline_plan_tier2_3/07_output.txt`
+
+### Notes
+- Stage C2 is complete for offline labelset/prototype baseline scope.
+- OT/Sinkhorn/EM attribution expansion beyond current baselines is future Stage C work and should be tracked under C4 planning/milestones (not as unfinished "Stage C2").
 
 ---
 
@@ -454,7 +486,48 @@ Implement and validate Stage C3 global decoder backend expansion and close the d
 
 ---
 
-## Validation evidence highlights (through Stage C3 closure)
+## 2026-03-03 — Stage C4 completed (offline attribution expansion: `em_v1` + `sinkhorn_v1` + C4.3 gates)
+
+### Scope
+Close the Stage C4 offline attribution expansion milestone with additive-only scorer evolution, default-OFF compatibility for C4.3 extensions, parity hard-gate coverage, and determinism checks.
+
+### Completed
+- C4.1 completed: `em_v1` offline scorer backend integrated in Stage C entrypoint as additive backend expansion.
+- C4.2 completed: minimal `sinkhorn_v1` offline backend integrated with Stage C contracts preserved.
+- C4.3 planning/spec-lock completed and executed in two bounded implementation slices:
+  - C4.3-A: `__bg__` special-column path and additive diagnostics.
+  - C4.3-B: `__unk_fg__` gating path with row-level/effective-active semantics.
+- Preserved non-negotiable compatibility constraints across C4:
+  - additive-only schema evolution (no field removals/renames),
+  - default-OFF behavior for C4.3 flags,
+  - C4.2 parity hard-gate in tests for disabled-C4.3 path.
+
+### Validation
+- Canonical remote validation discipline preserved on `gpu4090d` with branch/commit match checks.
+- Final C4.3 targeted closure run passed for parity/bg/unk-fg gating tests:
+  - `tests/test_stagec4_sinkhorn_scorer_v1.py -k "test_sinkhorn_c42_parity_hard_gate_snapshot or test_sinkhorn_c43_bg_path_schema_and_source_tagging or test_sinkhorn_c43_unk_fg_gating_schema_and_behavior"`
+  - result: `3 passed, 5 deselected`.
+- Determinism closure check also passed (including unk-fg-enabled path):
+  - `tests/test_stagec4_sinkhorn_scorer_v1.py -k "test_sinkhorn_backend_deterministic_double_run"`
+  - result: `1 passed, 7 deselected`.
+
+### Key references
+- C4 planning/spec-lock baseline: `codex/2026030302_stagec4-c43-coverage-unkfg/01_output.txt`
+- C4.3-A implementation baseline: `codex/2026030302_stagec4-c43-coverage-unkfg/02_output.txt`
+- C4.3-A parity hard-gate repair + canonical pass: `codex/2026030302_stagec4-c43-coverage-unkfg/05_output.txt`
+- C4.3-B implementation + first canonical failure evidence: `codex/2026030302_stagec4-c43-coverage-unkfg/06_output.txt`
+- C4.3-B repair + canonical closure pass: `codex/2026030302_stagec4-c43-coverage-unkfg/07_output.txt`
+
+### Notes
+- C4 closure covers offline scorer-path expansion only.
+- Out of scope and still future work:
+  - C4.3-C or broader coverage/slack redesign,
+  - training-loop / Stage D integration,
+  - default policy changes for scorer/decoder behavior without new evidence gates.
+
+---
+
+## Validation evidence highlights (through Stage C4 closure)
 
 ### Canonical remote validation discipline (preserved)
 - Canonical remote host/path usage remained consistent in PASS evidence:
@@ -471,6 +544,9 @@ Implement and validate Stage C3 global decoder backend expansion and close the d
 - Stage C1 canonical remote PASS:
   - `6 passed` (`tests/test_stagec1_attribution_mil_v1.py`)
   - evidence: `.../16_output.txt`
+- Stage C2 canonical remote PASS:
+  - `16 passed` (`tests/test_stagec1_attribution_mil_v1.py` + `tests/test_stagec2_labelset_proto_baseline_v1.py`)
+  - evidence: `codex/2026030109_stagec2_r0_labelset_proto_baseline_plan_tier2_3/05_output.txt`
 
 ### Stage C3 decoder comparison closure evidence
 - Decoder backends validated in C3 scope:
@@ -487,6 +563,20 @@ Implement and validate Stage C3 global decoder backend expansion and close the d
 - True cross-run closure status:
   - prior blocker (no non-run18 source) recorded in C3.r3c
   - resolved in C3.r3c1 via run19 source availability and protocol completion
+
+### Stage C4 attribution expansion closure evidence
+- C4.1/C4.2 implementation line completed as additive backend expansion under existing Stage C artifact contracts.
+- C4.3 closure included both feature slices:
+  - C4.3-A (`__bg__`) path and schema/source tagging.
+  - C4.3-B (`__unk_fg__`) row-level gating semantics.
+- C4.2 parity hard gate remained required and passed in closure run:
+  - `test_sinkhorn_c42_parity_hard_gate_snapshot`.
+- C4.3 targeted closure run passed on canonical remote:
+  - `3 passed, 5 deselected` for parity + bg + unk-fg selector.
+- Determinism closure run passed on canonical remote:
+  - `1 passed, 7 deselected` for deterministic double-run selector including unk-fg-enabled mode.
+- Final C4.3-B repair was test-semantics alignment (not algorithmic redesign):
+  - row-level `sinkhorn_active_special_columns` may be `["__bg__"]` or `["__bg__", "__unk_fg__"]` depending on gating effectiveness.
 
 ### P3.1c.1 and P3.1c.2 real-run handoff evidence (bridge -> export -> validator)
 - P3.1c.1 real run18 sample handoff chain passed:
@@ -517,13 +607,18 @@ Implement and validate Stage C3 global decoder backend expansion and close the d
 - ✅ P3.1c.2 completed (bridge full-split hardening + QA)
 - ✅ Stage C0 completed (consumer/loader offline data-plane; canonical remote PASS `10/10`)
 - ✅ Stage C1 completed (offline MIL-first attribution baseline; canonical remote PASS `6 passed`)
+- ✅ Stage C1.r1 completed (real-artifact smoke + diagnostics hardening + determinism evidence)
+- ✅ Stage C2 completed (labelset_proto_v1 offline baseline + canonical remote pytest + real-artifact smoke + determinism)
 - ✅ Stage C3 completed (global decoder baseline + alternatives + comparison closure; default remains `independent`)
-- ▶️ Current state: **Stage C3 decoder-comparison milestone closed**
-- ▶️ Next recommended step: **C4 planning** (or optional extra non-run18 cohort evidence sweep before any default-change proposal)
+- ✅ Stage C4 completed (offline attribution expansion line: `em_v1`, `sinkhorn_v1`, C4.3 `bg` + `unk-fg` gating, parity + determinism closure)
+- ▶️ Current state: **Stage C4 milestone closed (offline attribution expansion line)**
+- ▶️ Next recommended step: **Stage D planning/spec-lock for training-loop integration boundaries and acceptance gates**
 
-### Why C4 planning next
-With C3 decoder implementation/calibration/comparison now closed and recommendations stabilized, the highest-leverage next step is C4 planning that reuses the closed decoder evidence baseline while preserving default behavior.
+### Why Stage D planning next
+With C4 offline attribution expansion closed under additive/default-OFF/parity/determinism constraints, the next highest-leverage step is to define Stage D integration boundaries and acceptance gates before enabling training-loop coupling.
 
-### Optional follow-on before/alongside C4
-- Optional evidence extension: add additional non-run18 cross-run cohorts (for example run20+) with the same C3 protocol for broader source-diversity confidence.
-- Stage C attribution expansion remains future work (Stage C2/OT lines and any training-loop/Stage D integration remain out of scope for this closed C3 milestone).
+### Stage D preconditions and remaining out-of-scope items
+- Training-loop / Stage D implementation is still not started in this milestone.
+- Optional future C-line refinements (outside C4 closure):
+  - C4.3-C style coverage/slack redesign,
+  - further non-run18 cohort expansion for broader stress/evidence before policy shifts.
