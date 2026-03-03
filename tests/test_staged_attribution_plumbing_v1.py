@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from wsovvis.training import StageDAttributionPlumbingError, resolve_stage_d_attribution_plumbing
+from wsovvis.training import (
+    StageDAttributionPlumbingError,
+    consume_stage_d_attribution_config,
+    resolve_stage_d_attribution_plumbing,
+)
 
 
 def _write_stagec_artifacts(root: Path, *, num_tracks_scored: int = 2, embedding_dim: int = 256) -> None:
@@ -37,6 +41,13 @@ def _write_stagec_artifacts(root: Path, *, num_tracks_scored: int = 2, embedding
 def test_stage_d_plumbing_default_off_is_compatible(tmp_path: Path) -> None:
     resolved = resolve_stage_d_attribution_plumbing(None, repo_root=tmp_path)
     assert resolved == {"enabled": False}
+    consumed = consume_stage_d_attribution_config(resolved)
+    assert consumed["enabled"] is False
+    assert consumed["mode"] == "disabled_noop"
+    assert consumed["consumed"] is True
+    assert consumed["counters"]["enabled_config_consumed"] == 0
+    assert consumed["counters"]["objective_changes"] == 0
+    assert consumed["counters"]["loss_changes"] == 0
 
 
 def test_stage_d_plumbing_enabled_requires_artifact_reference(tmp_path: Path) -> None:
@@ -63,6 +74,25 @@ def test_stage_d_plumbing_nominal_from_artifact_root(tmp_path: Path) -> None:
     assert Path(resolved["stagec_track_scores_path"]) == artifact_root / "track_scores.jsonl"
     assert resolved["summary"]["num_tracks_scored"] == 2
     assert resolved["track_score_rows_validated"] == 2
+
+
+def test_stage_d_consumer_enabled_nominal_is_noop_with_diagnostics(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "stagec_out"
+    _write_stagec_artifacts(artifact_root, num_tracks_scored=2, embedding_dim=256)
+    resolved = resolve_stage_d_attribution_plumbing(
+        {"enabled": True, "stagec_artifact_root": str(artifact_root)},
+        repo_root=tmp_path,
+    )
+
+    consumed = consume_stage_d_attribution_config(resolved)
+    assert consumed["enabled"] is True
+    assert consumed["mode"] == "enabled_noop"
+    assert consumed["consumed"] is True
+    assert consumed["summary"]["embedding_dim"] == 256
+    assert consumed["track_score_rows_validated"] == 2
+    assert consumed["counters"]["enabled_config_consumed"] == 1
+    assert consumed["counters"]["objective_changes"] == 0
+    assert consumed["counters"]["loss_changes"] == 0
 
 
 def test_stage_d_plumbing_fail_fast_on_run_summary_schema(tmp_path: Path) -> None:

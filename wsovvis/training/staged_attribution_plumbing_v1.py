@@ -236,3 +236,86 @@ def resolve_stage_d_attribution_plumbing(raw: Mapping[str, Any] | None, *, repo_
         "summary": summary_meta,
         "track_score_rows_validated": int(track_score_rows),
     }
+
+
+def consume_stage_d_attribution_config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Build deterministic D2 runtime diagnostics from already-resolved config.
+
+    This is intentionally no-op for training semantics: no loss/objective behavior
+    is changed. It only emits structured diagnostics proving config consumption.
+    """
+
+    _require(isinstance(raw, Mapping), "stage_d_attribution", "must be an object")
+    enabled = raw.get("enabled", False)
+    _require(isinstance(enabled, bool), "stage_d_attribution.enabled", "must be boolean")
+
+    if not enabled:
+        return {
+            "enabled": False,
+            "consumer_hook_version": "d2_noop_v1",
+            "mode": "disabled_noop",
+            "consumed": True,
+            "counters": {
+                "config_consumed": 1,
+                "enabled_config_consumed": 0,
+                "objective_changes": 0,
+                "loss_changes": 0,
+            },
+        }
+
+    run_summary_path = raw.get("stagec_run_summary_path")
+    track_scores_path = raw.get("stagec_track_scores_path")
+    summary = raw.get("summary")
+    track_score_rows_validated = raw.get("track_score_rows_validated")
+
+    _require(
+        isinstance(run_summary_path, str) and run_summary_path,
+        "stage_d_attribution.stagec_run_summary_path",
+        "required non-empty string when enabled",
+    )
+    _require(
+        isinstance(track_scores_path, str) and track_scores_path,
+        "stage_d_attribution.stagec_track_scores_path",
+        "required non-empty string when enabled",
+    )
+    _require(isinstance(summary, Mapping), "stage_d_attribution.summary", "required object when enabled")
+    _require(
+        isinstance(track_score_rows_validated, int) and track_score_rows_validated >= 0,
+        "stage_d_attribution.track_score_rows_validated",
+        "required integer >= 0 when enabled",
+    )
+
+    for field_name in ("scorer_backend", "split"):
+        _require(
+            isinstance(summary.get(field_name), str) and summary[field_name],
+            f"stage_d_attribution.summary.{field_name}",
+            "required non-empty string",
+        )
+    for field_name in ("embedding_dim", "num_tracks_scored"):
+        _require(
+            isinstance(summary.get(field_name), int) and int(summary[field_name]) >= 0,
+            f"stage_d_attribution.summary.{field_name}",
+            "required integer >= 0",
+        )
+
+    return {
+        "enabled": True,
+        "consumer_hook_version": "d2_noop_v1",
+        "mode": "enabled_noop",
+        "consumed": True,
+        "stagec_run_summary_path": run_summary_path,
+        "stagec_track_scores_path": track_scores_path,
+        "summary": {
+            "scorer_backend": str(summary["scorer_backend"]),
+            "split": str(summary["split"]),
+            "embedding_dim": int(summary["embedding_dim"]),
+            "num_tracks_scored": int(summary["num_tracks_scored"]),
+        },
+        "track_score_rows_validated": int(track_score_rows_validated),
+        "counters": {
+            "config_consumed": 1,
+            "enabled_config_consumed": 1,
+            "objective_changes": 0,
+            "loss_changes": 0,
+        },
+    }

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 from sacred import Experiment
 from sacred.observers import FileStorageObserver
 
-from wsovvis.training import resolve_stage_d_attribution_plumbing
+from wsovvis.training import consume_stage_d_attribution_config, resolve_stage_d_attribution_plumbing
 
 ex = Experiment("wsovvis_seqformer")
 
@@ -366,6 +366,14 @@ def run(
         stage_d_attribution,
         repo_root=Path(__file__).resolve().parent,
     )
+    stage_d_runtime = consume_stage_d_attribution_config(resolved_stage_d_attribution)
+    if stage_d_runtime.get("enabled", False):
+        summary = stage_d_runtime.get("summary", {}) or {}
+        print(
+            "[stage_d_attribution:d2] enabled no-op consumer "
+            f"backend={summary.get('scorer_backend')} "
+            f"rows={stage_d_runtime.get('track_score_rows_validated')}"
+        )
 
     cfg_dict = {
         "d2_cfg_path": d2_cfg_path,
@@ -377,6 +385,7 @@ def run(
         "eval_only": eval_only,
         "feature_export": feature_export,
         "stage_d_attribution": resolved_stage_d_attribution,
+        "stage_d_attribution_runtime": stage_d_runtime,
     }
 
     # Write cfg_dict to disk and expose via env var so worker processes can load it
