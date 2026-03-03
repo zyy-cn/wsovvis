@@ -1,4 +1,4 @@
-# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12/N4)
+# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12/N4/N7)
 
 ## Purpose
 `tools/run_stage_d9_smoke_helper.py` is the Stage D10 helper that wraps the real `train_seqformer_pseudo.py` entrypoint for OFF/ON smoke verification.
@@ -10,9 +10,10 @@ Stage D11 reinforced this helper with:
 Stage D12 adds a reproducible quick-check command path:
 - `tools/run_stage_d10_quick_checks.sh`
 
-N4 extends this same path with first-class ON-mode selection:
+N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
-- nonzero-mode quick check (semantic validation of nonzero additive-loss path)
+- nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
+- pilot-mode quick check (wiring validation for `gradient_coupled_pilot_v1`)
 
 ## Canonical quick-check commands
 From repo root:
@@ -31,7 +32,7 @@ python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 ```
 
-Nonzero-mode (semantic validation path):
+Nonzero-mode (constant nonzero semantic validation path):
 
 ```bash
 tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25
@@ -45,15 +46,31 @@ python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 ```
 
+Pilot-mode (gradient-coupled pilot wiring smoke):
+
+```bash
+tools/run_stage_d10_quick_checks.sh --on-mode pilot --on-weight 0.25 --pilot-scale 1e-6
+```
+
+Equivalent explicit commands:
+
+```bash
+python tools/run_stage_d9_smoke_helper.py --help
+python tools/run_stage_d9_smoke_helper.py --repo-root "$PWD" --dry-run --on-mode pilot --on-weight 0.25 --pilot-scale 1e-6
+python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
+```
+
 ## When to run which mode
 - Run zero-mode when you need a compatibility/regression sentinel that preserves OFF/ON no-op expectations (`loss_stage_d_attr` remains effectively zero in ON path).
-- Run nonzero-mode when you need semantic validation that ON path is wired for nonzero additive-loss behavior (`nonzero_semantics.enabled=True` and `weight>0` present in command wiring).
+- Run nonzero-mode when you need semantic validation that ON path is wired for constant nonzero additive-loss behavior (`nonzero_semantics.enabled=True` and `weight>0` present in command wiring).
+- Run pilot-mode when you need a lightweight quick-check smoke that ON command wiring explicitly requests `nonzero_semantics.mode=gradient_coupled_pilot_v1` (plus optional `gradient_coupled_scale`).
 
 ## OFF-path vs ON-path smoke expectations
 When running real OFF/ON smoke (non-dry-run), expectations depend on ON mode:
 - OFF path (`stage_d_attribution.enabled=False`): no `loss_stage_d_attr` metric key
 - ON zero-mode (`--on-mode zero`, `weight=0.0`): `loss_stage_d_attr` appears and remains ~0, and OFF/ON total-loss parity remains within `--parity-tol`
 - ON nonzero-mode (`--on-mode nonzero`, `weight>0`): `loss_stage_d_attr` is nonzero and ON total loss increases vs OFF path
+- ON pilot-mode (`--on-mode pilot`, `weight>0`): helper requests `gradient_coupled_pilot_v1`; quick-check primarily validates command wiring and parser/test stability (not performance claims)
 
 These checks are reported as `D10_*` lines by the helper.
 
@@ -68,6 +85,7 @@ export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:${PYTHONP
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 tools/run_stage_d10_quick_checks.sh
 tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25
+tools/run_stage_d10_quick_checks.sh --on-mode pilot --on-weight 0.25 --pilot-scale 1e-6
 ```
 
 Notes:

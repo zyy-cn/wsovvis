@@ -4,11 +4,11 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  tools/run_stage_d10_quick_checks.sh [--repo-root <path>] [--python-bin <path>] [--on-mode <zero|nonzero>] [--on-weight <float>]
+  tools/run_stage_d10_quick_checks.sh [--repo-root <path>] [--python-bin <path>] [--on-mode <zero|nonzero|pilot>] [--on-weight <float>] [--pilot-scale <float>]
 
 Runs Stage D10/D11 helper quick checks:
   1) helper --help
-  2) helper --dry-run (zero compatibility sentinel or nonzero semantic mode)
+  2) helper --dry-run (zero compatibility sentinel, constant nonzero mode, or gradient-coupled pilot mode)
   3) GPU-free pytest: tests/test_stage_d9_smoke_helper_v1.py
 USAGE
 }
@@ -17,6 +17,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="python"
 on_mode="zero"
 on_weight=""
+pilot_scale=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,8 +34,8 @@ while [[ $# -gt 0 ]]; do
     --on-mode)
       [[ $# -ge 2 ]] || { echo "Missing value for --on-mode" >&2; exit 2; }
       on_mode="$2"
-      if [[ "$on_mode" != "zero" && "$on_mode" != "nonzero" ]]; then
-        echo "Invalid --on-mode '$on_mode' (expected: zero|nonzero)" >&2
+      if [[ "$on_mode" != "zero" && "$on_mode" != "nonzero" && "$on_mode" != "pilot" ]]; then
+        echo "Invalid --on-mode '$on_mode' (expected: zero|nonzero|pilot)" >&2
         exit 2
       fi
       shift 2
@@ -42,6 +43,11 @@ while [[ $# -gt 0 ]]; do
     --on-weight)
       [[ $# -ge 2 ]] || { echo "Missing value for --on-weight" >&2; exit 2; }
       on_weight="$2"
+      shift 2
+      ;;
+    --pilot-scale)
+      [[ $# -ge 2 ]] || { echo "Missing value for --pilot-scale" >&2; exit 2; }
+      pilot_scale="$2"
       shift 2
       ;;
     -h|--help)
@@ -68,6 +74,9 @@ helper_dry_run_cmd=(
 )
 if [[ -n "$on_weight" ]]; then
   helper_dry_run_cmd+=(--on-weight "$on_weight")
+fi
+if [[ -n "$pilot_scale" ]]; then
+  helper_dry_run_cmd+=(--pilot-scale "$pilot_scale")
 fi
 
 run "$python_bin" tools/run_stage_d9_smoke_helper.py --help

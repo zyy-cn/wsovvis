@@ -596,6 +596,42 @@ Record the Stage D nonzero-semantics N4 continuity point (tooling/docs-only), pr
 
 ---
 
+## 2026-03-03 — N7 completed (pilot-mode quick-check hardening + continuity sync)
+
+### Scope
+Harden and operationalize N6 pilot mode in existing Stage D quick-check tooling/tests/docs only, without changing training semantics.
+
+### Completed
+- Extended quick-check wrapper + helper ON-mode wiring to include:
+  - `--on-mode zero` (compat sentinel)
+  - `--on-mode nonzero` (constant nonzero semantic lock)
+  - `--on-mode pilot` (requests `gradient_coupled_pilot_v1`)
+- Added additive helper option `--pilot-scale` to pass `nonzero_semantics.gradient_coupled_scale` in pilot mode.
+- Added/extended GPU-free dry-run assertions in `tests/test_stage_d9_smoke_helper_v1.py` for:
+  - backward-compatible nonzero constant mode markers
+  - pilot-mode markers and command overrides
+- Updated runbook command matrix to explicitly separate:
+  - zero mode
+  - constant nonzero mode
+  - gradient-coupled pilot mode
+
+### Validation
+- Canonical remote quick-check smoke executed once in pilot mode via:
+  - `tools/run_stage_d10_quick_checks.sh --on-mode pilot --on-weight 0.25 --pilot-scale 1e-6`
+- Canonical discipline preserved:
+  - conda-first `wsovvis`
+  - `python -m pytest --version` before pytest
+  - dual `${PYTHONPATH:-}` in both env setup and command context
+  - canonical runner path `/home/zyy/code/wsovvis_runner`
+
+### Notes
+- Non-goals preserved:
+  - no new loss/objective semantics beyond N6 `gradient_coupled_pilot_v1`
+  - no Stage C/D schema contract changes
+  - no long training/performance experiments
+
+---
+
 ## Validation evidence highlights (through Stage D closure)
 
 ### Canonical remote validation discipline (preserved)

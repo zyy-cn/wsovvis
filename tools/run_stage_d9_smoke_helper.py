@@ -268,15 +268,27 @@ def main() -> int:
     )
     parser.add_argument(
         "--on-mode",
-        choices=("zero", "nonzero"),
+        choices=("zero", "nonzero", "pilot"),
         default="zero",
-        help="ON-path semantic mode: zero (default sentinel) or nonzero (N3 smoke)",
+        help=(
+            "ON-path semantic mode: zero (default sentinel), nonzero (constant mode), "
+            "or pilot (gradient_coupled_pilot_v1)"
+        ),
     )
     parser.add_argument(
         "--on-weight",
         type=float,
         default=None,
-        help="Explicit ON-path additive weight (default: 0.0 for zero mode, 0.25 for nonzero mode)",
+        help="Explicit ON-path additive weight (default: 0.0 for zero mode, 0.25 for nonzero/pilot modes)",
+    )
+    parser.add_argument(
+        "--pilot-scale",
+        type=float,
+        default=None,
+        help=(
+            "Optional gradient-coupled pilot scale override for "
+            "nonzero_semantics.mode=gradient_coupled_pilot_v1 (default: helper leaves unset)"
+        ),
     )
     parser.add_argument(
         "--nonzero-eps",
@@ -418,16 +430,32 @@ def main() -> int:
         "stage_d_attribution.additive_loss_key.enabled=True",
         (
             f"stage_d_attribution.additive_loss_key.weight="
-            f"{args.on_weight if args.on_weight is not None else (0.25 if args.on_mode == 'nonzero' else 0.0)}"
+            f"{args.on_weight if args.on_weight is not None else (0.25 if args.on_mode in ('nonzero', 'pilot') else 0.0)}"
         ),
-        (
-            "stage_d_attribution.additive_loss_key.nonzero_semantics.enabled="
-            f"{'True' if args.on_mode == 'nonzero' else 'False'}"
-        ),
+        "stage_d_attribution.additive_loss_key.nonzero_semantics.enabled="
+        f"{'True' if args.on_mode in ('nonzero', 'pilot') else 'False'}",
     ]
+    if args.on_mode == "pilot":
+        on_cmd.append(
+            "stage_d_attribution.additive_loss_key.nonzero_semantics.mode=gradient_coupled_pilot_v1"
+        )
+        if args.pilot_scale is not None:
+            on_cmd.append(
+                "stage_d_attribution.additive_loss_key.nonzero_semantics.gradient_coupled_scale="
+                f"{args.pilot_scale}"
+            )
 
     if args.dry_run:
+        on_nonzero_mode = "disabled"
+        if args.on_mode == "nonzero":
+            on_nonzero_mode = "constant"
+        elif args.on_mode == "pilot":
+            on_nonzero_mode = "gradient_coupled_pilot_v1"
         print("D10_DRY_RUN=1")
+        print(f"D10_ON_MODE={args.on_mode}")
+        print(f"D10_ON_NONZERO_MODE={on_nonzero_mode}")
+        if args.pilot_scale is not None:
+            print(f"D10_ON_PILOT_SCALE={args.pilot_scale}")
         print("D10_OFF_CMD=" + " ".join(off_cmd))
         print("D10_ON_CMD=" + " ".join(on_cmd))
         return 0
@@ -445,7 +473,7 @@ def main() -> int:
         on_rows=on_rows,
         total_loss_key=args.total_loss_key,
         parity_tol=args.parity_tol,
-        expect_nonzero_on=args.on_mode == "nonzero",
+        expect_nonzero_on=args.on_mode in ("nonzero", "pilot"),
         nonzero_eps=args.nonzero_eps,
     )
 

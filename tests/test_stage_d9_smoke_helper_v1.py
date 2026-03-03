@@ -173,5 +173,47 @@ def test_cli_dry_run_nonzero_mode_prints_nonzero_overrides(tmp_path: Path) -> No
     )
     assert proc.returncode == 0, proc.stderr
     assert "D10_DRY_RUN=1" in proc.stdout
+    assert "D10_ON_MODE=nonzero" in proc.stdout
+    assert "D10_ON_NONZERO_MODE=constant" in proc.stdout
     assert "stage_d_attribution.additive_loss_key.weight=0.25" in proc.stdout
     assert "stage_d_attribution.additive_loss_key.nonzero_semantics.enabled=True" in proc.stdout
+    assert "gradient_coupled_pilot_v1" not in proc.stdout
+
+
+def test_cli_dry_run_pilot_mode_prints_gradient_coupled_overrides(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    helper_path = repo_root / "tools" / "run_stage_d9_smoke_helper.py"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(helper_path),
+            "--repo-root",
+            str(repo_root),
+            "--output-root",
+            str(tmp_path / "smoke"),
+            "--config-path",
+            str(tmp_path / "cfg.yaml"),
+            "--dry-run",
+            "--on-mode",
+            "pilot",
+            "--on-weight",
+            "0.25",
+            "--pilot-scale",
+            "1e-6",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "D10_DRY_RUN=1" in proc.stdout
+    assert "D10_ON_MODE=pilot" in proc.stdout
+    assert "D10_ON_NONZERO_MODE=gradient_coupled_pilot_v1" in proc.stdout
+    assert "D10_ON_PILOT_SCALE=1e-06" in proc.stdout
+    assert "stage_d_attribution.additive_loss_key.weight=0.25" in proc.stdout
+    assert "stage_d_attribution.additive_loss_key.nonzero_semantics.enabled=True" in proc.stdout
+    assert "stage_d_attribution.additive_loss_key.nonzero_semantics.mode=gradient_coupled_pilot_v1" in proc.stdout
+    assert (
+        "stage_d_attribution.additive_loss_key.nonzero_semantics.gradient_coupled_scale=1e-06"
+        in proc.stdout
+    )
