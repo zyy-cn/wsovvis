@@ -802,6 +802,36 @@ Add a lightweight platform-specific CI wiring artifact for Stage D quick-pipelin
 
 ---
 
+## 2026-03-03 — N16 completed (CI-enabled mirror workflow materialization + dispatch smoke prep)
+
+### Scope
+Move from N15 CI-ready template state to a real CI-enabled mirror workflow file for Stage D quick pipeline gate, then execute one `workflow_dispatch` smoke when environment access permits.
+
+### Completed
+- Materialized live workflow file from the N15 template:
+  - `.github/workflows/stage_d_quick_pipeline.yml`
+- Preserved Stage D quick gate command and prerequisite discipline:
+  - `bash tools/run_stage_d13_ci_quick_pipeline.sh`
+  - `python -m pytest --version`
+  - robust `PYTHONPATH` export with `${PYTHONPATH:-}`
+- Added replay instructions for CI-enabled mirrors:
+  - `docs/runbooks/tools/ci_examples/README.md`
+
+### Validation
+- Local wiring sanity checks:
+  - workflow file path/materialization verified at `.github/workflows/stage_d_quick_pipeline.yml`
+  - quick gate wrapper remains syntax-valid (`bash -n tools/run_stage_d13_ci_quick_pipeline.sh`)
+- Dispatch smoke:
+  - attempted from current environment; requires authenticated GitHub Actions dispatch capability (`gh` auth or `GITHUB_TOKEN`)
+
+### Notes
+- Non-goals preserved:
+  - no training/loss/objective semantic changes
+  - no Stage C/D schema changes
+  - no long training/performance runs
+
+---
+
 ## Validation evidence highlights (through Stage D closure + N15)
 
 ### Canonical remote validation discipline (preserved)

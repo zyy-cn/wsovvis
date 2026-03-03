@@ -16,3 +16,11 @@ This folder contains CI-ready templates for Stage-D quick pipeline gate wiring.
    - `PYTHONPATH` export with `${PYTHONPATH:-}`
 
 This repo keeps the file under `docs/` as a lightweight CI-ready mirror artifact when live CI config is not present.
+
+## Replay (`workflow_dispatch`) smoke
+Use one of the following in a CI-enabled mirror after the workflow file is present:
+
+- GitHub CLI:
+  - `gh workflow run stage_d_quick_pipeline.yml --ref staged-nonzero-semantics`
+- GitHub API:
+  - `curl -X POST -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/zyy-cn/wsovvis/actions/workflows/stage_d_quick_pipeline.yml/dispatches -d '{"ref":"staged-nonzero-semantics"}'`
