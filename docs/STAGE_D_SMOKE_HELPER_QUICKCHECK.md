@@ -10,6 +10,9 @@ Stage D11 reinforced this helper with:
 Stage D12 adds a reproducible quick-check command path:
 - `tools/run_stage_d10_quick_checks.sh`
 
+N9 adds a local/CI mirror entry for helper coverage:
+- `tools/run_stage_d9_helper_tests_quick.sh`
+
 N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
 - nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
@@ -17,6 +20,12 @@ N4+N7 extend this same path with first-class ON-mode selection:
 
 ## Canonical quick-check commands
 From repo root:
+
+Helper coverage fast path (local/CI, pytest-capable):
+
+```bash
+tools/run_stage_d9_helper_tests_quick.sh
+```
 
 Zero-mode (compatibility sentinel, default):
 
@@ -82,6 +91,7 @@ source ~/software/miniconda3/etc/profile.d/conda.sh
 conda activate wsovvis
 python -m pytest --version
 export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:${PYTHONPATH:-}"
+tools/run_stage_d9_helper_tests_quick.sh
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 tools/run_stage_d10_quick_checks.sh
 tools/run_stage_d10_quick_checks.sh --on-mode nonzero --on-weight 0.25
