@@ -268,6 +268,7 @@ def test_stage_d5_objective_coupling_enabled_valid_runtime_reaches_apply_path(tm
         },
         repo_root=tmp_path,
     )
+    resolved = {**resolved, "objective_coupling": {"enabled": True}}
     runtime = consume_stage_d_attribution_config(resolved)
     boundary = build_stage_d_attribution_consumption_boundary(
         {"stage_d_attribution": resolved, "stage_d_attribution_runtime": runtime}

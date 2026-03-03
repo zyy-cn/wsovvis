@@ -392,6 +392,9 @@ def run(
         stage_d_attribution,
         repo_root=Path(__file__).resolve().parent,
     )
+    if isinstance(stage_d_attribution, dict) and "objective_coupling" in stage_d_attribution:
+        resolved_stage_d_attribution = dict(resolved_stage_d_attribution)
+        resolved_stage_d_attribution["objective_coupling"] = stage_d_attribution["objective_coupling"]
     stage_d_runtime = consume_stage_d_attribution_config(resolved_stage_d_attribution)
     stage_d_consumption = build_stage_d_attribution_consumption_boundary(
         {
