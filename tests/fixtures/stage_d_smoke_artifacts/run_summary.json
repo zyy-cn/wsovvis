@@ -1,0 +1,6 @@
+{
+  "scorer_backend": "deterministic_smoke",
+  "split": "train",
+  "embedding_dim": 768,
+  "num_tracks_scored": 1
+}
