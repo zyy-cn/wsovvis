@@ -669,6 +669,7 @@ def apply_stage_d_additive_loss_key(
         "application_version": "d6_additive_loss_key_v1",
         "enabled_by_config": False,
         "nonzero_semantics_enabled_by_config": False,
+        "nonzero_semantics_mode": "constant",
         "eligible": False,
         "applied": False,
         "skip_reason": "invalid_cfg_dict_type",
@@ -679,6 +680,8 @@ def apply_stage_d_additive_loss_key(
             "weight_valid": False,
             "weight_gate_satisfied": False,
             "nonzero_prereqs_satisfied": False,
+            "gradient_coupled_mode_requested": False,
+            "gradient_coupled_tensor_ready": False,
             "loss_dict_available": isinstance(loss_dict, dict),
             "loss_key_conflict": False,
         },
@@ -688,6 +691,7 @@ def apply_stage_d_additive_loss_key(
             "loss_value": 0.0,
             "apply_mode": "not_applied",
             "effective_training_delta": 0.0,
+            "gradient_coupled_scale": 0.0,
         },
         "diagnostics": {
             "considered": False,
@@ -697,6 +701,10 @@ def apply_stage_d_additive_loss_key(
             "weight_zero_noop_observed": False,
             "nonzero_semantics_state": "skipped",
             "nonzero_skip_reason": "not_considered",
+            "gradient_coupled_pilot_applied": False,
+            "gradient_coupled_pilot_state": "disabled",
+            "gradient_coupled_pilot_skip_reason": "not_requested",
+            "gradient_coupled_reference_loss_key": None,
         },
     }
 
@@ -729,6 +737,45 @@ def apply_stage_d_additive_loss_key(
     if result["enabled_by_config"] and not result["nonzero_semantics_enabled_by_config"]:
         result["diagnostics"]["nonzero_semantics_state"] = "disabled"
         result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
+
+    nonzero_mode_raw = nonzero_cfg.get("mode", "constant") if isinstance(nonzero_cfg, Mapping) else "constant"
+    if not isinstance(nonzero_mode_raw, str) or not nonzero_mode_raw:
+        result["skip_reason"] = "invalid_nonzero_semantics_mode_field"
+        result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+        result["diagnostics"]["nonzero_skip_reason"] = "invalid_nonzero_semantics_mode_field"
+        result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+        result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "invalid_nonzero_semantics_mode_field"
+        return result
+    nonzero_mode = str(nonzero_mode_raw)
+    if nonzero_mode not in {"constant", "gradient_coupled_pilot_v1"}:
+        result["skip_reason"] = "invalid_nonzero_semantics_mode_field"
+        result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+        result["diagnostics"]["nonzero_skip_reason"] = "invalid_nonzero_semantics_mode_field"
+        result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+        result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "invalid_nonzero_semantics_mode_field"
+        return result
+    result["nonzero_semantics_mode"] = nonzero_mode
+    gradient_coupled_mode_requested = nonzero_mode == "gradient_coupled_pilot_v1"
+    result["gate_status"]["gradient_coupled_mode_requested"] = gradient_coupled_mode_requested
+    if gradient_coupled_mode_requested:
+        result["diagnostics"]["gradient_coupled_pilot_state"] = "requested"
+        result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "not_applied"
+    else:
+        result["diagnostics"]["gradient_coupled_pilot_state"] = "disabled"
+        result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "mode_not_gradient_coupled"
+
+    gradient_coupled_scale = 1e-6
+    if isinstance(nonzero_cfg, Mapping) and "gradient_coupled_scale" in nonzero_cfg:
+        gradient_coupled_scale_raw = nonzero_cfg.get("gradient_coupled_scale")
+        if not _is_number(gradient_coupled_scale_raw) or float(gradient_coupled_scale_raw) <= 0.0:
+            result["skip_reason"] = "invalid_gradient_coupled_scale"
+            result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+            result["diagnostics"]["nonzero_skip_reason"] = "invalid_gradient_coupled_scale"
+            result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+            result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "invalid_gradient_coupled_scale"
+            return result
+        gradient_coupled_scale = float(gradient_coupled_scale_raw)
+    result["planned_loss"]["gradient_coupled_scale"] = float(gradient_coupled_scale) if gradient_coupled_mode_requested else 0.0
 
     weight = d6_cfg.get("weight", 0.0) if isinstance(d6_cfg, Mapping) else 0.0
     if not _is_number(weight) or float(weight) < 0.0:
@@ -795,28 +842,63 @@ def apply_stage_d_additive_loss_key(
             result["skip_reason"] = "loss_key_conflict"
             result["diagnostics"]["nonzero_semantics_state"] = "skipped"
             result["diagnostics"]["nonzero_skip_reason"] = "loss_key_conflict"
+            if gradient_coupled_mode_requested:
+                result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+                result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "loss_key_conflict"
             return result
         zero_value: Any = 0.0
         scalar_factory: Any = None
-        for existing_loss in loss_dict.values():
+        reference_loss: Any = None
+        reference_loss_key: str | None = None
+        for existing_key, existing_loss in loss_dict.items():
             # Training loss dicts are usually tensors; preserve scalar tensor type/device
             # so trainer reduction/metrics paths remain stable at the real integration hook.
             new_zeros = getattr(existing_loss, "new_zeros", None)
             if callable(new_zeros):
                 zero_value = new_zeros(())
                 scalar_factory = new_zeros
+                reference_loss = existing_loss
+                reference_loss_key = str(existing_key)
                 break
+        if reference_loss is not None:
+            result["gate_status"]["gradient_coupled_tensor_ready"] = bool(
+                getattr(reference_loss, "is_floating_point", lambda: False)()
+                and bool(getattr(reference_loss, "requires_grad", False))
+            )
+            result["diagnostics"]["gradient_coupled_reference_loss_key"] = reference_loss_key
         loss_value: Any = zero_value
         if use_nonzero_semantics:
-            if callable(scalar_factory):
-                loss_value = scalar_factory(()) + weight_value
+            if gradient_coupled_mode_requested:
+                reference_ready = bool(result["gate_status"]["gradient_coupled_tensor_ready"]) and callable(scalar_factory)
+                if reference_ready:
+                    reference_scalar = reference_loss
+                    if callable(getattr(reference_loss, "dim", None)) and int(reference_loss.dim()) > 0:
+                        reference_scalar = reference_loss.sum()
+                    loss_value = scalar_factory(()) + weight_value + gradient_coupled_scale * reference_scalar
+                    result["planned_loss"]["loss_value"] = weight_value
+                    result["planned_loss"]["effective_training_delta"] = weight_value
+                    result["planned_loss"]["apply_mode"] = "loss_dict_insert_nonzero_gradient_coupled_pilot"
+                    result["diagnostics"]["nonzero_semantics_state"] = "nonzero_applied"
+                    result["diagnostics"]["nonzero_skip_reason"] = "none"
+                    result["diagnostics"]["gradient_coupled_pilot_applied"] = True
+                    result["diagnostics"]["gradient_coupled_pilot_state"] = "applied"
+                    result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "none"
+                else:
+                    result["planned_loss"]["apply_mode"] = "loss_dict_insert_zero"
+                    result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+                    result["diagnostics"]["nonzero_skip_reason"] = "gradient_coupled_reference_unavailable"
+                    result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+                    result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "gradient_coupled_reference_unavailable"
             else:
-                loss_value = weight_value
-            result["planned_loss"]["loss_value"] = weight_value
-            result["planned_loss"]["effective_training_delta"] = weight_value
-            result["planned_loss"]["apply_mode"] = "loss_dict_insert_nonzero"
-            result["diagnostics"]["nonzero_semantics_state"] = "nonzero_applied"
-            result["diagnostics"]["nonzero_skip_reason"] = "none"
+                if callable(scalar_factory):
+                    loss_value = scalar_factory(()) + weight_value
+                else:
+                    loss_value = weight_value
+                result["planned_loss"]["loss_value"] = weight_value
+                result["planned_loss"]["effective_training_delta"] = weight_value
+                result["planned_loss"]["apply_mode"] = "loss_dict_insert_nonzero"
+                result["diagnostics"]["nonzero_semantics_state"] = "nonzero_applied"
+                result["diagnostics"]["nonzero_skip_reason"] = "none"
         else:
             result["planned_loss"]["apply_mode"] = "loss_dict_insert_zero"
             if result["diagnostics"]["nonzero_semantics_state"] == "skipped":
@@ -825,10 +907,13 @@ def apply_stage_d_additive_loss_key(
             elif result["diagnostics"]["nonzero_semantics_state"] not in {"disabled", "zero_weight_noop"}:
                 result["diagnostics"]["nonzero_semantics_state"] = "skipped"
                 result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
+            if gradient_coupled_mode_requested and result["diagnostics"]["gradient_coupled_pilot_state"] != "skipped":
+                result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+                result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "nonzero_prereqs_not_satisfied"
         loss_dict[loss_key] = loss_value
         result["diagnostics"]["inserted_into_loss_dict"] = True
     else:
-        if use_nonzero_semantics:
+        if use_nonzero_semantics and not gradient_coupled_mode_requested:
             result["planned_loss"]["loss_value"] = weight_value
             result["planned_loss"]["effective_training_delta"] = weight_value
             result["planned_loss"]["apply_mode"] = "placeholder_nonzero"
@@ -836,9 +921,17 @@ def apply_stage_d_additive_loss_key(
             result["diagnostics"]["nonzero_skip_reason"] = "none"
         else:
             result["planned_loss"]["apply_mode"] = "placeholder_zero"
+            if gradient_coupled_mode_requested and use_nonzero_semantics:
+                result["diagnostics"]["nonzero_semantics_state"] = "skipped"
+                result["diagnostics"]["nonzero_skip_reason"] = "gradient_coupled_requires_loss_dict"
+                result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+                result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "gradient_coupled_requires_loss_dict"
             if result["diagnostics"]["nonzero_semantics_state"] not in {"disabled", "zero_weight_noop", "skipped"}:
                 result["diagnostics"]["nonzero_semantics_state"] = "skipped"
                 result["diagnostics"]["nonzero_skip_reason"] = "disabled_by_config"
+            if gradient_coupled_mode_requested and result["diagnostics"]["gradient_coupled_pilot_state"] != "skipped":
+                result["diagnostics"]["gradient_coupled_pilot_state"] = "skipped"
+                result["diagnostics"]["gradient_coupled_pilot_skip_reason"] = "nonzero_prereqs_not_satisfied"
         result["diagnostics"]["used_placeholder_path"] = True
 
     result["applied"] = True
