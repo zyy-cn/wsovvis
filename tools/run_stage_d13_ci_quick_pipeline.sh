@@ -59,11 +59,38 @@ run() {
   "$@"
 }
 
+ci_hosted_missing_replay_assets=0
+ci_hosted_skip_reason=""
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  replay_weight_candidates=(
+    "$repo_root/runs/wsovvis_seqformer/15/d2/model_0005999.pth"
+    "$(cd "$repo_root/.." && pwd)/wsovvis_live/runs/wsovvis_seqformer/15/d2/model_0005999.pth"
+  )
+  replay_weight_found=0
+  for candidate in "${replay_weight_candidates[@]}"; do
+    if [[ -e "$candidate" ]]; then
+      replay_weight_found=1
+      break
+    fi
+  done
+  if [[ "$replay_weight_found" -eq 0 ]]; then
+    ci_hosted_missing_replay_assets=1
+    ci_hosted_skip_reason="missing checkpoint assets on GitHub-hosted CI runner (none of: ${replay_weight_candidates[*]})"
+  fi
+fi
+
 cd "$repo_root"
 
 echo "D13_CI_QUICK_PIPELINE_STAGE=helper_fast_gate START"
 run bash tools/run_stage_d9_helper_tests_quick.sh --repo-root "$repo_root" --python-bin "$python_bin"
 echo "D13_CI_QUICK_PIPELINE_STAGE=helper_fast_gate PASS"
+
+if [[ "$ci_hosted_missing_replay_assets" -eq 1 ]]; then
+  echo "D13_CI_QUICK_PIPELINE_STAGE=canonical_replay SKIP"
+  echo "D13_CI_QUICK_PIPELINE_SKIP_REASON=$ci_hosted_skip_reason"
+  echo "D13_CI_QUICK_PIPELINE=PASS"
+  exit 0
+fi
 
 replay_cmd=(
   bash tools/run_stage_d11_canonical_replay.sh
