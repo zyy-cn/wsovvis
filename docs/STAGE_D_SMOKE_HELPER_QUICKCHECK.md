@@ -201,7 +201,27 @@ assert_log_has "D10_PILOT_APPLIED=True" "$REPLAY_LOG"
 - Cause: nested quoting around overrides and `PYTHONPATH`.
 - Fix: prefer `tools/remote_verify_wsovvis.sh` and keep commands simple; use `${PYTHONPATH:-}` in both env and command contexts.
 
-4. Task output written to repo root (`xx_output.txt`)
+4. Fresh runner bootstrap missing shared symlinks (`DINOV2.REPO_PATH` / weights path asserts)
+- Cause: new runner clone misses non-git symlinks expected by canonical replay smoke.
+- First check:
+```bash
+cd /home/zyy/code/wsovvis_runner_n27
+ls -l third_party/CutLER third_party/dinov2 runs weights data
+```
+- Canonical linkage pattern:
+```bash
+mkdir -p third_party
+ln -snf ../../wsovvis_live/third_party/CutLER/ third_party/CutLER
+ln -snf ../../wsovvis_live/third_party/dinov2/ third_party/dinov2
+ln -snf ../wsovvis_live/runs/ runs
+ln -snf ../wsovvis_live/weights/ weights
+ln -snf ../wsovvis_live/data/ data
+```
+- Notes:
+  `third_party/*` uses `../../wsovvis_live/...` because links are inside `third_party/`.
+  Repo-root links (`runs`, `weights`, `data`) use `../wsovvis_live/...`.
+
+5. Task output written to repo root (`xx_output.txt`)
 - Cause: using relative output names without task-directory prefix.
 - Fix: always write outputs to `codex/<task_dir>/xx_output.txt` in the same folder as the prompt.
 - Example (current task style): `codex/2026030304_staged_nonzero_semantics/13_output.txt`
