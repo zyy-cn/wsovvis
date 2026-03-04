@@ -10,6 +10,11 @@
   - `workflow_dispatch` smoke now unblocked/verified on `staged-nonzero-semantics`.
   - CI-hosted missing-asset replay-skip compatibility fix validated via authenticated redispatch.
   - verification run reference: GitHub Actions run `22650332186` (`completed/success`, 2026-03-04 UTC).
+- N24 line is complete and closed:
+  - N24 sign/direction boundary hardening complete.
+  - N24.r1 canonical bootstrap hardening complete (non-interactive conda + robust path detection including `/home/zyy/software/miniconda3`).
+  - N24.r2 canonical replay smoke diagnostics-consistency triage/fix complete with rerun PASS.
+  - helper diagnostics consistency accepts valid skipped-pilot `loss_dict_insert_zero` and `placeholder_zero` apply-mode branches when indicator fields are consistent.
 - Current state remains tooling/docs continuity lock, not new training behavior implementation.
 
 ## What is stable and must be preserved

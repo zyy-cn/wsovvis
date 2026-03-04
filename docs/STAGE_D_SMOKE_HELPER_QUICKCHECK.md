@@ -144,6 +144,7 @@ When running real OFF/ON smoke (non-dry-run), expectations depend on ON mode:
 - ON zero-mode (`--on-mode zero`, `weight=0.0`): `loss_stage_d_attr` appears and remains ~0, and OFF/ON total-loss parity remains within `--parity-tol`
 - ON nonzero-mode (`--on-mode nonzero`, `weight>0`): `loss_stage_d_attr` is nonzero and ON total loss increases vs OFF path
 - ON pilot-mode (`--on-mode pilot`, `weight>0`): helper requests `gradient_coupled_pilot_v1` and now asserts ON-run `cfg_runtime.json` pilot diagnostics (`nonzero_semantics_mode`, pilot applied/skip state, skip reasons, and scale/weight consistency)
+  - skipped-pilot diagnostics are valid with `planned_loss.apply_mode=loss_dict_insert_zero` or `planned_loss.apply_mode=placeholder_zero` when insertion/placeholder indicator fields are internally consistent.
 
 These checks are reported as `D10_*` lines by the helper.
 

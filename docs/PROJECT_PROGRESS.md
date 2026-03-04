@@ -861,6 +861,29 @@ Docs-only closure and continuity sync after N16.r3 CI-hosted replay compatibilit
 
 ---
 
+## 2026-03-04 — N24 line completed (semantic hardening + canonical replay contract closure)
+
+### Scope
+Close the bounded Stage D nonzero-semantics N24 line: semantic sign/direction hardening, canonical bootstrap hardening, and canonical replay diagnostics-contract triage/rerun closure.
+
+### Completed
+- N24 completed: applied-path sign/direction boundary hardening landed and remained stable.
+- N24.r1 completed: canonical bootstrap hardening for non-interactive shells and robust conda path detection landed, including `/home/zyy/software/miniconda3` resolution.
+- N24.r2 completed: canonical replay smoke diagnostics-consistency mismatch was triaged/fixed and one-shot rerun passed.
+- Helper diagnostics consistency contract now accepts valid skipped-pilot mappings for:
+  - `planned_loss.apply_mode=loss_dict_insert_zero` (loss-dict insertion branch), and
+  - `planned_loss.apply_mode=placeholder_zero` (placeholder branch),
+  when associated indicator fields are internally consistent.
+
+### Validation
+- N24 line closure evidence includes targeted canonical validation plus canonical replay rerun PASS in the N24.r2 record.
+- This continuity entry is docs-only and introduces no code-path behavior changes.
+
+### Notes
+- N24 line is now closed end-to-end: semantic hardening + canonical bootstrap reliability + replay diagnostics contract consistency.
+
+---
+
 ## Validation evidence highlights (through Stage D closure + N15)
 
 ### Canonical remote validation discipline (preserved)
