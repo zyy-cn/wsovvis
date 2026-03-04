@@ -15,6 +15,20 @@
   - N24.r1 canonical bootstrap hardening complete (non-interactive conda + robust path detection including `/home/zyy/software/miniconda3`).
   - N24.r2 canonical replay smoke diagnostics-consistency triage/fix complete with rerun PASS.
   - helper diagnostics consistency accepts valid skipped-pilot `loss_dict_insert_zero` and `placeholder_zero` apply-mode branches when indicator fields are consistent.
+- N26 line is complete and closed:
+  - N26 dual-valid skipped-pilot matrix closure complete.
+  - N26.r1 canonical-first verification closure complete on `gpu4090d`.
+  - canonical replay contract repair/rerun closed with PASS (`D11_CANONICAL_REPLAY=PASS`).
+- N27 line is complete and closed:
+  - replay/CLI skipped-pilot output stability hardened to minimal required fieldset assertions.
+  - N27.r1 fresh-runner bootstrap linkage recovery completed (`third_party/CutLER`, `third_party/dinov2`, `runs`, `weights`, `data`).
+  - canonical replay rerun closure complete with PASS.
+- N28 is complete and closed:
+  - canonical-runner wsovvis_live link check/fix helper added:
+    - `tools/check_canonical_runner_bootstrap_links.py`
+  - helper docs integrated into Stage D quick-check runbook.
+- Latest branch head at this closure sync point:
+  - `staged-nonzero-semantics` / `origin/staged-nonzero-semantics` -> `fe94247aff03853f1c8ddd85f023a7957084a367`
 - Current state remains tooling/docs continuity lock, not new training behavior implementation.
 
 ## What is stable and must be preserved
@@ -61,6 +75,27 @@
 - Workflow policy baseline:
   - `codex/WSOVVIS_CODEX_WORKFLOW_README.md`
   - `codex/specs/*`
+- Authoritative recent Stage-D continuity outputs (read in order for cold-start alignment):
+  - `codex/2026030304_staged_nonzero_semantics/31_output.txt` (N26.r1 closure)
+  - `codex/2026030304_staged_nonzero_semantics/32_output.txt` (N27 implementation + canonical targeted PASS, replay blocker evidence)
+  - `codex/2026030304_staged_nonzero_semantics/33_output.txt` (N27.r1 bootstrap fix + replay PASS)
+  - `codex/2026030304_staged_nonzero_semantics/34_output.txt` (N28 helper + docs integration closure)
+
+## Operational continuity notes (N26/N27/N28)
+- Keep canonical-first verification pattern when local pytest is unavailable:
+  - run canonical preflight, then minimal targeted selector, then one replay smoke, and stop at first stable PASS.
+- For fresh-runner bootstrap issues (`DINOV2.REPO_PATH` / weights/data path asserts), use helper first:
+  - check: `python tools/check_canonical_runner_bootstrap_links.py --runner-root <runner_path> --check`
+  - fix: `python tools/check_canonical_runner_bootstrap_links.py --runner-root <runner_path> --fix`
+- Managed path targets must remain:
+  - `third_party/CutLER -> ../../wsovvis_live/third_party/CutLER`
+  - `third_party/dinov2 -> ../../wsovvis_live/third_party/dinov2`
+  - `runs -> ../wsovvis_live/runs`
+  - `weights -> ../wsovvis_live/weights`
+  - `data -> ../wsovvis_live/data`
+- Preserve helper safety convention:
+  - symlink mismatches may be auto-fixed in `--fix`,
+  - existing non-symlink conflicts are reported as `SKIPPED` for manual review.
 
 ## Recommended next step (single best step)
 Define the next Stage D follow-up milestone for research-facing nonzero supervision semantics with explicit acceptance gates before implementation.

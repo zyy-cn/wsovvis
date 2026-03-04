@@ -1,4 +1,4 @@
-# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12/N4/N7/N13/N15)
+# Stage D Smoke Helper Quick-Check Runbook (D10/D11/D12/N4/N7/N13/N15/N28)
 
 ## Purpose
 `tools/run_stage_d9_smoke_helper.py` is the Stage D10 helper that wraps the real `train_seqformer_pseudo.py` entrypoint for OFF/ON smoke verification.
@@ -40,6 +40,9 @@ N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
 - nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
 - pilot-mode quick check (wiring validation for `gradient_coupled_pilot_v1`)
+
+N28 adds a canonical bootstrap triage/fix helper for fresh runner link integrity:
+- `tools/check_canonical_runner_bootstrap_links.py`
 
 ## Canonical quick-check commands
 From repo root:

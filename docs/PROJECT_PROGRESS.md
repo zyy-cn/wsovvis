@@ -884,7 +884,95 @@ Close the bounded Stage D nonzero-semantics N24 line: semantic sign/direction ha
 
 ---
 
-## Validation evidence highlights (through Stage D closure + N15)
+## 2026-03-04 — N26 line completed (dual-valid skipped-pilot matrix + canonical-first verification closure)
+
+### Scope
+Close N26 and N26.r1 for skipped-pilot diagnostics/replay stability using canonical-first verification discipline, without expanding Stage D semantics.
+
+### Completed
+- N26 closed with dual-valid skipped-pilot matrix coverage preserved for:
+  - `planned_loss.apply_mode=loss_dict_insert_zero`
+  - `planned_loss.apply_mode=placeholder_zero`
+- N26.r1 canonical-first closure completed after local pytest unavailability triage (`No module named pytest`) by moving directly to canonical ladder on `gpu4090d`.
+- A replay-test contract bug surfaced during canonical run and was fixed minimally in-scope:
+  - escaped `${PWD}` in f-string shell snippet (`${{PWD}}`) so generated replay stub preserves shell variable semantics.
+- Canonical replay smoke rerun reached PASS after fix (`D11_CANONICAL_REPLAY=PASS`).
+
+### Validation
+- Canonical preflight passed (conda-first, `pytest 9.0.2`).
+- Targeted canonical subset closure rerun passed for failing replay-contract tests (`3 passed`).
+- Canonical replay smoke passed after minimal test-contract fix.
+- Commit/push closure for N26.r1:
+  - `af9cb66a367277e412f35c64ffee32f77ce2aca0`
+  - branch: `staged-nonzero-semantics`
+
+### Notes
+- N26/N26.r1 closure was contract/tooling hardening only; no Stage C/D schema change and no loss-semantic expansion.
+
+---
+
+## 2026-03-04 — N27 line completed (replay/CLI minimal-fieldset stability + fresh-runner bootstrap closure)
+
+### Scope
+Close N27 and N27.r1 by hardening replay/CLI skipped-pilot output assertions and resolving fresh-runner bootstrap blockers for canonical replay.
+
+### Completed
+- N27 closed with minimal-fieldset stability assertions for `D10_PILOT_*` replay/CLI output contract:
+  - added compact field parsing/assertion strategy to reduce brittle full-line coupling,
+  - preserved contradiction-path fail-fast guarantees (no false PASS markers).
+- N27 canonical targeted tests passed (`3 passed`) on canonical runner.
+- N27.r1 closed by repairing fresh-runner wsovvis_live symlink bootstrap in `/home/zyy/code/wsovvis_runner_n27`:
+  - `third_party/CutLER`, `third_party/dinov2`, `runs`, `weights`, `data`
+- Canonical replay rerun passed after bootstrap fix (`D11_CANONICAL_REPLAY=PASS`).
+- Runbook continuity updated to document the exact linkage pattern and first-check commands.
+
+### Validation
+- Canonical preflight passed on fresh runner path with conda-first setup.
+- Canonical replay/CLI targeted test selector passed (`3 passed`) on commit:
+  - `76c6188e24619a08cf77602ab7b155d735177107`
+- Canonical replay smoke PASS recorded after bootstrap repair on commit:
+  - `a0a313b6ecd40d65adc016677000acfbf93775d3`
+
+### Notes
+- N27/N27.r1 closure remained within tooling/bootstrap and replay contract hardening boundaries.
+
+---
+
+## 2026-03-04 — N28 completed (canonical runner bootstrap link check/fix helper + docs integration)
+
+### Scope
+Add a focused helper to standardize canonical-runner wsovvis_live linkage triage/fix and integrate it into Stage D quickcheck documentation.
+
+### Completed
+- Added helper:
+  - `tools/check_canonical_runner_bootstrap_links.py`
+- Helper covers managed paths:
+  - `third_party/CutLER`
+  - `third_party/dinov2`
+  - `runs`
+  - `weights`
+  - `data`
+- Implemented `--check` and `--fix` modes with safe handling:
+  - repairs missing/broken/wrong symlinks,
+  - reports and skips non-symlink conflicts (`SKIPPED`) instead of destructive replacement.
+- Integrated concise usage/status guidance into:
+  - `docs/STAGE_D_SMOKE_HELPER_QUICKCHECK.md`
+
+### Validation
+- Lightweight validation only (docs/tooling scope):
+  - script compile/help/check checks,
+  - controlled temp-fixture fix-mode transitions (`WRONG_TARGET/MISSING/BROKEN_SYMLINK -> FIXED`),
+  - non-symlink conflict preserved as `SKIPPED`.
+- Canonical runner path was unavailable in the execution environment used for the helper implementation step; this did not block helper closure.
+
+### Notes
+- N28 is closed as tooling/docs continuity hardening; no Stage D training semantic change.
+- Closure commit/head:
+  - `fe94247aff03853f1c8ddd85f023a7957084a367` on `staged-nonzero-semantics` (also `origin/staged-nonzero-semantics` at closure time).
+
+---
+
+## Validation evidence highlights (through Stage D closure + N28)
 
 ### Canonical remote validation discipline (preserved)
 - Canonical remote host/path usage remained consistent in PASS evidence:
