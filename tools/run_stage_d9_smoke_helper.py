@@ -269,6 +269,14 @@ def _evaluate_pilot_diagnostics_checks(
         diagnostics.get("nonzero_skip_reason"),
         field_name="stage_d_attribution_d6_loss_key.diagnostics.nonzero_skip_reason",
     )
+    inserted_into_loss_dict = _require_bool(
+        diagnostics.get("inserted_into_loss_dict"),
+        field_name="stage_d_attribution_d6_loss_key.diagnostics.inserted_into_loss_dict",
+    )
+    used_placeholder_path = _require_bool(
+        diagnostics.get("used_placeholder_path"),
+        field_name="stage_d_attribution_d6_loss_key.diagnostics.used_placeholder_path",
+    )
 
     if pilot_applied:
         if pilot_state != "applied" or pilot_skip_reason != "none":
@@ -295,9 +303,20 @@ def _evaluate_pilot_diagnostics_checks(
             raise RuntimeError("pilot diagnostics inconsistent: applied=False requires a non-none nonzero skip reason")
         if gate_tensor_ready:
             raise RuntimeError("pilot diagnostics inconsistent: applied=False requires gate_status.gradient_coupled_tensor_ready=False")
-        if apply_mode != "loss_dict_insert_zero":
+        if apply_mode == "loss_dict_insert_zero":
+            if not inserted_into_loss_dict or used_placeholder_path:
+                raise RuntimeError(
+                    "pilot diagnostics inconsistent: loss_dict_insert_zero requires inserted_into_loss_dict=True and used_placeholder_path=False"
+                )
+        elif apply_mode == "placeholder_zero":
+            if inserted_into_loss_dict or not used_placeholder_path:
+                raise RuntimeError(
+                    "pilot diagnostics inconsistent: placeholder_zero requires inserted_into_loss_dict=False and used_placeholder_path=True"
+                )
+        else:
             raise RuntimeError(
-                "pilot diagnostics inconsistent: applied=False requires planned_loss.apply_mode=loss_dict_insert_zero"
+                "pilot diagnostics inconsistent: applied=False requires planned_loss.apply_mode in "
+                "{loss_dict_insert_zero, placeholder_zero}"
             )
 
     return {
@@ -312,6 +331,8 @@ def _evaluate_pilot_diagnostics_checks(
         "pilot_skip_reason": pilot_skip_reason,
         "nonzero_state": nonzero_state,
         "nonzero_skip_reason": nonzero_skip_reason,
+        "inserted_into_loss_dict": inserted_into_loss_dict,
+        "used_placeholder_path": used_placeholder_path,
         "d6_applied": d6_applied,
         "d6_skip_reason": d6_skip_reason,
         "gate_mode_requested": gate_mode_requested,

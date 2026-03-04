@@ -120,6 +120,8 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_applied_payload() -> None
                 "gradient_coupled_pilot_skip_reason": "none",
                 "nonzero_semantics_state": "nonzero_applied",
                 "nonzero_skip_reason": "none",
+                "inserted_into_loss_dict": True,
+                "used_placeholder_path": False,
             },
         }
     }
@@ -162,6 +164,8 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_small_weight_scale_bounda
                 "gradient_coupled_pilot_skip_reason": "none",
                 "nonzero_semantics_state": "nonzero_applied",
                 "nonzero_skip_reason": "none",
+                "inserted_into_loss_dict": True,
+                "used_placeholder_path": False,
             },
         }
     }
@@ -204,6 +208,8 @@ def test_evaluate_pilot_diagnostics_checks_fail_fast_on_zero_scale_invalid_paylo
                 "gradient_coupled_pilot_skip_reason": "invalid_gradient_coupled_scale",
                 "nonzero_semantics_state": "skipped",
                 "nonzero_skip_reason": "invalid_gradient_coupled_scale",
+                "inserted_into_loss_dict": False,
+                "used_placeholder_path": False,
             },
         }
     }
@@ -240,6 +246,8 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_skipped_payload() -> None
                 "gradient_coupled_pilot_skip_reason": "gradient_coupled_reference_unavailable",
                 "nonzero_semantics_state": "skipped",
                 "nonzero_skip_reason": "gradient_coupled_reference_unavailable",
+                "inserted_into_loss_dict": True,
+                "used_placeholder_path": False,
             },
         }
     }
@@ -257,6 +265,49 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_skipped_payload() -> None
     assert out["pilot_state"] == "skipped"
     assert out["gate_tensor_ready"] is False
     assert out["apply_mode"] == "loss_dict_insert_zero"
+
+
+def test_evaluate_pilot_diagnostics_checks_passes_with_placeholder_skipped_payload() -> None:
+    helper = _load_helper_module()
+    on_runtime_cfg = {
+        "stage_d_attribution_d6_loss_key": {
+            "applied": True,
+            "skip_reason": "none",
+            "nonzero_semantics_mode": "gradient_coupled_pilot_v1",
+            "nonzero_semantics_enabled_by_config": True,
+            "gate_status": {
+                "gradient_coupled_mode_requested": True,
+                "gradient_coupled_tensor_ready": False,
+            },
+            "planned_loss": {
+                "apply_mode": "placeholder_zero",
+                "loss_weight": 0.25,
+                "gradient_coupled_scale": 1e-6,
+            },
+            "diagnostics": {
+                "gradient_coupled_pilot_applied": False,
+                "gradient_coupled_pilot_state": "skipped",
+                "gradient_coupled_pilot_skip_reason": "gradient_coupled_requires_loss_dict",
+                "nonzero_semantics_state": "skipped",
+                "nonzero_skip_reason": "gradient_coupled_requires_loss_dict",
+                "inserted_into_loss_dict": False,
+                "used_placeholder_path": True,
+            },
+        }
+    }
+
+    out = helper._evaluate_pilot_diagnostics_checks(
+        on_mode="pilot",
+        on_runtime_cfg=on_runtime_cfg,
+        expected_weight=0.25,
+        pilot_scale=1e-6,
+    )
+
+    assert out["enabled"] is True
+    assert out["checks_ok"] is True
+    assert out["pilot_applied"] is False
+    assert out["pilot_state"] == "skipped"
+    assert out["apply_mode"] == "placeholder_zero"
 
 
 def test_evaluate_pilot_diagnostics_checks_fail_fast_on_missing_fields() -> None:
@@ -282,6 +333,8 @@ def test_evaluate_pilot_diagnostics_checks_fail_fast_on_missing_fields() -> None
                 "gradient_coupled_pilot_skip_reason": "gradient_coupled_reference_unavailable",
                 "nonzero_semantics_state": "skipped",
                 "nonzero_skip_reason": "gradient_coupled_reference_unavailable",
+                "inserted_into_loss_dict": True,
+                "used_placeholder_path": False,
             },
         }
     }
@@ -318,6 +371,8 @@ def test_evaluate_pilot_diagnostics_checks_fail_fast_on_inconsistent_applied_con
                 "gradient_coupled_pilot_skip_reason": "none",
                 "nonzero_semantics_state": "skipped",
                 "nonzero_skip_reason": "gradient_coupled_reference_unavailable",
+                "inserted_into_loss_dict": True,
+                "used_placeholder_path": False,
             },
         }
     }
@@ -354,6 +409,8 @@ def test_evaluate_pilot_diagnostics_checks_fail_fast_on_gate_and_apply_mode_mism
                 "gradient_coupled_pilot_skip_reason": "none",
                 "nonzero_semantics_state": "nonzero_applied",
                 "nonzero_skip_reason": "none",
+                "inserted_into_loss_dict": True,
+                "used_placeholder_path": False,
             },
         }
     }
