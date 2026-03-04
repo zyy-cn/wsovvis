@@ -1,0 +1,32 @@
+﻿2026-03-04T00:08:15.9307036Z Current runner version: '2.331.0'
+2026-03-04T00:08:15.9331844Z ##[group]Runner Image Provisioner
+2026-03-04T00:08:15.9332988Z Hosted Compute Agent
+2026-03-04T00:08:15.9333863Z Version: 20260213.493
+2026-03-04T00:08:15.9334565Z Commit: 5c115507f6dd24b8de37d8bbe0bb4509d0cc0fa3
+2026-03-04T00:08:15.9335286Z Build Date: 2026-02-13T00:28:41Z
+2026-03-04T00:08:15.9336233Z Worker ID: {eff32132-57f7-4099-8e94-b63e5a634789}
+2026-03-04T00:08:15.9336908Z Azure Region: westus3
+2026-03-04T00:08:15.9337521Z ##[endgroup]
+2026-03-04T00:08:15.9339007Z ##[group]Operating System
+2026-03-04T00:08:15.9339676Z Ubuntu
+2026-03-04T00:08:15.9340213Z 24.04.3
+2026-03-04T00:08:15.9340653Z LTS
+2026-03-04T00:08:15.9341173Z ##[endgroup]
+2026-03-04T00:08:15.9341628Z ##[group]Runner Image
+2026-03-04T00:08:15.9342283Z Image: ubuntu-24.04
+2026-03-04T00:08:15.9342792Z Version: 20260224.36.1
+2026-03-04T00:08:15.9344299Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260224.36/images/ubuntu/Ubuntu2404-Readme.md
+2026-03-04T00:08:15.9346036Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260224.36
+2026-03-04T00:08:15.9346970Z ##[endgroup]
+2026-03-04T00:08:15.9348046Z ##[group]GITHUB_TOKEN Permissions
+2026-03-04T00:08:15.9350091Z Contents: read
+2026-03-04T00:08:15.9350763Z Metadata: read
+2026-03-04T00:08:15.9351280Z Packages: read
+2026-03-04T00:08:15.9351743Z ##[endgroup]
+2026-03-04T00:08:15.9354160Z Secret source: Actions
+2026-03-04T00:08:15.9354853Z Prepare workflow directory
+2026-03-04T00:08:15.9679041Z Prepare all required actions
+2026-03-04T00:08:15.9721891Z Getting action download info
+2026-03-04T00:08:16.3674529Z Download action repository 'actions/checkout@v4' (SHA:34e114876b0b11c390a56381ad16ebd13914f8d5)
+2026-03-04T00:08:16.5015704Z Download action repository 'conda-incubator/setup-miniconda@v3' (SHA:fc2d68f6413eb2d87b895e92f8584b5b94a10167)
+2026-03-04T00:08:17.3241319Z Complete job name: stage-d-quick-pipeline

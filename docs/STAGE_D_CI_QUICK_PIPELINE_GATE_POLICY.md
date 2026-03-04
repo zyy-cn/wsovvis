@@ -10,6 +10,7 @@ This document is tooling/docs/policy only and reuses existing wrappers:
 
 ## Preconditions
 - Run from repo root.
+- For authenticated dispatch/replay smoke operations, export `GITHUB_TOKEN` in the same shell/environment that executes Codex and the dispatch command.
 - Use conda-first environment on canonical runner paths when validating remotely:
   - `source ~/software/miniconda3/etc/profile.d/conda.sh`
   - `conda activate wsovvis`
@@ -33,6 +34,8 @@ Use the cheapest gate that matches risk:
   - changing Stage D quick pipeline wrappers/runbooks
   - touching helper/replay command composition
   - preparing CI wiring confidence for branch-local checks
+- CI-hosted note:
+  - on GitHub-hosted runners without canonical checkpoint assets, replay may be explicitly skipped by compatibility handling while helper fast-gate still executes; this is expected and not a semantic failure.
 
 3. `broader checks escalation` (more expensive)
 - Suggested commands:

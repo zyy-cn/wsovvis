@@ -20,6 +20,11 @@ This repo keeps the file under `docs/` as a lightweight CI-ready mirror artifact
 ## Replay (`workflow_dispatch`) smoke
 Use one of the following in a CI-enabled mirror after the workflow file is present:
 
+- Operator note:
+  - export `GITHUB_TOKEN` in the same shell/environment that runs Codex and `gh`/`curl` dispatch commands; otherwise token inheritance failures can appear as false auth blockers.
+- CI-hosted behavior note:
+  - `tools/run_stage_d13_ci_quick_pipeline.sh` may skip canonical replay gracefully when checkpoint assets are absent on GitHub-hosted runners; this is expected compatibility behavior, not a Stage D semantic failure.
+
 - GitHub CLI:
   - `gh workflow run stage_d_quick_pipeline.yml --ref staged-nonzero-semantics`
 - GitHub API:
