@@ -197,6 +197,9 @@ def _evaluate_pilot_diagnostics_checks(
         on_runtime_cfg.get("stage_d_attribution_d6_loss_key"),
         field_name="stage_d_attribution_d6_loss_key",
     )
+    d6_applied = _require_bool(d6.get("applied"), field_name="stage_d_attribution_d6_loss_key.applied")
+    d6_skip_reason = _require_str(d6.get("skip_reason"), field_name="stage_d_attribution_d6_loss_key.skip_reason")
+    gate_status = _require_mapping(d6.get("gate_status"), field_name="stage_d_attribution_d6_loss_key.gate_status")
     diagnostics = _require_mapping(d6.get("diagnostics"), field_name="stage_d_attribution_d6_loss_key.diagnostics")
     planned_loss = _require_mapping(d6.get("planned_loss"), field_name="stage_d_attribution_d6_loss_key.planned_loss")
 
@@ -211,6 +214,19 @@ def _evaluate_pilot_diagnostics_checks(
     )
     if not nonzero_enabled:
         raise RuntimeError("pilot mode requires nonzero semantics to be enabled by config")
+    if not d6_applied or d6_skip_reason != "none":
+        raise RuntimeError("pilot mode requires stage_d_attribution_d6_loss_key.applied=True and skip_reason=none")
+
+    gate_mode_requested = _require_bool(
+        gate_status.get("gradient_coupled_mode_requested"),
+        field_name="stage_d_attribution_d6_loss_key.gate_status.gradient_coupled_mode_requested",
+    )
+    gate_tensor_ready = _require_bool(
+        gate_status.get("gradient_coupled_tensor_ready"),
+        field_name="stage_d_attribution_d6_loss_key.gate_status.gradient_coupled_tensor_ready",
+    )
+    if not gate_mode_requested:
+        raise RuntimeError("pilot mode requires gate_status.gradient_coupled_mode_requested=True")
 
     loss_weight = _require_number(planned_loss.get("loss_weight"), field_name="stage_d_attribution_d6_loss_key.planned_loss.loss_weight")
     if abs(loss_weight - expected_weight) > value_tol:
@@ -222,6 +238,10 @@ def _evaluate_pilot_diagnostics_checks(
     gradient_scale = _require_number(
         planned_loss.get("gradient_coupled_scale"),
         field_name="stage_d_attribution_d6_loss_key.planned_loss.gradient_coupled_scale",
+    )
+    apply_mode = _require_str(
+        planned_loss.get("apply_mode"),
+        field_name="stage_d_attribution_d6_loss_key.planned_loss.apply_mode",
     )
     if pilot_scale is not None and abs(gradient_scale - float(pilot_scale)) > value_tol:
         raise RuntimeError(
@@ -257,6 +277,13 @@ def _evaluate_pilot_diagnostics_checks(
             raise RuntimeError(
                 "pilot diagnostics inconsistent: applied=True requires nonzero_semantics_state=nonzero_applied and nonzero_skip_reason=none"
             )
+        if not gate_tensor_ready:
+            raise RuntimeError("pilot diagnostics inconsistent: applied=True requires gate_status.gradient_coupled_tensor_ready=True")
+        if apply_mode != "loss_dict_insert_nonzero_gradient_coupled_pilot":
+            raise RuntimeError(
+                "pilot diagnostics inconsistent: applied=True requires "
+                "planned_loss.apply_mode=loss_dict_insert_nonzero_gradient_coupled_pilot"
+            )
     else:
         if pilot_state != "skipped":
             raise RuntimeError("pilot diagnostics inconsistent: applied=False requires pilot_state=skipped")
@@ -266,6 +293,12 @@ def _evaluate_pilot_diagnostics_checks(
             raise RuntimeError("pilot diagnostics inconsistent: applied=False requires nonzero_semantics_state=skipped")
         if nonzero_skip_reason == "none":
             raise RuntimeError("pilot diagnostics inconsistent: applied=False requires a non-none nonzero skip reason")
+        if gate_tensor_ready:
+            raise RuntimeError("pilot diagnostics inconsistent: applied=False requires gate_status.gradient_coupled_tensor_ready=False")
+        if apply_mode != "loss_dict_insert_zero":
+            raise RuntimeError(
+                "pilot diagnostics inconsistent: applied=False requires planned_loss.apply_mode=loss_dict_insert_zero"
+            )
 
     return {
         "enabled": True,
@@ -279,6 +312,11 @@ def _evaluate_pilot_diagnostics_checks(
         "pilot_skip_reason": pilot_skip_reason,
         "nonzero_state": nonzero_state,
         "nonzero_skip_reason": nonzero_skip_reason,
+        "d6_applied": d6_applied,
+        "d6_skip_reason": d6_skip_reason,
+        "gate_mode_requested": gate_mode_requested,
+        "gate_tensor_ready": gate_tensor_ready,
+        "apply_mode": apply_mode,
     }
 
 

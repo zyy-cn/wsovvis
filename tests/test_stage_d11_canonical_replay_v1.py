@@ -15,6 +15,9 @@ echo "layered:$*" >> "${PWD}/order.log"
 """
     helper_stub = """#!/usr/bin/env bash
 set -euo pipefail
+echo "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=True"
+echo "D10_PILOT_APPLIED=True"
+echo "D10_PILOT_NONZERO_STATE=nonzero_applied"
 echo "helper:$*" >> "${PWD}/order.log"
 """
     (tools_dir / "run_stage_d10_layered_fast_gate.sh").write_text(layered_stub, encoding="utf-8")
@@ -58,6 +61,9 @@ def test_n11_replay_runs_layered_then_pilot_with_defaults(tmp_path: Path) -> Non
     assert "D11_CANONICAL_REPLAY_STAGE=n10_layered_fast_gate PASS" in proc.stdout
     assert "D11_CANONICAL_REPLAY_STAGE=pilot_helper_smoke PASS" in proc.stdout
     assert "D11_CANONICAL_REPLAY=PASS" in proc.stdout
+    assert "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=True" in proc.stdout
+    assert "D10_PILOT_APPLIED=True" in proc.stdout
+    assert "D10_PILOT_NONZERO_STATE=nonzero_applied" in proc.stdout
 
     lines = [line.strip() for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 2
