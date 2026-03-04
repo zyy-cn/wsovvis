@@ -702,22 +702,36 @@ def test_stage_d8_n6_gradient_coupled_nonzero_pilot_applies_and_backward_step_sm
     }
 
     d6 = apply_stage_d_additive_loss_key(cfg_dict, losses)
+    attr_loss = losses["loss_stage_d_attr"]
+    expected_attr = 0.25 + 1e-6 * float(losses["loss_mask"].detach().item())
     reduced = sum(losses.values())
+    param_before = float(param.detach().item())
     optimizer.zero_grad()
     reduced.backward()
     optimizer.step()
+    param_after = float(param.detach().item())
 
     assert d6["applied"] is True
     assert d6["skip_reason"] == "none"
     assert d6["nonzero_semantics_mode"] == "gradient_coupled_pilot_v1"
+    assert d6["gate_status"]["gradient_coupled_mode_requested"] is True
+    assert d6["gate_status"]["gradient_coupled_tensor_ready"] is True
     assert d6["planned_loss"]["apply_mode"] == "loss_dict_insert_nonzero_gradient_coupled_pilot"
+    assert d6["planned_loss"]["loss_weight"] == pytest.approx(0.25)
+    assert d6["planned_loss"]["gradient_coupled_scale"] == pytest.approx(1e-6)
     assert d6["diagnostics"]["nonzero_semantics_state"] == "nonzero_applied"
+    assert d6["diagnostics"]["nonzero_skip_reason"] == "none"
     assert d6["diagnostics"]["gradient_coupled_pilot_applied"] is True
     assert d6["diagnostics"]["gradient_coupled_pilot_state"] == "applied"
     assert d6["diagnostics"]["gradient_coupled_pilot_skip_reason"] == "none"
-    assert isinstance(losses["loss_stage_d_attr"], torch.Tensor)
-    assert float(losses["loss_stage_d_attr"].item()) > 0.0
+    assert d6["diagnostics"]["gradient_coupled_reference_loss_key"] == "loss_mask"
+    assert isinstance(attr_loss, torch.Tensor)
+    assert attr_loss.dtype == losses["loss_mask"].dtype
+    assert attr_loss.device == losses["loss_mask"].device
+    assert attr_loss.requires_grad is True
+    assert float(attr_loss.item()) == pytest.approx(expected_attr)
     assert param.grad is not None
+    assert param_after != pytest.approx(param_before)
 
 
 def test_stage_d6_n6_gradient_coupled_mode_skip_closed_when_reference_tensor_not_grad_ready(tmp_path: Path) -> None:

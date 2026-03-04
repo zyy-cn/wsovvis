@@ -159,6 +159,35 @@ def test_evaluate_pilot_diagnostics_checks_fail_fast_on_missing_fields() -> None
         )
 
 
+def test_evaluate_pilot_diagnostics_checks_fail_fast_on_inconsistent_applied_contract() -> None:
+    helper = _load_helper_module()
+    on_runtime_cfg = {
+        "stage_d_attribution_d6_loss_key": {
+            "nonzero_semantics_mode": "gradient_coupled_pilot_v1",
+            "nonzero_semantics_enabled_by_config": True,
+            "planned_loss": {
+                "loss_weight": 0.25,
+                "gradient_coupled_scale": 1e-6,
+            },
+            "diagnostics": {
+                "gradient_coupled_pilot_applied": True,
+                "gradient_coupled_pilot_state": "applied",
+                "gradient_coupled_pilot_skip_reason": "none",
+                "nonzero_semantics_state": "skipped",
+                "nonzero_skip_reason": "gradient_coupled_reference_unavailable",
+            },
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="applied=True requires nonzero_semantics_state=nonzero_applied"):
+        helper._evaluate_pilot_diagnostics_checks(
+            on_mode="pilot",
+            on_runtime_cfg=on_runtime_cfg,
+            expected_weight=0.25,
+            pilot_scale=1e-6,
+        )
+
+
 def test_evaluate_pilot_diagnostics_checks_noop_for_non_pilot_mode() -> None:
     helper = _load_helper_module()
     out = helper._evaluate_pilot_diagnostics_checks(
