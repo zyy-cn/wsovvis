@@ -6,6 +6,10 @@
 - N13 is complete (branch-local CI quick-pipeline wiring + output-path discipline hardening).
 - N14 is complete (formal-CI-ready quick-pipeline prep + explicit Stage D gate policy).
 - N15 is complete (platform-specific lightweight CI wiring template for Stage D quick pipeline).
+- N16/N16.r3 CI unblock is complete:
+  - `workflow_dispatch` smoke now unblocked/verified on `staged-nonzero-semantics`.
+  - CI-hosted missing-asset replay-skip compatibility fix validated via authenticated redispatch.
+  - verification run reference: GitHub Actions run `22650332186` (`completed/success`, 2026-03-04 UTC).
 - Current state remains tooling/docs continuity lock, not new training behavior implementation.
 
 ## What is stable and must be preserved
@@ -21,6 +25,10 @@
   - `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`
 - N15 CI wiring template reference:
   - `docs/runbooks/tools/ci_examples/stage_d_quick_pipeline.github_actions.yml`
+- Operator auth continuity note:
+  - `GITHUB_TOKEN` must be exported in the same shell/environment that runs Codex and dispatch commands; inherited env mismatches are a common cause of false auth blockers.
+- CI-hosted replay compatibility note:
+  - if canonical replay checkpoint assets are absent on GitHub-hosted runners, replay may skip gracefully with explicit diagnostics; treat this as expected compatibility behavior, not a Stage D semantic regression.
 
 ## Canonical remote validation discipline (authoritative)
 - Host alias: `gpu4090d`

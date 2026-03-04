@@ -832,6 +832,35 @@ Move from N15 CI-ready template state to a real CI-enabled mirror workflow file 
 
 ---
 
+## 2026-03-04 — N17 completed (docs closure + continuity sync for N16/N16.r3 CI unblock)
+
+### Scope
+Docs-only closure and continuity sync after N16.r3 CI-hosted replay compatibility fix verification.
+
+### Completed
+- Recorded closure state: N16 `workflow_dispatch` smoke is unblocked and verified.
+- Recorded N16.r3 compatibility validation: authenticated redispatch succeeded after CI-hosted missing-asset replay-skip handling.
+- Captured redispatch evidence for continuity: GitHub Actions run `22650332186` (`completed/success`, 2026-03-04 UTC).
+- Added operator continuity note: export `GITHUB_TOKEN` in the same shell/environment that executes Codex/dispatch commands.
+- Documented expected CI-hosted behavior: canonical replay may be skipped gracefully when checkpoint assets are absent; this is expected compatibility behavior, not a Stage D semantic failure.
+- Added continuity pointers to:
+  - `tools/run_stage_d13_ci_quick_pipeline.sh`
+  - `tools/run_stage_d11_canonical_replay.sh`
+  - `docs/STAGE_D_CI_QUICK_PIPELINE_GATE_POLICY.md`
+  - `docs/runbooks/tools/ci_examples/README.md`
+
+### Validation
+- Docs-only sanity checks (file/anchor consistency via grep + markdown inspection).
+- No new remote canonical run required because this step introduces no code/workflow behavior changes.
+
+### Notes
+- Non-goals preserved:
+  - no training/loss/objective semantic changes
+  - no Stage C/D schema changes
+  - no CI logic/runtime behavior changes in this step
+
+---
+
 ## Validation evidence highlights (through Stage D closure + N15)
 
 ### Canonical remote validation discipline (preserved)

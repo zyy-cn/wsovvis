@@ -28,6 +28,11 @@ N14 adds formal-CI-ready policy guidance for gate selection:
 N15 adds a platform CI wiring example for quick-pipeline adoption:
 - `docs/runbooks/tools/ci_examples/stage_d_quick_pipeline.github_actions.yml`
 
+N16/N16.r3 continuity note for CI-enabled mirrors:
+- `workflow_dispatch` smoke is unblocked/verified on `staged-nonzero-semantics`.
+- `GITHUB_TOKEN` must be exported in the same shell/environment that runs Codex/dispatch commands.
+- On GitHub-hosted runners without canonical checkpoint assets, replay may skip gracefully with explicit diagnostics; treat this as expected compatibility behavior, not a Stage D semantic failure.
+
 N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
 - nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
