@@ -129,6 +129,28 @@ decode_b64() {
   printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -d
 }
 
+resolve_conda_sh() {
+  local candidates=(
+    "$HOME/software/miniconda3"
+    "$HOME/miniconda3"
+    "$HOME/anaconda3"
+    "/opt/conda"
+    "/usr/share/miniconda"
+  )
+  local base_path=""
+  local conda_sh=""
+
+  for base_path in "${candidates[@]}"; do
+    conda_sh="$base_path/etc/profile.d/conda.sh"
+    if [[ -f "$conda_sh" ]]; then
+      printf '%s\n' "$conda_sh"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 repo_dir="$(decode_b64 "$1")"
 branch="$(decode_b64 "$2")"
 clone_url="$(decode_b64 "$3")"
@@ -158,6 +180,22 @@ git reset --hard "origin/$branch"
 if [[ "$keep_untracked" != "1" ]]; then
   git clean -fd
 fi
+
+conda_sh="$(resolve_conda_sh)" || {
+  echo "ERROR: unable to resolve conda.sh from candidates: $HOME/software/miniconda3, $HOME/miniconda3, $HOME/anaconda3, /opt/conda, /usr/share/miniconda" >&2
+  exit 3
+}
+conda_base="$(dirname "$(dirname "$(dirname "$conda_sh")")")"
+# shellcheck disable=SC1090
+source "$conda_sh"
+if ! command -v conda >/dev/null 2>&1; then
+  echo "ERROR: conda not found after sourcing $conda_sh" >&2
+  exit 3
+fi
+conda activate wsovvis
+echo "CONDA_BASE=$conda_base"
+echo "CONDA_SH=$conda_sh"
+echo "PY=$(command -v python)"
 
 eval "$env_cmd"
 eval "$verify_cmd"
