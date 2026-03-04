@@ -33,6 +33,9 @@ N16/N16.r3 continuity note for CI-enabled mirrors:
 - `GITHUB_TOKEN` must be exported in the same shell/environment that runs Codex/dispatch commands.
 - On GitHub-hosted runners without canonical checkpoint assets, replay may skip gracefully with explicit diagnostics; treat this as expected compatibility behavior, not a Stage D semantic failure.
 
+N20/N21 continuity note:
+- N20 recorded fallback real-ish replay applied-path evidence; N21 added canonical remote replay/CLI applied-path confirmation PASS.
+
 N4+N7 extend this same path with first-class ON-mode selection:
 - zero-mode quick check (compatibility/regression sentinel)
 - nonzero-mode quick check (semantic validation of constant nonzero additive-loss path)
@@ -166,6 +169,23 @@ tools/run_stage_d10_quick_checks.sh --on-mode pilot --on-weight 0.25 --pilot-sca
 Notes:
 - Use `${PYTHONPATH:-}` (not `$PYTHONPATH`) to avoid shell failures under `set -u`.
 - Keep quick checks targeted and GPU-free unless a task explicitly requires full D9/D10 smoke.
+
+Portable remote replay post-check assertions (prefer `rg`, fallback `grep`):
+
+```bash
+assert_log_has() {
+  local pattern="$1"
+  local log_file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q -- "$pattern" "$log_file"
+  else
+    grep -F -q -- "$pattern" "$log_file"
+  fi
+}
+
+assert_log_has "D11_CANONICAL_REPLAY=PASS" "$REPLAY_LOG"
+assert_log_has "D10_PILOT_APPLIED=True" "$REPLAY_LOG"
+```
 
 ## Common failure modes and quick fixes
 1. Path resolution failures (`FileNotFoundError` for weights/data)
