@@ -22,7 +22,7 @@ echo "layered:$*" >> "${PWD}/order.log"
     helper_stub = f"""#!/usr/bin/env bash
 set -euo pipefail
 {helper_output}
-echo "helper:$*" >> "${PWD}/order.log"
+echo "helper:$*" >> "${{PWD}}/order.log"
 exit {helper_exit_code}
 """
     (tools_dir / "run_stage_d10_layered_fast_gate.sh").write_text(layered_stub, encoding="utf-8")
@@ -166,6 +166,9 @@ def test_n11_replay_surfaces_skip_path_pilot_diagnostics_lines(tmp_path: Path) -
             "D10_PILOT_SKIP_REASON=gradient_coupled_reference_unavailable",
             "D10_PILOT_NONZERO_STATE=skipped",
             "D10_PILOT_NONZERO_SKIP_REASON=gradient_coupled_reference_unavailable",
+            "D10_PILOT_APPLY_MODE=loss_dict_insert_zero",
+            "D10_PILOT_INSERTED_INTO_LOSS_DICT=True",
+            "D10_PILOT_USED_PLACEHOLDER_PATH=False",
         ],
     )
 
@@ -193,6 +196,59 @@ def test_n11_replay_surfaces_skip_path_pilot_diagnostics_lines(tmp_path: Path) -
     assert "D10_PILOT_SKIP_REASON=gradient_coupled_reference_unavailable" in proc.stdout
     assert "D10_PILOT_NONZERO_STATE=skipped" in proc.stdout
     assert "D10_PILOT_NONZERO_SKIP_REASON=gradient_coupled_reference_unavailable" in proc.stdout
+    assert "D10_PILOT_APPLY_MODE=loss_dict_insert_zero" in proc.stdout
+    assert "D10_PILOT_INSERTED_INTO_LOSS_DICT=True" in proc.stdout
+    assert "D10_PILOT_USED_PLACEHOLDER_PATH=False" in proc.stdout
+
+
+def test_n11_replay_surfaces_placeholder_skip_path_pilot_diagnostics_lines(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "tools" / "run_stage_d11_canonical_replay.sh"
+    stub_repo = tmp_path / "stub_repo"
+    _write_stub_scripts(
+        stub_repo,
+        helper_lines=[
+            "D10_PILOT_DIAGNOSTICS_CHECK_ENABLED=True",
+            "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=True",
+            "D10_PILOT_NONZERO_MODE=gradient_coupled_pilot_v1",
+            "D10_PILOT_APPLIED=False",
+            "D10_PILOT_STATE=skipped",
+            "D10_PILOT_SKIP_REASON=gradient_coupled_requires_loss_dict",
+            "D10_PILOT_NONZERO_STATE=skipped",
+            "D10_PILOT_NONZERO_SKIP_REASON=gradient_coupled_requires_loss_dict",
+            "D10_PILOT_APPLY_MODE=placeholder_zero",
+            "D10_PILOT_INSERTED_INTO_LOSS_DICT=False",
+            "D10_PILOT_USED_PLACEHOLDER_PATH=True",
+        ],
+    )
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--repo-root",
+            str(stub_repo),
+            "--python-bin",
+            "bash",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "D11_CANONICAL_REPLAY=PASS" in proc.stdout
+    assert "D10_PILOT_DIAGNOSTICS_CHECK_ENABLED=True" in proc.stdout
+    assert "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=True" in proc.stdout
+    assert "D10_PILOT_NONZERO_MODE=gradient_coupled_pilot_v1" in proc.stdout
+    assert "D10_PILOT_APPLIED=False" in proc.stdout
+    assert "D10_PILOT_STATE=skipped" in proc.stdout
+    assert "D10_PILOT_SKIP_REASON=gradient_coupled_requires_loss_dict" in proc.stdout
+    assert "D10_PILOT_NONZERO_STATE=skipped" in proc.stdout
+    assert "D10_PILOT_NONZERO_SKIP_REASON=gradient_coupled_requires_loss_dict" in proc.stdout
+    assert "D10_PILOT_APPLY_MODE=placeholder_zero" in proc.stdout
+    assert "D10_PILOT_INSERTED_INTO_LOSS_DICT=False" in proc.stdout
+    assert "D10_PILOT_USED_PLACEHOLDER_PATH=True" in proc.stdout
 
 
 def test_n11_replay_fails_fast_when_helper_reports_contradictory_pilot_lines(tmp_path: Path) -> None:

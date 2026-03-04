@@ -139,6 +139,8 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_applied_payload() -> None
     assert out["pilot_state"] == "applied"
     assert out["gate_tensor_ready"] is True
     assert out["apply_mode"] == "loss_dict_insert_nonzero_gradient_coupled_pilot"
+    assert out["inserted_into_loss_dict"] is True
+    assert out["used_placeholder_path"] is False
 
 
 def test_evaluate_pilot_diagnostics_checks_passes_with_small_weight_scale_boundary_values() -> None:
@@ -265,6 +267,8 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_skipped_payload() -> None
     assert out["pilot_state"] == "skipped"
     assert out["gate_tensor_ready"] is False
     assert out["apply_mode"] == "loss_dict_insert_zero"
+    assert out["inserted_into_loss_dict"] is True
+    assert out["used_placeholder_path"] is False
 
 
 def test_evaluate_pilot_diagnostics_checks_passes_with_placeholder_skipped_payload() -> None:
@@ -308,6 +312,68 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_placeholder_skipped_paylo
     assert out["pilot_applied"] is False
     assert out["pilot_state"] == "skipped"
     assert out["apply_mode"] == "placeholder_zero"
+    assert out["inserted_into_loss_dict"] is False
+    assert out["used_placeholder_path"] is True
+
+
+@pytest.mark.parametrize(
+    ("apply_mode", "inserted_into_loss_dict", "used_placeholder_path", "error_pattern"),
+    [
+        (
+            "loss_dict_insert_zero",
+            False,
+            True,
+            "loss_dict_insert_zero requires inserted_into_loss_dict=True and used_placeholder_path=False",
+        ),
+        (
+            "placeholder_zero",
+            True,
+            False,
+            "placeholder_zero requires inserted_into_loss_dict=False and used_placeholder_path=True",
+        ),
+    ],
+)
+def test_evaluate_pilot_diagnostics_checks_fail_fast_on_skipped_apply_mode_indicator_mismatch(
+    apply_mode: str,
+    inserted_into_loss_dict: bool,
+    used_placeholder_path: bool,
+    error_pattern: str,
+) -> None:
+    helper = _load_helper_module()
+    on_runtime_cfg = {
+        "stage_d_attribution_d6_loss_key": {
+            "applied": True,
+            "skip_reason": "none",
+            "nonzero_semantics_mode": "gradient_coupled_pilot_v1",
+            "nonzero_semantics_enabled_by_config": True,
+            "gate_status": {
+                "gradient_coupled_mode_requested": True,
+                "gradient_coupled_tensor_ready": False,
+            },
+            "planned_loss": {
+                "apply_mode": apply_mode,
+                "loss_weight": 0.25,
+                "gradient_coupled_scale": 1e-6,
+            },
+            "diagnostics": {
+                "gradient_coupled_pilot_applied": False,
+                "gradient_coupled_pilot_state": "skipped",
+                "gradient_coupled_pilot_skip_reason": "gradient_coupled_reference_unavailable",
+                "nonzero_semantics_state": "skipped",
+                "nonzero_skip_reason": "gradient_coupled_reference_unavailable",
+                "inserted_into_loss_dict": inserted_into_loss_dict,
+                "used_placeholder_path": used_placeholder_path,
+            },
+        }
+    }
+
+    with pytest.raises(RuntimeError, match=error_pattern):
+        helper._evaluate_pilot_diagnostics_checks(
+            on_mode="pilot",
+            on_runtime_cfg=on_runtime_cfg,
+            expected_weight=0.25,
+            pilot_scale=1e-6,
+        )
 
 
 def test_evaluate_pilot_diagnostics_checks_fail_fast_on_missing_fields() -> None:

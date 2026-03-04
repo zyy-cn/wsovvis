@@ -706,6 +706,9 @@ def main() -> int:
         print(f"D10_PILOT_SKIP_REASON={pilot_results['pilot_skip_reason']}")
         print(f"D10_PILOT_NONZERO_STATE={pilot_results['nonzero_state']}")
         print(f"D10_PILOT_NONZERO_SKIP_REASON={pilot_results['nonzero_skip_reason']}")
+        print(f"D10_PILOT_APPLY_MODE={pilot_results['apply_mode']}")
+        print(f"D10_PILOT_INSERTED_INTO_LOSS_DICT={pilot_results['inserted_into_loss_dict']}")
+        print(f"D10_PILOT_USED_PLACEHOLDER_PATH={pilot_results['used_placeholder_path']}")
     print(f"D10_CHECKS_PASS={results['checks_ok']}")
 
     if results["checks_ok"]:
