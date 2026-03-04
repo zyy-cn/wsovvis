@@ -734,6 +734,72 @@ def test_stage_d8_n6_gradient_coupled_nonzero_pilot_applies_and_backward_step_sm
     assert abs(param_after - param_before) > 0.0
 
 
+def test_stage_d8_n6_gradient_coupled_nonzero_pilot_applies_with_small_weight_scale_and_near_zero_reference(
+    tmp_path: Path,
+) -> None:
+    weight = 1e-9
+    pilot_scale = 1e-6
+    cfg_dict = _build_stage_d8_enabled_cfg(
+        tmp_path,
+        weight=weight,
+        nonzero_semantics_enabled=True,
+        nonzero_semantics_mode="gradient_coupled_pilot_v1",
+        gradient_coupled_scale=pilot_scale,
+    )
+    near_zero_reference = 2e-12
+    offset = float(torch.tensor(near_zero_reference, dtype=torch.float64).sqrt().item())
+    param = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float64))
+    losses: dict[str, torch.Tensor] = {
+        "loss_mask": (param - (1.0 + offset)).pow(2),
+        "loss_dice": 0.5 * (param + 1.0).pow(2),
+    }
+
+    d6 = apply_stage_d_additive_loss_key(cfg_dict, losses)
+    attr_loss = losses["loss_stage_d_attr"]
+    reference_value = float(losses["loss_mask"].detach().item())
+    expected_attr = weight + pilot_scale * reference_value
+
+    assert d6["applied"] is True
+    assert d6["skip_reason"] == "none"
+    assert d6["nonzero_semantics_mode"] == "gradient_coupled_pilot_v1"
+    assert d6["planned_loss"]["apply_mode"] == "loss_dict_insert_nonzero_gradient_coupled_pilot"
+    assert d6["planned_loss"]["loss_weight"] == pytest.approx(weight, abs=1e-18)
+    assert d6["planned_loss"]["gradient_coupled_scale"] == pytest.approx(pilot_scale, abs=1e-18)
+    assert d6["diagnostics"]["gradient_coupled_pilot_applied"] is True
+    assert d6["diagnostics"]["gradient_coupled_pilot_state"] == "applied"
+    assert d6["diagnostics"]["gradient_coupled_pilot_skip_reason"] == "none"
+    assert d6["diagnostics"]["nonzero_semantics_state"] == "nonzero_applied"
+    assert d6["diagnostics"]["nonzero_skip_reason"] == "none"
+    assert isinstance(attr_loss, torch.Tensor)
+    assert attr_loss.requires_grad is True
+    assert float(attr_loss.item()) == pytest.approx(expected_attr, abs=1e-20)
+    assert float(attr_loss.item()) > weight
+
+
+def test_stage_d6_n6_gradient_coupled_mode_skip_closed_when_scale_zero_with_weight_positive(tmp_path: Path) -> None:
+    cfg_dict = _build_stage_d8_enabled_cfg(
+        tmp_path,
+        weight=0.25,
+        nonzero_semantics_enabled=True,
+        nonzero_semantics_mode="gradient_coupled_pilot_v1",
+        gradient_coupled_scale=0.0,
+    )
+    losses: dict[str, torch.Tensor] = {
+        "loss_mask": torch.tensor(1.0, requires_grad=True),
+        "loss_dice": torch.tensor(0.5, requires_grad=True),
+    }
+    d6 = apply_stage_d_additive_loss_key(cfg_dict, losses)
+
+    assert d6["applied"] is False
+    assert d6["skip_reason"] == "invalid_gradient_coupled_scale"
+    assert d6["planned_loss"]["gradient_coupled_scale"] == pytest.approx(0.0)
+    assert d6["diagnostics"]["nonzero_semantics_state"] == "skipped"
+    assert d6["diagnostics"]["nonzero_skip_reason"] == "invalid_gradient_coupled_scale"
+    assert d6["diagnostics"]["gradient_coupled_pilot_state"] == "skipped"
+    assert d6["diagnostics"]["gradient_coupled_pilot_skip_reason"] == "invalid_gradient_coupled_scale"
+    assert "loss_stage_d_attr" not in losses
+
+
 def test_stage_d6_n6_gradient_coupled_mode_skip_closed_when_reference_tensor_not_grad_ready(tmp_path: Path) -> None:
     cfg_dict = _build_stage_d8_enabled_cfg(
         tmp_path,

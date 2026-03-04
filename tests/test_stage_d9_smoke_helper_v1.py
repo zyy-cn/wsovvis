@@ -139,6 +139,84 @@ def test_evaluate_pilot_diagnostics_checks_passes_with_applied_payload() -> None
     assert out["apply_mode"] == "loss_dict_insert_nonzero_gradient_coupled_pilot"
 
 
+def test_evaluate_pilot_diagnostics_checks_passes_with_small_weight_scale_boundary_values() -> None:
+    helper = _load_helper_module()
+    on_runtime_cfg = {
+        "stage_d_attribution_d6_loss_key": {
+            "applied": True,
+            "skip_reason": "none",
+            "nonzero_semantics_mode": "gradient_coupled_pilot_v1",
+            "nonzero_semantics_enabled_by_config": True,
+            "gate_status": {
+                "gradient_coupled_mode_requested": True,
+                "gradient_coupled_tensor_ready": True,
+            },
+            "planned_loss": {
+                "apply_mode": "loss_dict_insert_nonzero_gradient_coupled_pilot",
+                "loss_weight": 1e-9,
+                "gradient_coupled_scale": 1e-6,
+            },
+            "diagnostics": {
+                "gradient_coupled_pilot_applied": True,
+                "gradient_coupled_pilot_state": "applied",
+                "gradient_coupled_pilot_skip_reason": "none",
+                "nonzero_semantics_state": "nonzero_applied",
+                "nonzero_skip_reason": "none",
+            },
+        }
+    }
+
+    out = helper._evaluate_pilot_diagnostics_checks(
+        on_mode="pilot",
+        on_runtime_cfg=on_runtime_cfg,
+        expected_weight=1e-9,
+        pilot_scale=1e-6,
+    )
+
+    assert out["enabled"] is True
+    assert out["checks_ok"] is True
+    assert out["loss_weight"] == pytest.approx(1e-9, abs=1e-18)
+    assert out["gradient_coupled_scale"] == pytest.approx(1e-6, abs=1e-18)
+    assert out["pilot_applied"] is True
+    assert out["pilot_state"] == "applied"
+
+
+def test_evaluate_pilot_diagnostics_checks_fail_fast_on_zero_scale_invalid_payload() -> None:
+    helper = _load_helper_module()
+    on_runtime_cfg = {
+        "stage_d_attribution_d6_loss_key": {
+            "applied": False,
+            "skip_reason": "invalid_gradient_coupled_scale",
+            "nonzero_semantics_mode": "gradient_coupled_pilot_v1",
+            "nonzero_semantics_enabled_by_config": True,
+            "gate_status": {
+                "gradient_coupled_mode_requested": True,
+                "gradient_coupled_tensor_ready": False,
+            },
+            "planned_loss": {
+                "apply_mode": "loss_dict_insert_zero",
+                "loss_weight": 0.25,
+                "gradient_coupled_scale": 0.0,
+            },
+            "diagnostics": {
+                "gradient_coupled_pilot_applied": False,
+                "gradient_coupled_pilot_state": "skipped",
+                "gradient_coupled_pilot_skip_reason": "invalid_gradient_coupled_scale",
+                "nonzero_semantics_state": "skipped",
+                "nonzero_skip_reason": "invalid_gradient_coupled_scale",
+            },
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="applied=True and skip_reason=none"):
+        helper._evaluate_pilot_diagnostics_checks(
+            on_mode="pilot",
+            on_runtime_cfg=on_runtime_cfg,
+            expected_weight=0.25,
+            pilot_scale=0.0,
+        )
+
+
 def test_evaluate_pilot_diagnostics_checks_passes_with_skipped_payload() -> None:
     helper = _load_helper_module()
     on_runtime_cfg = {
