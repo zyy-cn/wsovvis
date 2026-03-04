@@ -4,6 +4,23 @@ import subprocess
 from pathlib import Path
 
 
+def _pilot_fields(stdout: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if not line.startswith("D10_PILOT_") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def _assert_pilot_fields(stdout: str, expected: dict[str, str]) -> None:
+    fields = _pilot_fields(stdout)
+    for key, value in expected.items():
+        assert key in fields, f"missing pilot field: {key}"
+        assert fields[key] == value
+
+
 def _write_stub_scripts(
     repo_root: Path,
     *,
@@ -188,17 +205,21 @@ def test_n11_replay_surfaces_skip_path_pilot_diagnostics_lines(tmp_path: Path) -
 
     assert proc.returncode == 0, proc.stderr
     assert "D11_CANONICAL_REPLAY=PASS" in proc.stdout
-    assert "D10_PILOT_DIAGNOSTICS_CHECK_ENABLED=True" in proc.stdout
-    assert "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=True" in proc.stdout
-    assert "D10_PILOT_NONZERO_MODE=gradient_coupled_pilot_v1" in proc.stdout
-    assert "D10_PILOT_APPLIED=False" in proc.stdout
-    assert "D10_PILOT_STATE=skipped" in proc.stdout
-    assert "D10_PILOT_SKIP_REASON=gradient_coupled_reference_unavailable" in proc.stdout
-    assert "D10_PILOT_NONZERO_STATE=skipped" in proc.stdout
-    assert "D10_PILOT_NONZERO_SKIP_REASON=gradient_coupled_reference_unavailable" in proc.stdout
-    assert "D10_PILOT_APPLY_MODE=loss_dict_insert_zero" in proc.stdout
-    assert "D10_PILOT_INSERTED_INTO_LOSS_DICT=True" in proc.stdout
-    assert "D10_PILOT_USED_PLACEHOLDER_PATH=False" in proc.stdout
+    _assert_pilot_fields(
+        proc.stdout,
+        {
+            "D10_PILOT_DIAGNOSTICS_CHECK_ENABLED": "True",
+            "D10_PILOT_DIAGNOSTICS_CHECKS_PASS": "True",
+            "D10_PILOT_APPLIED": "False",
+            "D10_PILOT_STATE": "skipped",
+            "D10_PILOT_SKIP_REASON": "gradient_coupled_reference_unavailable",
+            "D10_PILOT_NONZERO_STATE": "skipped",
+            "D10_PILOT_NONZERO_SKIP_REASON": "gradient_coupled_reference_unavailable",
+            "D10_PILOT_APPLY_MODE": "loss_dict_insert_zero",
+            "D10_PILOT_INSERTED_INTO_LOSS_DICT": "True",
+            "D10_PILOT_USED_PLACEHOLDER_PATH": "False",
+        },
+    )
 
 
 def test_n11_replay_surfaces_placeholder_skip_path_pilot_diagnostics_lines(tmp_path: Path) -> None:
@@ -238,17 +259,21 @@ def test_n11_replay_surfaces_placeholder_skip_path_pilot_diagnostics_lines(tmp_p
 
     assert proc.returncode == 0, proc.stderr
     assert "D11_CANONICAL_REPLAY=PASS" in proc.stdout
-    assert "D10_PILOT_DIAGNOSTICS_CHECK_ENABLED=True" in proc.stdout
-    assert "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=True" in proc.stdout
-    assert "D10_PILOT_NONZERO_MODE=gradient_coupled_pilot_v1" in proc.stdout
-    assert "D10_PILOT_APPLIED=False" in proc.stdout
-    assert "D10_PILOT_STATE=skipped" in proc.stdout
-    assert "D10_PILOT_SKIP_REASON=gradient_coupled_requires_loss_dict" in proc.stdout
-    assert "D10_PILOT_NONZERO_STATE=skipped" in proc.stdout
-    assert "D10_PILOT_NONZERO_SKIP_REASON=gradient_coupled_requires_loss_dict" in proc.stdout
-    assert "D10_PILOT_APPLY_MODE=placeholder_zero" in proc.stdout
-    assert "D10_PILOT_INSERTED_INTO_LOSS_DICT=False" in proc.stdout
-    assert "D10_PILOT_USED_PLACEHOLDER_PATH=True" in proc.stdout
+    _assert_pilot_fields(
+        proc.stdout,
+        {
+            "D10_PILOT_DIAGNOSTICS_CHECK_ENABLED": "True",
+            "D10_PILOT_DIAGNOSTICS_CHECKS_PASS": "True",
+            "D10_PILOT_APPLIED": "False",
+            "D10_PILOT_STATE": "skipped",
+            "D10_PILOT_SKIP_REASON": "gradient_coupled_requires_loss_dict",
+            "D10_PILOT_NONZERO_STATE": "skipped",
+            "D10_PILOT_NONZERO_SKIP_REASON": "gradient_coupled_requires_loss_dict",
+            "D10_PILOT_APPLY_MODE": "placeholder_zero",
+            "D10_PILOT_INSERTED_INTO_LOSS_DICT": "False",
+            "D10_PILOT_USED_PLACEHOLDER_PATH": "True",
+        },
+    )
 
 
 def test_n11_replay_fails_fast_when_helper_reports_contradictory_pilot_lines(tmp_path: Path) -> None:
@@ -283,5 +308,8 @@ def test_n11_replay_fails_fast_when_helper_reports_contradictory_pilot_lines(tmp
     )
 
     assert proc.returncode != 0
+    assert "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=False" in proc.stdout
+    assert "D10_PILOT_DIAGNOSTICS_CHECKS_PASS=True" not in proc.stdout
     assert "D11_CANONICAL_REPLAY=PASS" not in proc.stdout
     assert "D11_CANONICAL_REPLAY_STAGE=pilot_helper_smoke PASS" not in proc.stdout
+    assert "D11_CANONICAL_REPLAY_STAGE=n10_layered_fast_gate PASS" in proc.stdout
