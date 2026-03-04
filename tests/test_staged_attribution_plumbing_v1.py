@@ -731,7 +731,7 @@ def test_stage_d8_n6_gradient_coupled_nonzero_pilot_applies_and_backward_step_sm
     assert attr_loss.requires_grad is True
     assert float(attr_loss.item()) == pytest.approx(expected_attr)
     assert param.grad is not None
-    assert param_after != pytest.approx(param_before)
+    assert abs(param_after - param_before) > 0.0
 
 
 def test_stage_d6_n6_gradient_coupled_mode_skip_closed_when_reference_tensor_not_grad_ready(tmp_path: Path) -> None:
