@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from wsovvis.metrics import build_ws_metrics_summary_v1
 from wsovvis.track_feature_export import build_normalized_bridge_input_from_real_stageb_sidecar
 from wsovvis.training import build_stagec_semantic_plumbing_c3_minimal_coupled
 
@@ -114,6 +115,17 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("kl", "sym_kl"),
         default="sym_kl",
         help="C8 temporal consistency divergence mode.",
+    )
+    p.add_argument(
+        "--emit-ws-metrics-summary-v1",
+        action="store_true",
+        help="Optionally emit ws_metrics_summary_v1 artifact for micro-training output.",
+    )
+    p.add_argument(
+        "--ws-metrics-summary-out-json",
+        type=Path,
+        default=None,
+        help="Optional path for ws_metrics_summary_v1 artifact. Requires --emit-ws-metrics-summary-v1.",
     )
     p.add_argument("--out-json", type=Path, default=None, help="Optional path to write full run summary JSON")
     return p
@@ -383,6 +395,33 @@ def _build_synthetic_batch() -> dict[str, Any]:
     }
 
 
+def _extract_predicted_label_ids(final_step: dict[str, Any]) -> list[int]:
+    ids: list[int] = []
+    for item in final_step.get("candidate_label_ids", ()):
+        if isinstance(item, int):
+            ids.append(int(item))
+    return sorted(set(ids))
+
+
+def _build_ws_eval_bundle(result: dict[str, Any]) -> dict[str, Any]:
+    predicted = _extract_predicted_label_ids(result["final"])
+    return {
+        "gt_entities": [int(x) for x in result.get("selected_positive_label_ids", ())],
+        "predicted_entities": predicted,
+        "predictions_by_missing_rate": {
+            "0.0": predicted,
+            "0.5": predicted,
+            "1.0": predicted,
+        },
+        "source_metadata": {
+            "assignment_backend": result.get("final", {}).get("assignment_backend"),
+            "selected_video_id": result.get("selected_video_id"),
+            "steps": result.get("steps"),
+            "seed": result.get("seed"),
+        },
+    }
+
+
 def main() -> int:
     args = _build_parser().parse_args()
     if args.steps < 1:
@@ -487,6 +526,21 @@ def main() -> int:
         "final": final,
         "all_steps": step_summaries,
     }
+
+    if args.emit_ws_metrics_summary_v1:
+        ws_eval_bundle = _build_ws_eval_bundle(result)
+        ws_summary = build_ws_metrics_summary_v1(ws_eval_bundle)
+        result["ws_metrics_summary_v1"] = ws_summary
+        result["ws_metrics_summary_v1_enabled"] = True
+        if args.ws_metrics_summary_out_json is not None:
+            args.ws_metrics_summary_out_json.parent.mkdir(parents=True, exist_ok=True)
+            args.ws_metrics_summary_out_json.write_text(
+                json.dumps(ws_summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(f"C5_WS_METRICS_SUMMARY_PATH {args.ws_metrics_summary_out_json}")
+    else:
+        result["ws_metrics_summary_v1_enabled"] = False
 
     print("C5_SUMMARY", json.dumps(result, sort_keys=True))
     if args.out_json is not None:

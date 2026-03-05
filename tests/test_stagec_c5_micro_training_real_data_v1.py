@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -303,3 +305,64 @@ def test_real_backed_loader_prefers_non_agnostic_annotation_variant(tmp_path: Pa
     assert batch["selected_video_id"] == "1001"
     assert batch["positive_label_ids"] == (7, 8)
     assert batch["split_annotation_json_path"].endswith("lvvis_val.json")
+
+
+def test_c10c_parser_defaults_ws_metrics_summary_disabled() -> None:
+    module = _load_c5_script_module()
+    parser = module._build_parser()
+    args = parser.parse_args([])
+    assert args.emit_ws_metrics_summary_v1 is False
+    assert args.ws_metrics_summary_out_json is None
+
+
+def test_c10c_synthetic_run_can_emit_ws_metrics_summary_artifact(tmp_path: Path) -> None:
+    out_json = tmp_path / "micro_summary.json"
+    ws_json = tmp_path / "ws_metrics_summary_v1.json"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "tools/run_stagec_c5_micro_training.py",
+            "--data-mode",
+            "synthetic_v1",
+            "--steps",
+            "1",
+            "--out-json",
+            str(out_json),
+            "--emit-ws-metrics-summary-v1",
+            "--ws-metrics-summary-out-json",
+            str(ws_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "C5_WS_METRICS_SUMMARY_PATH" in proc.stdout
+    run_summary = json.loads(out_json.read_text(encoding="utf-8"))
+    ws_summary = json.loads(ws_json.read_text(encoding="utf-8"))
+    assert run_summary["ws_metrics_summary_v1_enabled"] is True
+    assert run_summary["ws_metrics_summary_v1"]["schema_name"] == "wsovvis.ws_metrics_summary_v1"
+    assert ws_summary["schema_name"] == "wsovvis.ws_metrics_summary_v1"
+    assert "metrics" in ws_summary
+
+
+def test_c10c_default_behavior_no_ws_metrics_summary_when_flag_disabled(tmp_path: Path) -> None:
+    out_json = tmp_path / "micro_summary_default.json"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "tools/run_stagec_c5_micro_training.py",
+            "--data-mode",
+            "synthetic_v1",
+            "--steps",
+            "1",
+            "--out-json",
+            str(out_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "C5_WS_METRICS_SUMMARY_PATH" not in proc.stdout
+    run_summary = json.loads(out_json.read_text(encoding="utf-8"))
+    assert run_summary["ws_metrics_summary_v1_enabled"] is False
+    assert "ws_metrics_summary_v1" not in run_summary
