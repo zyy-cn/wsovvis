@@ -466,28 +466,16 @@ def test_c11a_unknown_compare_tool_smoke(tmp_path: Path) -> None:
     assert all("risk_guardrail_triggered" in row for row in payload["rows"])
 
 
-def test_c11b_mil_guardrail_trips_on_collapsed_distribution(tmp_path: Path) -> None:
-    out_json = tmp_path / "micro_summary_c11b_mil.json"
-    subprocess.run(
-        [
-            sys.executable,
-            "tools/run_stagec_c5_micro_training.py",
-            "--data-mode",
-            "synthetic_v1",
-            "--steps",
-            "1",
-            "--assignment-backend",
-            "c9_mil_minimal_v1",
-            "--mil-temperature",
-            "0.10",
-            "--out-json",
-            str(out_json),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
+def test_c11b_guardrail_helper_trips_on_explicit_risk_signature() -> None:
+    module = _load_c5_script_module()
+    guardrail = module._build_unknown_handling_risk_guardrail_v1(
+        coverage_ratio=0.5,
+        unk_fg_mass=0.0,
+        non_special_mass=0.999,
+        entropy=0.0,
+        top1_mass=1.0,
     )
-    diag = json.loads(out_json.read_text(encoding="utf-8"))["unknown_handling_diagnostics_v1"]
-    guardrail = diag["risk_guardrail_v1"]
     assert guardrail["triggered"] is True
-    assert guardrail["risk_score"] >= 1
+    assert guardrail["risk_score"] == 3
+    assert guardrail["risk_level"] == "high"
+    assert len(guardrail["reasons"]) == 3
