@@ -67,6 +67,12 @@ Canonical N11 replay sequence (N12 bundled entry):
 
 ```bash
 bash tools/run_stage_d11_canonical_replay.sh
+
+# optional bootstrap preflight check before replay
+bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root "$PWD"
+
+# optional bootstrap fix + enforced re-check before replay
+bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-fix --bootstrap-runner-root "$PWD"
 ```
 
 Branch-local CI mirror for quick pipeline wiring (N13):
