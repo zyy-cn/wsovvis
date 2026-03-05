@@ -366,3 +366,92 @@ def test_c10c_default_behavior_no_ws_metrics_summary_when_flag_disabled(tmp_path
     run_summary = json.loads(out_json.read_text(encoding="utf-8"))
     assert run_summary["ws_metrics_summary_v1_enabled"] is False
     assert "ws_metrics_summary_v1" not in run_summary
+
+
+def test_c11a_synthetic_run_emits_unknown_handling_diagnostics_v1(tmp_path: Path) -> None:
+    out_json = tmp_path / "micro_summary_c11a.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "tools/run_stagec_c5_micro_training.py",
+            "--data-mode",
+            "synthetic_v1",
+            "--steps",
+            "1",
+            "--out-json",
+            str(out_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_summary = json.loads(out_json.read_text(encoding="utf-8"))
+    diag = run_summary["unknown_handling_diagnostics_v1"]
+    assert diag["schema_name"] == "wsovvis.stagec_unknown_handling_diagnostics_v1"
+    assert diag["schema_version"] == "1.0"
+    assert diag["assignment_backend"] == run_summary["final"]["assignment_backend"]
+    assert diag["selected_num_positive_labels"] == run_summary["selected_num_positive_labels"]
+    assert "mass" in diag and "distribution" in diag and "coverage" in diag and "losses" in diag
+    assert diag["mass"]["bg_mass"] >= 0.0
+    assert diag["mass"]["unk_fg_mass"] >= 0.0
+    assert diag["mass"]["non_special_mass"] >= 0.0
+    assert "unk_vs_bg_ratio" in diag["mass"]
+
+
+def test_c11a_unknown_compare_tool_smoke(tmp_path: Path) -> None:
+    sink_json = tmp_path / "sink.json"
+    mil_json = tmp_path / "mil.json"
+    compare_json = tmp_path / "compare.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "tools/run_stagec_c5_micro_training.py",
+            "--data-mode",
+            "synthetic_v1",
+            "--steps",
+            "1",
+            "--assignment-backend",
+            "c2_sinkhorn_minimal_v1",
+            "--out-json",
+            str(sink_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "tools/run_stagec_c5_micro_training.py",
+            "--data-mode",
+            "synthetic_v1",
+            "--steps",
+            "1",
+            "--assignment-backend",
+            "c9_mil_minimal_v1",
+            "--out-json",
+            str(mil_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "tools/compare_stagec_unknown_handling_v1.py",
+            "--inputs",
+            str(sink_json),
+            str(mil_json),
+            "--out-json",
+            str(compare_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "backend|video_id|selected_num_positive_labels|bg_mass|unk_fg_mass|non_special_mass|" in proc.stdout
+    payload = json.loads(compare_json.read_text(encoding="utf-8"))
+    assert payload["schema_name"] == "wsovvis.stagec_unknown_handling_compare_v1"
+    assert payload["num_rows"] == 2
+    assert all("backend_config_echo" in row for row in payload["rows"])

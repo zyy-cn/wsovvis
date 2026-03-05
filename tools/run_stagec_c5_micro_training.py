@@ -423,6 +423,45 @@ def _build_ws_eval_bundle(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_ratio(numerator: float, denominator: float, eps: float = 1e-12) -> float:
+    return float(numerator) / max(float(denominator), float(eps))
+
+
+def _build_unknown_handling_diagnostics_v1(result: dict[str, Any]) -> dict[str, Any]:
+    final = result["final"]
+    backend_echo = dict(final.get("c4_backend_echo", {}))
+    bg_mass = float(final.get("c4_bg_mass_fraction", 0.0))
+    unk_fg_mass = float(final.get("c4_unk_fg_mass_fraction", 0.0))
+    non_special_mass = float(final.get("c4_non_special_mass_fraction", 0.0))
+    return {
+        "schema_name": "wsovvis.stagec_unknown_handling_diagnostics_v1",
+        "schema_version": "1.0",
+        "video_id": str(result.get("selected_video_id")),
+        "selected_num_positive_labels": int(result.get("selected_num_positive_labels", 0)),
+        "assignment_backend": str(final.get("assignment_backend", "")),
+        "mass": {
+            "bg_mass": bg_mass,
+            "unk_fg_mass": unk_fg_mass,
+            "non_special_mass": non_special_mass,
+            "unk_vs_bg_ratio": _safe_ratio(unk_fg_mass, bg_mass),
+        },
+        "distribution": {
+            "entropy": float(final.get("c4_mean_row_entropy", 0.0)),
+            "top1_mass": float(final.get("c4_mean_top1_mass", 0.0)),
+        },
+        "coverage": {
+            "coverage_ratio": float(final.get("c4_coverage_ratio_present", 0.0)),
+            "coverage_loss": float(final.get("loss_component_coverage", 0.0)),
+        },
+        "losses": {
+            "alignment_loss": float(final.get("loss_component_alignment", 0.0)),
+            "fg_not_bg_loss": float(final.get("loss_component_fg_not_bg", 0.0)),
+            "total_loss": float(final.get("loss_total", 0.0)),
+        },
+        "backend_config_echo": backend_echo,
+    }
+
+
 def main() -> int:
     args = _build_parser().parse_args()
     if args.steps < 1:
@@ -527,6 +566,7 @@ def main() -> int:
         "final": final,
         "all_steps": step_summaries,
     }
+    result["unknown_handling_diagnostics_v1"] = _build_unknown_handling_diagnostics_v1(result)
 
     if args.emit_ws_metrics_summary_v1:
         ws_eval_bundle = _build_ws_eval_bundle(result)
