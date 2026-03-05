@@ -83,6 +83,12 @@ class StageCCandidateSetV1:
     candidate_matrix: np.ndarray
 
 
+def _safe_fraction(numerator: float, denominator: float) -> float:
+    if denominator <= 0.0:
+        return 0.0
+    return float(numerator) / float(denominator)
+
+
 def _is_valid_label_id(label_id: object) -> bool:
     return (isinstance(label_id, int) and not isinstance(label_id, bool)) or (
         isinstance(label_id, str) and bool(label_id)
@@ -454,6 +460,144 @@ def run_stagec_assignment_sinkhorn_minimal_v1(
         valid_column_mask=valid_column_mask,
         backend="c2_sinkhorn_minimal_v1",
     )
+
+
+def summarize_stagec_assignment_observability_c4_minimal_v1(
+    *,
+    batch: StageCSemanticBatchV1,
+    assignment: StageCSemanticAssignmentOutputV1,
+    positive_label_ids: Sequence[int | str] | None = None,
+    track_objectness: np.ndarray | None = None,
+    high_objectness_threshold: float = 0.5,
+    bg_dominance_threshold: float = 0.5,
+    coverage_presence_eps: float = 1e-6,
+    config_echo: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
+    """C4 minimal observability summary for Stage C assignment outputs."""
+
+    normalized = normalize_stagec_semantic_batch_v1(batch)
+    _require(isinstance(assignment.soft_assignment, np.ndarray), "assignment.soft_assignment", "must be numpy ndarray")
+    _require(
+        assignment.soft_assignment.shape == normalized.candidate_matrix.shape,
+        "assignment.soft_assignment.shape",
+        "must match [N_track, N_cand]",
+    )
+    _require(np.isfinite(assignment.soft_assignment).all(), "assignment.soft_assignment", "must be finite")
+    _require(
+        np.isfinite(float(high_objectness_threshold)),
+        "high_objectness_threshold",
+        "must be finite",
+    )
+    _require(np.isfinite(float(bg_dominance_threshold)), "bg_dominance_threshold", "must be finite")
+    _require(
+        np.isfinite(float(coverage_presence_eps)) and float(coverage_presence_eps) >= 0.0,
+        "coverage_presence_eps",
+        "must be finite and >= 0",
+    )
+
+    n_track, n_cand = normalized.candidate_matrix.shape
+    valid_track_mask = assignment.valid_track_mask if assignment.valid_track_mask is not None else np.ones((n_track,), dtype=np.bool_)
+    valid_column_mask = (
+        assignment.valid_column_mask if assignment.valid_column_mask is not None else np.ones((n_cand,), dtype=np.bool_)
+    )
+    valid_rows = np.flatnonzero(valid_track_mask)
+    valid_cols = np.flatnonzero(valid_column_mask)
+
+    valid_p = assignment.soft_assignment[np.ix_(valid_rows, valid_cols)].astype(np.float64, copy=False)
+    valid_label_ids = tuple(normalized.candidate_label_ids[col] for col in valid_cols)
+
+    bg_pos = valid_label_ids.index(STAGEC_BG_LABEL_ID) if STAGEC_BG_LABEL_ID in valid_label_ids else None
+    unk_fg_pos = valid_label_ids.index(STAGEC_UNK_FG_LABEL_ID) if STAGEC_UNK_FG_LABEL_ID in valid_label_ids else None
+
+    total_mass = float(valid_p.sum())
+    bg_mass = float(valid_p[:, int(bg_pos)].sum()) if bg_pos is not None else 0.0
+    unk_fg_mass = float(valid_p[:, int(unk_fg_pos)].sum()) if unk_fg_pos is not None else 0.0
+    non_special_mass = max(0.0, total_mass - bg_mass - unk_fg_mass)
+
+    assignment_mass = {
+        "total_mass": total_mass,
+        "bg_mass_fraction": _safe_fraction(bg_mass, total_mass),
+        "unk_fg_mass_fraction": _safe_fraction(unk_fg_mass, total_mass),
+        "non_special_mass_fraction": _safe_fraction(non_special_mass, total_mass),
+    }
+
+    positive_ids = tuple(
+        _normalize_label_id(label_id, field_path=f"positive_label_ids[{idx}]")
+        for idx, label_id in enumerate(positive_label_ids or ())
+    )
+    positive_set = set(positive_ids)
+    positive_cols = [idx for idx, label_id in enumerate(valid_label_ids) if label_id in positive_set]
+    if positive_cols and valid_rows.size > 0:
+        pos_p = valid_p[:, positive_cols]
+        positive_presence = 1.0 - np.prod(1.0 - np.clip(pos_p, 0.0, 1.0), axis=0)
+        positives_covered = int(np.sum(positive_presence > float(coverage_presence_eps)))
+    else:
+        positives_covered = 0
+    positives_present = int(len(positive_cols))
+    positives_uncovered = max(0, positives_present - positives_covered)
+    coverage = {
+        "positives_total": int(len(positive_ids)),
+        "positives_present_in_candidates": positives_present,
+        "positives_covered": positives_covered,
+        "positives_uncovered": positives_uncovered,
+        "coverage_ratio_present": _safe_fraction(float(positives_covered), float(positives_present)),
+    }
+
+    if valid_rows.size > 0 and valid_cols.size > 0:
+        row_sums = np.maximum(valid_p.sum(axis=1, keepdims=True), 1e-12)
+        row_p = valid_p / row_sums
+        row_entropy = -np.sum(row_p * np.log(np.maximum(row_p, 1e-12)), axis=1)
+        top1_mass = np.max(row_p, axis=1)
+        distribution = {
+            "mean_row_entropy": float(np.mean(row_entropy)),
+            "mean_top1_mass": float(np.mean(top1_mass)),
+            "valid_row_count_for_entropy": int(row_entropy.shape[0]),
+        }
+    else:
+        distribution = {
+            "mean_row_entropy": 0.0,
+            "mean_top1_mass": 0.0,
+            "valid_row_count_for_entropy": 0,
+        }
+
+    if track_objectness is None:
+        objectness = np.ones((n_track,), dtype=np.float64)
+    else:
+        _require(isinstance(track_objectness, np.ndarray), "track_objectness", "must be numpy ndarray when provided")
+        _require(track_objectness.shape == (n_track,), "track_objectness.shape", "must match [N_track]")
+        _require(np.isfinite(track_objectness).all(), "track_objectness", "must be finite")
+        objectness = track_objectness.astype(np.float64, copy=False)
+    high_objectness_mask = np.logical_and(valid_track_mask, objectness >= float(high_objectness_threshold))
+
+    bg_prob_by_track = np.zeros((n_track,), dtype=np.float64)
+    if bg_pos is not None and valid_rows.size > 0:
+        bg_prob_by_track[valid_rows] = valid_p[:, int(bg_pos)]
+    bg_dominant_mask = np.logical_and(high_objectness_mask, bg_prob_by_track >= float(bg_dominance_threshold))
+    high_objectness_count = int(np.sum(high_objectness_mask))
+    bg_dominant_count = int(np.sum(bg_dominant_mask))
+    fg_not_bg_monitor = {
+        "high_objectness_track_count": high_objectness_count,
+        "high_objectness_bg_dominant_count": bg_dominant_count,
+        "high_objectness_bg_dominant_fraction": _safe_fraction(float(bg_dominant_count), float(high_objectness_count)),
+        "high_objectness_threshold": float(high_objectness_threshold),
+        "bg_dominance_threshold": float(bg_dominance_threshold),
+    }
+
+    backend_echo = {
+        "assignment_backend": assignment.backend,
+        "special_columns_present": {
+            "bg": bool(bg_pos is not None),
+            "unk_fg": bool(unk_fg_pos is not None),
+        },
+        "config": dict(config_echo) if isinstance(config_echo, Mapping) else {},
+    }
+    return {
+        "assignment_mass": assignment_mass,
+        "coverage": coverage,
+        "distribution": distribution,
+        "fg_not_bg_monitor": fg_not_bg_monitor,
+        "backend_echo": backend_echo,
+    }
 
 
 def compute_stagec_semantic_loss_hook_stub_v1(

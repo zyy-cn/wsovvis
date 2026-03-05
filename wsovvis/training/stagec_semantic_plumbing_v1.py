@@ -16,6 +16,7 @@ from wsovvis.track_feature_export.stagec_semantic_slice_v1 import (
     compute_stagec_semantic_loss_hook_stub_v1,
     run_stagec_assignment_sinkhorn_minimal_v1,
     run_stagec_assignment_stub_v1,
+    summarize_stagec_assignment_observability_c4_minimal_v1,
 )
 
 
@@ -30,6 +31,19 @@ def _err(field_path: str, rule_summary: str) -> StageCSemanticPlumbingError:
 def _require(condition: bool, field_path: str, rule_summary: str) -> None:
     if not condition:
         raise _err(field_path, rule_summary)
+
+
+def _build_c4_backend_config_echo(cfg: Mapping[str, Any], assignment_backend: str) -> dict[str, Any]:
+    return {
+        "assignment_backend": assignment_backend,
+        "sinkhorn_temperature": float(cfg.get("sinkhorn_temperature", 0.10)),
+        "sinkhorn_iterations": int(cfg.get("sinkhorn_iterations", 20)),
+        "sinkhorn_tolerance": float(cfg.get("sinkhorn_tolerance", 1e-6)),
+        "sinkhorn_eps": float(cfg.get("sinkhorn_eps", 1e-12)),
+        "sinkhorn_bg_capacity_weight": float(cfg.get("sinkhorn_bg_capacity_weight", 1.5)),
+        "sinkhorn_unk_fg_capacity_weight": float(cfg.get("sinkhorn_unk_fg_capacity_weight", 1.5)),
+        "c3_fg_not_bg_weight": float(cfg.get("c3_fg_not_bg_weight", 0.10)),
+    }
 
 
 def build_stagec_semantic_plumbing_c0(
@@ -102,6 +116,13 @@ def build_stagec_semantic_plumbing_c0(
             loss_weight=float(loss_weight),
         )
     )
+    c4_observability = summarize_stagec_assignment_observability_c4_minimal_v1(
+        batch=batch,
+        assignment=assignment,
+        positive_label_ids=None,
+        track_objectness=None,
+        config_echo=_build_c4_backend_config_echo(cfg, assignment.backend),
+    )
 
     inserted_into_loss_dict = False
     if isinstance(loss_dict, dict):
@@ -128,7 +149,10 @@ def build_stagec_semantic_plumbing_c0(
             "valid_tracks": int(assignment.valid_track_mask.sum()),
             "valid_columns": int(assignment.valid_column_mask.sum()),
         },
-        "diagnostics": dict(loss_output.diagnostics),
+        "diagnostics": {
+            **dict(loss_output.diagnostics),
+            "c4_observability": c4_observability,
+        },
     }
 
 
@@ -336,6 +360,18 @@ def build_stagec_semantic_plumbing_c3_minimal_coupled(
         fg_not_bg_weight=float(cfg.get("c3_fg_not_bg_weight", 0.10)),
         eps=float(cfg.get("c3_eps", 1e-8)),
     )
+    objectness_np: np.ndarray | None
+    if track_objectness_tensor is None:
+        objectness_np = None
+    else:
+        objectness_np = track_objectness_tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+    c4_observability = summarize_stagec_assignment_observability_c4_minimal_v1(
+        batch=batch,
+        assignment=assignment,
+        positive_label_ids=positive_label_ids,
+        track_objectness=objectness_np,
+        config_echo=_build_c4_backend_config_echo(cfg, assignment.backend),
+    )
 
     inserted_into_loss_dict = False
     if isinstance(loss_dict, dict):
@@ -377,5 +413,8 @@ def build_stagec_semantic_plumbing_c3_minimal_coupled(
             "metadata_path": str(proto_cache.metadata_path),
             "tensor_path": str(proto_cache.tensor_path),
         },
-        "diagnostics": dict(loss_output.diagnostics),
+        "diagnostics": {
+            **dict(loss_output.diagnostics),
+            "c4_observability": c4_observability,
+        },
     }

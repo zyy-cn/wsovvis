@@ -69,6 +69,7 @@ from .stagec_semantic_slice_v1 import (
     run_stagec_assignment_sinkhorn_minimal_v1,
     run_stagec_assignment_stub_v1,
     select_stagec_topk_label_ids_from_scores_v1,
+    summarize_stagec_assignment_observability_c4_minimal_v1,
 )
 from .v1_core import (
     ExportContractError,
@@ -136,6 +137,7 @@ __all__ = [
     "run_stagec_assignment_stub_v1",
     "save_stagec_clip_text_prototype_cache_v1",
     "select_stagec_topk_label_ids_from_scores_v1",
+    "summarize_stagec_assignment_observability_c4_minimal_v1",
     "validate_track_feature_export_v1",
     "write_stagec1_mil_artifacts",
 ]
