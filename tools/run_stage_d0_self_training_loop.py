@@ -18,6 +18,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Refine mode applied before rounds after round0",
     )
     p.add_argument(
+        "--round-policy",
+        choices=("none", "minimal_curriculum_v1"),
+        default="none",
+        help="Optional round-level policy gate applied during round input construction (round>=1)",
+    )
+    p.add_argument(
         "--tiny-pinned",
         action="store_true",
         help="Enable tiny/canonical smoke mode with synthetic fallback seed",
@@ -121,6 +127,45 @@ def _minimal_refine(previous_round_output: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _apply_round_policy(
+    *,
+    round_index: int,
+    round_policy: str,
+    previous_candidate_ids: list[int],
+    refined_candidate_ids: list[int],
+) -> tuple[list[int], bool, str, dict[str, Any]]:
+    if round_policy == "none":
+        return refined_candidate_ids, False, "round_policy=none; no round-policy gating applied", {}
+    if round_policy != "minimal_curriculum_v1":
+        raise ValueError(f"unsupported --round-policy: {round_policy}")
+    if round_index < 1:
+        return (
+            refined_candidate_ids,
+            False,
+            "round_policy=minimal_curriculum_v1 is active only for round>=1",
+            {"k": 1, "reason": "round<1"},
+        )
+
+    k = 1
+    base_set = set(previous_candidate_ids)
+    additions = [label_id for label_id in refined_candidate_ids if label_id not in base_set]
+    kept_additions = additions[:k]
+    kept_set = set(kept_additions)
+    gated_candidate_ids = [label_id for label_id in refined_candidate_ids if label_id in base_set or label_id in kept_set]
+    dropped_additions = [label_id for label_id in additions if label_id not in kept_set]
+    notes = (
+        "round_policy=minimal_curriculum_v1 cap_additions_k=1 "
+        f"(input_additions={len(additions)}, kept={len(kept_additions)}, dropped={len(dropped_additions)})"
+    )
+    stats: dict[str, Any] = {
+        "k": k,
+        "input_additions_count": len(additions),
+        "kept_addition_ids": kept_additions,
+        "dropped_addition_ids": dropped_additions,
+    }
+    return gated_candidate_ids, True, notes, stats
+
+
 def _build_round_input_summary(
     *,
     round_index: int,
@@ -202,15 +247,31 @@ def main() -> int:
                 refined_ids = _as_int_list(refine_summary["output_candidate_label_ids"])
             else:
                 refined_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
+
+            previous_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
+            gated_ids, round_policy_applied, round_policy_notes, round_policy_stats = _apply_round_policy(
+                round_index=round_index,
+                round_policy=str(args.round_policy),
+                previous_candidate_ids=previous_ids,
+                refined_candidate_ids=refined_ids,
+            )
             current_state = {
                 "source_kind": "previous_round_output",
                 "source_path": None,
                 "selected_video_id": previous_round_output.get("selected_video_id"),
                 "positive_label_ids": _as_int_list(previous_round_output.get("positive_label_ids")),
-                "candidate_label_ids": refined_ids,
+                "candidate_label_ids": gated_ids,
                 "assignment_backend": previous_round_output.get("assignment_backend", ""),
                 "ws_metrics_summary_v1": current_state.get("ws_metrics_summary_v1"),
             }
+        else:
+            round_policy_applied = False
+            round_policy_notes = (
+                "round_policy=minimal_curriculum_v1 is active only for round>=1"
+                if args.round_policy == "minimal_curriculum_v1"
+                else "round_policy=none; no round-policy gating applied"
+            )
+            round_policy_stats = {"reason": "round0_seed"}
 
         round_input = _build_round_input_summary(
             round_index=round_index,
@@ -229,6 +290,10 @@ def main() -> int:
             "tiny_pinned": bool(args.tiny_pinned),
             "refine_mode_requested": str(args.refine_mode),
             "refine_applied": bool(refine_summary is not None and refine_summary.get("applied") is True),
+            "round_policy_name": str(args.round_policy),
+            "round_policy_applied": bool(round_policy_applied),
+            "round_policy_notes": str(round_policy_notes),
+            "round_policy_stats": round_policy_stats,
             "round_input_summary": round_input,
             "round_output_summary": round_output,
             "ws_metrics_summary_v1": current_state.get("ws_metrics_summary_v1"),
@@ -261,6 +326,23 @@ def main() -> int:
         "round_index_start": int(args.round_index),
         "max_rounds": int(args.max_rounds),
         "refine_mode": str(args.refine_mode),
+        "round_policy_name": str(args.round_policy),
+        "round_policy_applied": any(bool(s.get("round_policy_applied")) for s in round_summaries),
+        "round_policy_notes": (
+            "round_policy=none; no round-policy gating applied"
+            if args.round_policy == "none"
+            else "round_policy=minimal_curriculum_v1 cap_additions_k=1 on round>=1"
+        ),
+        "round_policy_stats": {
+            "rounds_with_policy_applied": [
+                int(s.get("round_index"))
+                for s in round_summaries
+                if bool(s.get("round_policy_applied"))
+            ],
+            "policy_applied_round_count": int(
+                sum(1 for s in round_summaries if bool(s.get("round_policy_applied")))
+            ),
+        },
         "tiny_pinned": bool(args.tiny_pinned),
         "rounds_executed": int(len(round_summaries)),
         "round_paths": round_paths,

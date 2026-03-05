@@ -38,6 +38,8 @@ def test_d0_tiny_round0_pass_through_no_refine(tmp_path: Path) -> None:
             "1",
             "--refine-mode",
             "none",
+            "--round-policy",
+            "none",
             "--round-summary-root",
             str(round_root),
             "--out-json",
@@ -52,6 +54,8 @@ def test_d0_tiny_round0_pass_through_no_refine(tmp_path: Path) -> None:
     assert round0["round_index"] == 0
     assert round0["refine_mode_requested"] == "none"
     assert round0["refine_applied"] is False
+    assert round0["round_policy_name"] == "none"
+    assert round0["round_policy_applied"] is False
     assert round0["round_input_summary"]["source_kind"] == "tiny_pinned_synthetic_seed"
     assert round0["round_output_summary"]["orchestration_status"] == "pass_through_baseline"
 
@@ -71,6 +75,8 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
             "2",
             "--refine-mode",
             "minimal",
+            "--round-policy",
+            "minimal_curriculum_v1",
             "--round-summary-root",
             str(round_root),
             "--out-json",
@@ -91,6 +97,10 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
     assert round1["round_index"] == 1
     assert round1["refine_mode_requested"] == "minimal"
     assert round1["refine_applied"] is True
+    assert round1["round_policy_name"] == "minimal_curriculum_v1"
+    assert round1["round_policy_applied"] is True
+    assert "cap_additions_k=1" in round1["round_policy_notes"]
+    assert round1["round_policy_stats"]["k"] == 1
     assert round1["round_input_summary"]["source_kind"] == "previous_round_output"
     refine_summary = round1["round_input_summary"]["refine_summary"]
     assert refine_summary["applied"] is True
@@ -98,6 +108,9 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
     assert 909001 in round1["round_output_summary"]["candidate_label_ids"]
     assert run_summary["schema_name"] == "wsovvis.stage_d_loop_summary_v1"
     assert run_summary["schema_version"] == "1.0"
+    assert run_summary["round_policy_name"] == "minimal_curriculum_v1"
+    assert run_summary["round_policy_applied"] is True
+    assert run_summary["round_policy_stats"]["policy_applied_round_count"] == 1
     assert len(run_summary["round_paths"]) == 2
 
 
@@ -122,6 +135,8 @@ def test_d0_stagec_contract_validation_rejects_missing_video_id(tmp_path: Path) 
             "1",
             "--refine-mode",
             "none",
+            "--round-policy",
+            "none",
             "--round-summary-root",
             str(tmp_path / "rounds_bad"),
             "--out-json",
@@ -130,3 +145,23 @@ def test_d0_stagec_contract_validation_rejects_missing_video_id(tmp_path: Path) 
     )
     assert proc.returncode != 0
     assert "selected_video_id" in proc.stderr
+
+
+def test_d0_round_policy_cli_rejects_invalid_choice() -> None:
+    proc = _run(
+        [
+            "--tiny-pinned",
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "1",
+            "--refine-mode",
+            "none",
+            "--round-policy",
+            "invalid_policy",
+            "--round-summary-root",
+            "outputs/stage_d0_round_summaries_invalid",
+        ]
+    )
+    assert proc.returncode != 0
+    assert "invalid choice" in proc.stderr
