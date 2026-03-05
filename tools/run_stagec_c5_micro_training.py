@@ -26,10 +26,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=20260305, help="Global random seed")
     p.add_argument("--lr", type=float, default=0.08, help="Optimizer learning rate")
     p.add_argument(
+        "--assignment-backend",
+        choices=("c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1"),
+        default="c2_sinkhorn_minimal_v1",
+        help="Stage C attribution backend for micro-training compare.",
+    )
+    p.add_argument(
         "--sinkhorn-temperature",
         type=float,
         default=0.10,
         help="C2 Sinkhorn temperature (tau). Primary sweep factor for C6.",
+    )
+    p.add_argument(
+        "--mil-temperature",
+        type=float,
+        default=0.10,
+        help="C9 MIL minimal temperature for row-wise softmax assignment.",
     )
     p.add_argument("--cache-root", type=Path, default=Path("/tmp/wsovvis_stagec_c5_clip_cache"), help="C1 prototype cache root")
     p.add_argument(
@@ -387,8 +399,9 @@ def main() -> int:
         "enabled": True,
         "loss_key": "loss_stage_c_semantic",
         "loss_weight": 1.0,
-        "assignment_backend": "c2_sinkhorn_minimal_v1",
+        "assignment_backend": str(args.assignment_backend),
         "sinkhorn_temperature": float(args.sinkhorn_temperature),
+        "mil_temperature": float(args.mil_temperature),
         "sinkhorn_iterations": 20,
         "sinkhorn_tolerance": 1e-6,
         "sinkhorn_eps": 1e-12,
@@ -444,12 +457,15 @@ def main() -> int:
         "steps": int(args.steps),
         "lr": float(args.lr),
         "sinkhorn_temperature": float(args.sinkhorn_temperature),
+        "mil_temperature": float(args.mil_temperature),
+        "assignment_backend_requested": str(args.assignment_backend),
         "temporal_consistency_enabled": bool(args.temporal_consistency_enabled),
         "temporal_consistency_weight": float(args.temporal_consistency_weight),
         "temporal_consistency_mode": str(args.temporal_consistency_mode),
         "min_positive_labels": int(args.min_positive_labels),
         "preferred_video_id": args.preferred_video_id,
         "backend_locked": final["assignment_backend"] == "c2_sinkhorn_minimal_v1",
+        "backend_match_requested": final["assignment_backend"] == str(args.assignment_backend),
         "final": final,
         "all_steps": step_summaries,
     }
