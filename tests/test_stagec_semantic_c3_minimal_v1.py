@@ -94,7 +94,7 @@ def test_stagec_c3_minimal_loss_changes_when_transport_p_changes() -> None:
         track_features=np.array(
             [
                 [1.0, 0.0],
-                [0.0, 1.0],
+                [1.0, 0.0],
             ],
             dtype=np.float32,
         ),
