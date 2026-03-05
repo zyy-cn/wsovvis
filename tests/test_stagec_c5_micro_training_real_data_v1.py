@@ -396,6 +396,13 @@ def test_c11a_synthetic_run_emits_unknown_handling_diagnostics_v1(tmp_path: Path
     assert diag["mass"]["unk_fg_mass"] >= 0.0
     assert diag["mass"]["non_special_mass"] >= 0.0
     assert "unk_vs_bg_ratio" in diag["mass"]
+    guardrail = diag["risk_guardrail_v1"]
+    assert guardrail["schema_name"] == "wsovvis.stagec_unknown_handling_risk_guardrail_v1"
+    assert guardrail["schema_version"] == "1.0"
+    assert isinstance(guardrail["triggered"], bool)
+    assert isinstance(guardrail["risk_score"], int)
+    assert guardrail["risk_level"] in {"none", "low", "medium", "high"}
+    assert isinstance(guardrail["reasons"], list)
 
 
 def test_c11a_unknown_compare_tool_smoke(tmp_path: Path) -> None:
@@ -451,7 +458,36 @@ def test_c11a_unknown_compare_tool_smoke(tmp_path: Path) -> None:
         check=True,
     )
     assert "backend|video_id|selected_num_positive_labels|bg_mass|unk_fg_mass|non_special_mass|" in proc.stdout
+    assert "risk_guardrail_triggered|risk_guardrail_score|risk_guardrail_level|risk_guardrail_reasons" in proc.stdout
     payload = json.loads(compare_json.read_text(encoding="utf-8"))
     assert payload["schema_name"] == "wsovvis.stagec_unknown_handling_compare_v1"
     assert payload["num_rows"] == 2
     assert all("backend_config_echo" in row for row in payload["rows"])
+    assert all("risk_guardrail_triggered" in row for row in payload["rows"])
+
+
+def test_c11b_mil_guardrail_trips_on_collapsed_distribution(tmp_path: Path) -> None:
+    out_json = tmp_path / "micro_summary_c11b_mil.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "tools/run_stagec_c5_micro_training.py",
+            "--data-mode",
+            "synthetic_v1",
+            "--steps",
+            "1",
+            "--assignment-backend",
+            "c9_mil_minimal_v1",
+            "--mil-temperature",
+            "0.10",
+            "--out-json",
+            str(out_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    diag = json.loads(out_json.read_text(encoding="utf-8"))["unknown_handling_diagnostics_v1"]
+    guardrail = diag["risk_guardrail_v1"]
+    assert guardrail["triggered"] is True
+    assert guardrail["risk_score"] >= 1

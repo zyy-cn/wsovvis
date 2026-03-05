@@ -427,12 +427,76 @@ def _safe_ratio(numerator: float, denominator: float, eps: float = 1e-12) -> flo
     return float(numerator) / max(float(denominator), float(eps))
 
 
+def _build_unknown_handling_risk_guardrail_v1(
+    *,
+    coverage_ratio: float,
+    unk_fg_mass: float,
+    non_special_mass: float,
+    entropy: float,
+    top1_mass: float,
+) -> dict[str, Any]:
+    checks: list[tuple[str, bool, str]] = [
+        (
+            "coverage_drop",
+            coverage_ratio < 0.75,
+            f"coverage_ratio={coverage_ratio:.6f} < 0.75",
+        ),
+        (
+            "special_mass_starved",
+            unk_fg_mass < 1e-4 and non_special_mass > 0.98,
+            f"unk_fg_mass={unk_fg_mass:.6e} < 1e-4 while non_special_mass={non_special_mass:.6f} > 0.98",
+        ),
+        (
+            "distribution_collapse",
+            entropy < 1e-3 and top1_mass > 0.999,
+            f"entropy={entropy:.6e} < 1e-3 and top1_mass={top1_mass:.6f} > 0.999",
+        ),
+    ]
+    triggered = [name for name, ok, _ in checks if ok]
+    reasons = [reason for _, ok, reason in checks if ok]
+    score = len(triggered)
+    if score >= 3:
+        level = "high"
+    elif score == 2:
+        level = "medium"
+    elif score == 1:
+        level = "low"
+    else:
+        level = "none"
+    return {
+        "schema_name": "wsovvis.stagec_unknown_handling_risk_guardrail_v1",
+        "schema_version": "1.0",
+        "triggered": score > 0,
+        "risk_score": int(score),
+        "risk_level": level,
+        "triggered_checks": triggered,
+        "reasons": reasons,
+        "thresholds": {
+            "coverage_ratio_lt": 0.75,
+            "unk_fg_mass_lt": 1e-4,
+            "non_special_mass_gt": 0.98,
+            "entropy_lt": 1e-3,
+            "top1_mass_gt": 0.999,
+        },
+    }
+
+
 def _build_unknown_handling_diagnostics_v1(result: dict[str, Any]) -> dict[str, Any]:
     final = result["final"]
     backend_echo = dict(final.get("c4_backend_echo", {}))
     bg_mass = float(final.get("c4_bg_mass_fraction", 0.0))
     unk_fg_mass = float(final.get("c4_unk_fg_mass_fraction", 0.0))
     non_special_mass = float(final.get("c4_non_special_mass_fraction", 0.0))
+    entropy = float(final.get("c4_mean_row_entropy", 0.0))
+    top1_mass = float(final.get("c4_mean_top1_mass", 0.0))
+    coverage_ratio = float(final.get("c4_coverage_ratio_present", 0.0))
+    guardrail = _build_unknown_handling_risk_guardrail_v1(
+        coverage_ratio=coverage_ratio,
+        unk_fg_mass=unk_fg_mass,
+        non_special_mass=non_special_mass,
+        entropy=entropy,
+        top1_mass=top1_mass,
+    )
     return {
         "schema_name": "wsovvis.stagec_unknown_handling_diagnostics_v1",
         "schema_version": "1.0",
@@ -446,11 +510,11 @@ def _build_unknown_handling_diagnostics_v1(result: dict[str, Any]) -> dict[str, 
             "unk_vs_bg_ratio": _safe_ratio(unk_fg_mass, bg_mass),
         },
         "distribution": {
-            "entropy": float(final.get("c4_mean_row_entropy", 0.0)),
-            "top1_mass": float(final.get("c4_mean_top1_mass", 0.0)),
+            "entropy": entropy,
+            "top1_mass": top1_mass,
         },
         "coverage": {
-            "coverage_ratio": float(final.get("c4_coverage_ratio_present", 0.0)),
+            "coverage_ratio": coverage_ratio,
             "coverage_loss": float(final.get("loss_component_coverage", 0.0)),
         },
         "losses": {
@@ -459,6 +523,7 @@ def _build_unknown_handling_diagnostics_v1(result: dict[str, Any]) -> dict[str, 
             "total_loss": float(final.get("loss_total", 0.0)),
         },
         "backend_config_echo": backend_echo,
+        "risk_guardrail_v1": guardrail,
     }
 
 

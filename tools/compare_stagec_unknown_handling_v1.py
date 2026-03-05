@@ -35,6 +35,9 @@ def _diag_row(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     dist = diag.get("distribution", {})
     coverage = diag.get("coverage", {})
     losses = diag.get("losses", {})
+    guardrail = diag.get("risk_guardrail_v1", {})
+    guardrail_reasons = guardrail.get("reasons", [])
+    guardrail_reason_text = "; ".join(str(x) for x in guardrail_reasons if isinstance(x, str))
     row = {
         "source_json": str(path),
         "video_id": str(diag.get("video_id", payload.get("selected_video_id", ""))),
@@ -51,6 +54,10 @@ def _diag_row(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "alignment_loss": float(losses.get("alignment_loss", 0.0)),
         "fg_not_bg_loss": float(losses.get("fg_not_bg_loss", 0.0)),
         "total_loss": float(losses.get("total_loss", 0.0)),
+        "risk_guardrail_triggered": bool(guardrail.get("triggered", False)),
+        "risk_guardrail_score": int(guardrail.get("risk_score", 0)),
+        "risk_guardrail_level": str(guardrail.get("risk_level", "none")),
+        "risk_guardrail_reasons": guardrail_reason_text,
         "backend_config_echo": diag.get("backend_config_echo", {}),
     }
     return row
@@ -59,7 +66,8 @@ def _diag_row(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
 def _print_table(rows: list[dict[str, Any]]) -> None:
     print(
         "backend|video_id|selected_num_positive_labels|bg_mass|unk_fg_mass|non_special_mass|"
-        "unk_vs_bg_ratio|entropy|top1_mass|coverage_ratio|coverage_loss|alignment_loss|fg_not_bg_loss|total_loss"
+        "unk_vs_bg_ratio|entropy|top1_mass|coverage_ratio|coverage_loss|alignment_loss|fg_not_bg_loss|total_loss|"
+        "risk_guardrail_triggered|risk_guardrail_score|risk_guardrail_level|risk_guardrail_reasons"
     )
     for row in rows:
         print(
@@ -67,7 +75,9 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
             f"{row['bg_mass']:.12f}|{row['unk_fg_mass']:.12f}|{row['non_special_mass']:.12f}|"
             f"{row['unk_vs_bg_ratio']:.6f}|{row['entropy']:.12f}|{row['top1_mass']:.12f}|"
             f"{row['coverage_ratio']:.12f}|{row['coverage_loss']:.12f}|{row['alignment_loss']:.12f}|"
-            f"{row['fg_not_bg_loss']:.12f}|{row['total_loss']:.12f}"
+            f"{row['fg_not_bg_loss']:.12f}|{row['total_loss']:.12f}|"
+            f"{int(row['risk_guardrail_triggered'])}|{row['risk_guardrail_score']}|"
+            f"{row['risk_guardrail_level']}|{row['risk_guardrail_reasons']}"
         )
 
 
