@@ -87,6 +87,8 @@ def _seed_from_stagec_summary(path: Path) -> dict[str, Any]:
             f"or selected_positive_label_ids: {path}"
         )
     ws_metrics = payload.get("ws_metrics_summary_v1")
+    unknown_diag = payload.get("unknown_handling_diagnostics_v1")
+    risk_guardrail = unknown_diag.get("risk_guardrail_v1") if isinstance(unknown_diag, dict) else None
     return {
         "source_kind": "stagec_summary_json",
         "source_path": str(path.resolve()),
@@ -95,6 +97,7 @@ def _seed_from_stagec_summary(path: Path) -> dict[str, Any]:
         "candidate_label_ids": candidate_ids,
         "assignment_backend": str(payload.get("assignment_backend_requested", "")),
         "ws_metrics_summary_v1": ws_metrics if isinstance(ws_metrics, dict) else None,
+        "upstream_risk_guardrail_v1": risk_guardrail if isinstance(risk_guardrail, dict) else None,
     }
 
 
@@ -107,6 +110,7 @@ def _seed_from_tiny_pinned() -> dict[str, Any]:
         "candidate_label_ids": [101, 202, 303],
         "assignment_backend": "d0_tiny_seed_v1",
         "ws_metrics_summary_v1": None,
+        "upstream_risk_guardrail_v1": None,
     }
 
 
@@ -176,6 +180,7 @@ def _build_round_input_summary(
     refine_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     ws_metrics = state.get("ws_metrics_summary_v1")
+    upstream_risk_guardrail = state.get("upstream_risk_guardrail_v1")
     return {
         "schema_name": "wsovvis.stage_d_round_input_summary_v1",
         "schema_version": "1.0",
@@ -190,6 +195,7 @@ def _build_round_input_summary(
         "candidate_label_ids": _as_int_list(state.get("candidate_label_ids")),
         "assignment_backend": str(state.get("assignment_backend", "")),
         "ws_metrics_summary_v1_present": isinstance(ws_metrics, dict),
+        "upstream_risk_guardrail_v1_present": isinstance(upstream_risk_guardrail, dict),
         "refine_summary": refine_summary,
     }
 
@@ -241,6 +247,9 @@ def main() -> int:
 
     for round_index in range(int(args.round_index), int(args.max_rounds)):
         refine_summary: dict[str, Any] | None = None
+        candidate_count_before = 0
+        round_policy_kept_count = 0
+        round_policy_dropped_count = 0
         if previous_round_output is not None:
             if args.refine_mode == "minimal":
                 refine_summary = _minimal_refine(previous_round_output)
@@ -249,12 +258,15 @@ def main() -> int:
                 refined_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
 
             previous_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
+            candidate_count_before = int(len(previous_ids))
             gated_ids, round_policy_applied, round_policy_notes, round_policy_stats = _apply_round_policy(
                 round_index=round_index,
                 round_policy=str(args.round_policy),
                 previous_candidate_ids=previous_ids,
                 refined_candidate_ids=refined_ids,
             )
+            round_policy_kept_count = int(len(_as_int_list(round_policy_stats.get("kept_addition_ids"))))
+            round_policy_dropped_count = int(len(_as_int_list(round_policy_stats.get("dropped_addition_ids"))))
             current_state = {
                 "source_kind": "previous_round_output",
                 "source_path": None,
@@ -263,6 +275,7 @@ def main() -> int:
                 "candidate_label_ids": gated_ids,
                 "assignment_backend": previous_round_output.get("assignment_backend", ""),
                 "ws_metrics_summary_v1": current_state.get("ws_metrics_summary_v1"),
+                "upstream_risk_guardrail_v1": current_state.get("upstream_risk_guardrail_v1"),
             }
         else:
             round_policy_applied = False
@@ -272,6 +285,7 @@ def main() -> int:
                 else "round_policy=none; no round-policy gating applied"
             )
             round_policy_stats = {"reason": "round0_seed"}
+            candidate_count_before = int(len(_as_int_list(current_state.get("candidate_label_ids"))))
 
         round_input = _build_round_input_summary(
             round_index=round_index,
@@ -282,6 +296,10 @@ def main() -> int:
             refine_summary=refine_summary,
         )
         round_output = _build_round_output_summary(round_input=round_input)
+        round_refine_added_label_ids = (
+            _as_int_list(refine_summary.get("added_label_ids")) if isinstance(refine_summary, dict) else []
+        )
+        candidate_count_after = int(len(_as_int_list(round_output.get("candidate_label_ids"))))
         round_summary = {
             "schema_name": "wsovvis.stage_d_round_summary_v1",
             "schema_version": "1.0",
@@ -294,9 +312,17 @@ def main() -> int:
             "round_policy_applied": bool(round_policy_applied),
             "round_policy_notes": str(round_policy_notes),
             "round_policy_stats": round_policy_stats,
+            "round_refine_additions_count": int(len(round_refine_added_label_ids)),
+            "round_refine_added_label_ids": round_refine_added_label_ids,
+            "round_policy_kept_count": int(round_policy_kept_count),
+            "round_policy_dropped_count": int(round_policy_dropped_count),
+            "candidate_label_ids_count_before": int(candidate_count_before),
+            "candidate_label_ids_count_after": int(candidate_count_after),
+            "candidate_label_ids_count_delta": int(candidate_count_after - candidate_count_before),
             "round_input_summary": round_input,
             "round_output_summary": round_output,
             "ws_metrics_summary_v1": current_state.get("ws_metrics_summary_v1"),
+            "upstream_risk_guardrail_v1": current_state.get("upstream_risk_guardrail_v1"),
         }
 
         input_path = args.round_summary_root / f"round{round_index}_input_summary.json"
@@ -343,6 +369,27 @@ def main() -> int:
                 sum(1 for s in round_summaries if bool(s.get("round_policy_applied")))
             ),
         },
+        "round_refine_additions_count_total": int(
+            sum(int(s.get("round_refine_additions_count", 0)) for s in round_summaries)
+        ),
+        "round_policy_kept_count_total": int(sum(int(s.get("round_policy_kept_count", 0)) for s in round_summaries)),
+        "round_policy_dropped_count_total": int(
+            sum(int(s.get("round_policy_dropped_count", 0)) for s in round_summaries)
+        ),
+        "candidate_label_ids_count_before_start": (
+            int(round_summaries[0].get("candidate_label_ids_count_before")) if round_summaries else 0
+        ),
+        "candidate_label_ids_count_after_end": (
+            int(round_summaries[-1].get("candidate_label_ids_count_after")) if round_summaries else 0
+        ),
+        "candidate_label_ids_count_delta_total": (
+            int(round_summaries[-1].get("candidate_label_ids_count_after", 0))
+            - int(round_summaries[0].get("candidate_label_ids_count_before", 0))
+            if round_summaries
+            else 0
+        ),
+        "upstream_risk_guardrail_v1_present": isinstance(seed_state.get("upstream_risk_guardrail_v1"), dict),
+        "upstream_risk_guardrail_v1": seed_state.get("upstream_risk_guardrail_v1"),
         "tiny_pinned": bool(args.tiny_pinned),
         "rounds_executed": int(len(round_summaries)),
         "round_paths": round_paths,

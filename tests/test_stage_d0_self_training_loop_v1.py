@@ -56,8 +56,16 @@ def test_d0_tiny_round0_pass_through_no_refine(tmp_path: Path) -> None:
     assert round0["refine_applied"] is False
     assert round0["round_policy_name"] == "none"
     assert round0["round_policy_applied"] is False
+    assert round0["round_refine_additions_count"] == 0
+    assert round0["round_refine_added_label_ids"] == []
+    assert round0["round_policy_kept_count"] == 0
+    assert round0["round_policy_dropped_count"] == 0
+    assert round0["candidate_label_ids_count_before"] == 3
+    assert round0["candidate_label_ids_count_after"] == 3
+    assert round0["candidate_label_ids_count_delta"] == 0
     assert round0["round_input_summary"]["source_kind"] == "tiny_pinned_synthetic_seed"
     assert round0["round_output_summary"]["orchestration_status"] == "pass_through_baseline"
+    assert round0["upstream_risk_guardrail_v1"] is None
 
 
 def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) -> None:
@@ -101,6 +109,13 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
     assert round1["round_policy_applied"] is True
     assert "cap_additions_k=1" in round1["round_policy_notes"]
     assert round1["round_policy_stats"]["k"] == 1
+    assert round1["round_refine_additions_count"] == 1
+    assert round1["round_refine_added_label_ids"] == [909001]
+    assert round1["round_policy_kept_count"] == 1
+    assert round1["round_policy_dropped_count"] == 0
+    assert round1["candidate_label_ids_count_before"] == 3
+    assert round1["candidate_label_ids_count_after"] == 4
+    assert round1["candidate_label_ids_count_delta"] == 1
     assert round1["round_input_summary"]["source_kind"] == "previous_round_output"
     refine_summary = round1["round_input_summary"]["refine_summary"]
     assert refine_summary["applied"] is True
@@ -111,6 +126,14 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
     assert run_summary["round_policy_name"] == "minimal_curriculum_v1"
     assert run_summary["round_policy_applied"] is True
     assert run_summary["round_policy_stats"]["policy_applied_round_count"] == 1
+    assert run_summary["round_refine_additions_count_total"] == 1
+    assert run_summary["round_policy_kept_count_total"] == 1
+    assert run_summary["round_policy_dropped_count_total"] == 0
+    assert run_summary["candidate_label_ids_count_before_start"] == 3
+    assert run_summary["candidate_label_ids_count_after_end"] == 4
+    assert run_summary["candidate_label_ids_count_delta_total"] == 1
+    assert run_summary["upstream_risk_guardrail_v1_present"] is False
+    assert run_summary["upstream_risk_guardrail_v1"] is None
     assert len(run_summary["round_paths"]) == 2
 
 
@@ -145,6 +168,40 @@ def test_d0_stagec_contract_validation_rejects_missing_video_id(tmp_path: Path) 
     )
     assert proc.returncode != 0
     assert "selected_video_id" in proc.stderr
+
+
+def test_d0_stagec_contract_validation_rejects_missing_candidate_labels(tmp_path: Path) -> None:
+    stagec_path = tmp_path / "bad_stagec_summary_missing_candidates.json"
+    stagec_path.write_text(
+        json.dumps(
+            {
+                "selected_video_id": "video_1",
+                "selected_positive_label_ids": [],
+                "final": {"candidate_label_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(stagec_path),
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "1",
+            "--refine-mode",
+            "none",
+            "--round-policy",
+            "none",
+            "--round-summary-root",
+            str(tmp_path / "rounds_bad_candidates"),
+            "--out-json",
+            str(tmp_path / "bad_candidates_out.json"),
+        ]
+    )
+    assert proc.returncode != 0
+    assert "candidate labels" in proc.stderr
 
 
 def test_d0_round_policy_cli_rejects_invalid_choice() -> None:
