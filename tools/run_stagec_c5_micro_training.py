@@ -74,6 +74,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional explicit annotation JSON path used for positive-label lookup.",
     )
+    p.add_argument(
+        "--temporal-consistency-enabled",
+        action="store_true",
+        help="Enable C8 minimal temporal semantic consistency term.",
+    )
+    p.add_argument(
+        "--temporal-consistency-weight",
+        type=float,
+        default=0.15,
+        help="Weight for C8 temporal semantic consistency term when enabled.",
+    )
+    p.add_argument(
+        "--temporal-consistency-mode",
+        choices=("kl", "sym_kl"),
+        default="sym_kl",
+        help="C8 temporal consistency divergence mode.",
+    )
     p.add_argument("--out-json", type=Path, default=None, help="Optional path to write full run summary JSON")
     return p
 
@@ -93,6 +110,8 @@ def _step_summary(step: int, out: dict[str, Any], loss_value: float) -> dict[str
         "loss_component_alignment": float(diag.get("component_alignment", 0.0)),
         "loss_component_coverage": float(diag.get("component_coverage", 0.0)),
         "loss_component_fg_not_bg": float(diag.get("component_fg_not_bg", 0.0)),
+        "loss_component_temporal_consistency": float(diag.get("component_temporal_consistency", 0.0)),
+        "temporal_pair_count": int(diag.get("temporal_pair_count", 0)),
         "assignment_backend": str(out.get("assignment_backend")),
         "candidate_label_ids": list(out["candidate_summary"]["candidate_label_ids"]),
         "c4_bg_mass_fraction": float(c4["assignment_mass"]["bg_mass_fraction"]),
@@ -264,6 +283,18 @@ def load_real_backed_micro_batch(
     selected_tracks = selected_video["tracks"][:max_tracks]
     track_features_np = np.asarray([track["embedding"] for track in selected_tracks], dtype=np.float32)
     track_objectness_np = np.asarray([track["objectness_score"] for track in selected_tracks], dtype=np.float32)
+    sorted_temporal_indices = sorted(
+        range(len(selected_tracks)),
+        key=lambda idx: (
+            int(selected_tracks[idx].get("start_frame_idx", 0)),
+            int(selected_tracks[idx].get("end_frame_idx", 0)),
+            int(selected_tracks[idx].get("track_id", idx)),
+        ),
+    )
+    temporal_pair_indices = tuple(
+        (int(sorted_temporal_indices[i]), int(sorted_temporal_indices[i + 1]))
+        for i in range(max(0, len(sorted_temporal_indices) - 1))
+    )
     if track_features_np.ndim != 2 or track_features_np.shape[0] == 0 or track_features_np.shape[1] <= 0:
         raise ValueError("real-backed track feature tensor is invalid")
     if not np.isfinite(track_features_np).all() or not np.isfinite(track_objectness_np).all():
@@ -286,6 +317,8 @@ def load_real_backed_micro_batch(
         "selected_num_tracks_used": int(track_features_np.shape[0]),
         "selected_num_positive_labels": int(len(positive_label_ids)),
         "selected_positive_label_ids": [int(x) for x in positive_label_ids],
+        "temporal_pair_indices": temporal_pair_indices,
+        "selected_num_temporal_pairs": int(len(temporal_pair_indices)),
         "split_annotation_json_path": str(selected_split_json_path) if selected_split_json_path is not None else None,
         "bridge_summary": bridge_summary,
     }
@@ -319,6 +352,8 @@ def _build_synthetic_batch() -> dict[str, Any]:
         "selected_num_tracks_total": 4,
         "selected_num_tracks_used": 4,
         "selected_num_positive_labels": 2,
+        "temporal_pair_indices": ((0, 1), (1, 2), (2, 3)),
+        "selected_num_temporal_pairs": 3,
         "split_annotation_json_path": None,
         "bridge_summary": None,
     }
@@ -330,6 +365,8 @@ def main() -> int:
         raise ValueError("--steps must be >= 1")
     if not np.isfinite(args.lr) or args.lr <= 0:
         raise ValueError("--lr must be finite and > 0")
+    if not np.isfinite(args.temporal_consistency_weight) or args.temporal_consistency_weight < 0:
+        raise ValueError("--temporal-consistency-weight must be finite and >= 0")
 
     _set_seed(args.seed)
     if args.data_mode == "real_sidecar_v1":
@@ -361,6 +398,9 @@ def main() -> int:
         "c3_alignment_weight": 1.0,
         "c3_coverage_weight": 0.30,
         "c3_fg_not_bg_weight": 0.10,
+        "c8_temporal_consistency_enabled": bool(args.temporal_consistency_enabled),
+        "c8_temporal_consistency_weight": float(args.temporal_consistency_weight),
+        "c8_temporal_consistency_mode": str(args.temporal_consistency_mode),
     }
 
     step_summaries: list[dict[str, Any]] = []
@@ -377,6 +417,7 @@ def main() -> int:
             cache_root=args.cache_root,
             label_text_by_id=batch["label_text_by_id"],
             track_objectness_tensor=batch["track_objectness_tensor"],
+            temporal_pair_indices=batch.get("temporal_pair_indices"),
         )
         loss = out["semantic_loss_tensor"]
         loss.backward()
@@ -396,12 +437,16 @@ def main() -> int:
         "selected_num_tracks_used": batch["selected_num_tracks_used"],
         "selected_num_positive_labels": batch["selected_num_positive_labels"],
         "selected_positive_label_ids": batch["selected_positive_label_ids"],
+        "selected_num_temporal_pairs": batch["selected_num_temporal_pairs"],
         "split_annotation_json_path": batch["split_annotation_json_path"],
         "bridge_summary": batch["bridge_summary"],
         "seed": int(args.seed),
         "steps": int(args.steps),
         "lr": float(args.lr),
         "sinkhorn_temperature": float(args.sinkhorn_temperature),
+        "temporal_consistency_enabled": bool(args.temporal_consistency_enabled),
+        "temporal_consistency_weight": float(args.temporal_consistency_weight),
+        "temporal_consistency_mode": str(args.temporal_consistency_mode),
         "min_positive_labels": int(args.min_positive_labels),
         "preferred_video_id": args.preferred_video_id,
         "backend_locked": final["assignment_backend"] == "c2_sinkhorn_minimal_v1",

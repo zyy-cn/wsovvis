@@ -643,6 +643,10 @@ def compute_stagec_semantic_loss_hook_c3_minimal_v1(
     alignment_weight: float = 1.0,
     coverage_weight: float = 0.25,
     fg_not_bg_weight: float = 0.10,
+    temporal_consistency_enabled: bool = False,
+    temporal_consistency_weight: float = 0.0,
+    temporal_consistency_mode: str = "sym_kl",
+    temporal_pair_indices: Sequence[tuple[int, int]] | np.ndarray | None = None,
     eps: float = 1e-8,
 ) -> tuple[Any, StageCSemanticLossHookOutputV1]:
     """C3 minimal semantic loss coupling with torch autograd support."""
@@ -662,6 +666,17 @@ def compute_stagec_semantic_loss_hook_c3_minimal_v1(
     _require(np.isfinite(float(alignment_weight)) and float(alignment_weight) >= 0.0, "alignment_weight", "must be finite and >= 0")
     _require(np.isfinite(float(coverage_weight)) and float(coverage_weight) >= 0.0, "coverage_weight", "must be finite and >= 0")
     _require(np.isfinite(float(fg_not_bg_weight)) and float(fg_not_bg_weight) >= 0.0, "fg_not_bg_weight", "must be finite and >= 0")
+    _require(isinstance(temporal_consistency_enabled, bool), "temporal_consistency_enabled", "must be boolean")
+    _require(
+        np.isfinite(float(temporal_consistency_weight)) and float(temporal_consistency_weight) >= 0.0,
+        "temporal_consistency_weight",
+        "must be finite and >= 0",
+    )
+    _require(
+        temporal_consistency_mode in {"kl", "sym_kl"},
+        "temporal_consistency_mode",
+        "must be one of {'kl','sym_kl'}",
+    )
     _require(np.isfinite(float(eps)) and float(eps) > 0.0, "eps", "must be finite and > 0")
 
     _require(
@@ -697,6 +712,7 @@ def compute_stagec_semantic_loss_hook_c3_minimal_v1(
 
     logits = (track_features_tensor @ prototype_features_tensor.transpose(0, 1)) / float(score_temperature)
     log_probs = torch.log_softmax(logits, dim=1)
+    probs = torch.softmax(logits, dim=1)
     alignment_per_track = -(p * log_probs).sum(dim=1)
     alignment_loss = (alignment_per_track * valid_track).sum() / torch.clamp(valid_track.sum(), min=1.0)
 
@@ -715,10 +731,41 @@ def compute_stagec_semantic_loss_hook_c3_minimal_v1(
     else:
         fg_not_bg_loss = torch.zeros((), dtype=track_features_tensor.dtype, device=track_features_tensor.device)
 
+    if temporal_pair_indices is None:
+        pair_idx_array = np.zeros((0, 2), dtype=np.int64)
+    else:
+        pair_idx_array = np.asarray(temporal_pair_indices, dtype=np.int64)
+    _require(pair_idx_array.ndim == 2 and pair_idx_array.shape[1] == 2, "temporal_pair_indices", "must be [N_pair, 2] when provided")
+    if pair_idx_array.size > 0:
+        _require(
+            int(pair_idx_array.min()) >= 0 and int(pair_idx_array.max()) < batch.track_features.shape[0],
+            "temporal_pair_indices",
+            "indices must be in [0, N_track)",
+        )
+
+    temporal_pair_count = int(pair_idx_array.shape[0])
+    temporal_consistency_loss = torch.zeros((), dtype=track_features_tensor.dtype, device=track_features_tensor.device)
+    if temporal_consistency_enabled and float(temporal_consistency_weight) > 0.0 and temporal_pair_count > 0:
+        pair_losses = []
+        for src_idx, dst_idx in pair_idx_array.tolist():
+            if not bool(assignment.valid_track_mask[int(src_idx)]) or not bool(assignment.valid_track_mask[int(dst_idx)]):
+                continue
+            src_p = torch.clamp(probs[int(src_idx)], min=float(eps))
+            dst_p = torch.clamp(probs[int(dst_idx)], min=float(eps))
+            kl_src_dst = torch.sum(src_p * (torch.log(src_p) - torch.log(dst_p)))
+            if temporal_consistency_mode == "sym_kl":
+                kl_dst_src = torch.sum(dst_p * (torch.log(dst_p) - torch.log(src_p)))
+                pair_losses.append(0.5 * (kl_src_dst + kl_dst_src))
+            else:
+                pair_losses.append(kl_src_dst)
+        if pair_losses:
+            temporal_consistency_loss = torch.stack(pair_losses).mean()
+
     total = (
         float(alignment_weight) * alignment_loss
         + float(coverage_weight) * coverage_loss
         + float(fg_not_bg_weight) * fg_not_bg_loss
+        + float(temporal_consistency_weight) * temporal_consistency_loss
     )
     total = float(hook_input.loss_weight) * total
 
@@ -732,6 +779,10 @@ def compute_stagec_semantic_loss_hook_c3_minimal_v1(
         "component_alignment": float(alignment_loss.detach().cpu().item()),
         "component_coverage": float(coverage_loss.detach().cpu().item()),
         "component_fg_not_bg": float(fg_not_bg_loss.detach().cpu().item()),
+        "component_temporal_consistency": float(temporal_consistency_loss.detach().cpu().item()),
+        "temporal_consistency_enabled": bool(temporal_consistency_enabled),
+        "temporal_consistency_mode": temporal_consistency_mode,
+        "temporal_pair_count": temporal_pair_count,
         "num_positive_columns": int(len(pos_cols)),
     }
     hook_output = StageCSemanticLossHookOutputV1(

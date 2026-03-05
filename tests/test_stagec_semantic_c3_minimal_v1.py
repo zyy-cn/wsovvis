@@ -40,6 +40,9 @@ def test_stagec_c3_minimal_plumbing_nonzero_finite_and_backward(tmp_path) -> Non
             "c3_coverage_weight": 0.3,
             "c3_fg_not_bg_weight": 0.1,
             "c3_score_temperature": 0.2,
+            "c8_temporal_consistency_enabled": True,
+            "c8_temporal_consistency_weight": 0.2,
+            "c8_temporal_consistency_mode": "sym_kl",
         },
         track_features_tensor=track,
         positive_label_ids=(101, 202),
@@ -55,6 +58,7 @@ def test_stagec_c3_minimal_plumbing_nonzero_finite_and_backward(tmp_path) -> Non
             STAGEC_BG_LABEL_ID: "background",
             "__unk_fg__": "unknown foreground",
         },
+        temporal_pair_indices=((0, 1), (1, 2)),
         loss_dict=losses,
     )
 
@@ -64,6 +68,8 @@ def test_stagec_c3_minimal_plumbing_nonzero_finite_and_backward(tmp_path) -> Non
     assert isinstance(loss, torch.Tensor)
     assert torch.isfinite(loss)
     assert float(loss.detach().item()) > 0.0
+    assert float(out["diagnostics"]["component_temporal_consistency"]) >= 0.0
+    assert int(out["diagnostics"]["temporal_pair_count"]) == 2
     assert "loss_stage_c_semantic" in losses
     assert losses["loss_stage_c_semantic"] is loss
 
@@ -148,3 +154,80 @@ def test_stagec_c3_minimal_loss_changes_when_transport_p_changes() -> None:
     assert torch.isfinite(loss_aligned)
     assert torch.isfinite(loss_bg_shifted)
     assert float(loss_aligned.detach().item()) != float(loss_bg_shifted.detach().item())
+
+
+def test_stagec_c3_minimal_temporal_consistency_toggle_changes_loss() -> None:
+    batch = StageCSemanticBatchV1(
+        track_features=np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.2, 0.8, 0.0],
+                [0.0, 0.2, 0.8],
+            ],
+            dtype=np.float32,
+        ),
+        prototype_features=np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+        candidate_matrix=np.ones((3, 3), dtype=np.float32),
+        candidate_label_ids=(1, 2, STAGEC_BG_LABEL_ID),
+        valid_track_mask=np.array([True, True, True], dtype=np.bool_),
+        valid_column_mask=np.array([True, True, True], dtype=np.bool_),
+    )
+    assignment = StageCSemanticAssignmentOutputV1(
+        soft_assignment=np.array(
+            [
+                [0.8, 0.1, 0.1],
+                [0.2, 0.7, 0.1],
+                [0.1, 0.2, 0.7],
+            ],
+            dtype=np.float32,
+        ),
+        valid_track_mask=np.array([True, True, True], dtype=np.bool_),
+        valid_column_mask=np.array([True, True, True], dtype=np.bool_),
+        backend="c2_sinkhorn_minimal_v1",
+    )
+    hook_input = StageCSemanticLossHookInputV1(batch=batch, assignment=assignment, loss_weight=1.0)
+
+    track_no_temporal = torch.tensor(batch.track_features, dtype=torch.float32, requires_grad=True)
+    proto_no_temporal = torch.tensor(batch.prototype_features, dtype=torch.float32)
+    loss_no_temporal, out_no_temporal = compute_stagec_semantic_loss_hook_c3_minimal_v1(
+        hook_input,
+        track_features_tensor=track_no_temporal,
+        prototype_features_tensor=proto_no_temporal,
+        positive_label_ids=(1, 2),
+        coverage_weight=0.0,
+        fg_not_bg_weight=0.0,
+        temporal_consistency_enabled=False,
+        temporal_consistency_weight=0.2,
+        temporal_pair_indices=((0, 1), (1, 2)),
+    )
+    loss_no_temporal.backward()
+    assert track_no_temporal.grad is not None
+    assert torch.isfinite(track_no_temporal.grad).all()
+
+    track_temporal = torch.tensor(batch.track_features, dtype=torch.float32, requires_grad=True)
+    proto_temporal = torch.tensor(batch.prototype_features, dtype=torch.float32)
+    loss_temporal, out_temporal = compute_stagec_semantic_loss_hook_c3_minimal_v1(
+        hook_input,
+        track_features_tensor=track_temporal,
+        prototype_features_tensor=proto_temporal,
+        positive_label_ids=(1, 2),
+        coverage_weight=0.0,
+        fg_not_bg_weight=0.0,
+        temporal_consistency_enabled=True,
+        temporal_consistency_weight=0.2,
+        temporal_pair_indices=((0, 1), (1, 2)),
+    )
+    loss_temporal.backward()
+    assert track_temporal.grad is not None
+    assert torch.isfinite(track_temporal.grad).all()
+    assert float(track_temporal.grad.abs().sum().item()) > 0.0
+    assert float(out_no_temporal.diagnostics["component_temporal_consistency"]) == 0.0
+    assert float(out_temporal.diagnostics["component_temporal_consistency"]) > 0.0
+    assert float(loss_no_temporal.detach().item()) != float(loss_temporal.detach().item())

@@ -94,6 +94,7 @@ def test_real_backed_micro_batch_loader_smoke(tmp_path: Path) -> None:
     assert batch["topk_label_ids"] == (7,)
     assert batch["selected_video_id"] == "1001"
     assert batch["selected_num_tracks_used"] == 1
+    assert batch["selected_num_temporal_pairs"] == 0
 
 
 def test_real_backed_loader_respects_min_positive_labels_and_preferred_video(tmp_path: Path) -> None:
@@ -187,6 +188,7 @@ def test_real_backed_loader_respects_min_positive_labels_and_preferred_video(tmp
     )
     assert batch["selected_video_id"] == "1002"
     assert batch["positive_label_ids"] == (8, 9)
+    assert batch["selected_num_temporal_pairs"] == 0
 
 
 def test_real_backed_loader_prefers_non_agnostic_annotation_variant(tmp_path: Path) -> None:

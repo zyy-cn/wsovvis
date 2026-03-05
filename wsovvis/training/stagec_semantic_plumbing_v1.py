@@ -43,6 +43,9 @@ def _build_c4_backend_config_echo(cfg: Mapping[str, Any], assignment_backend: st
         "sinkhorn_bg_capacity_weight": float(cfg.get("sinkhorn_bg_capacity_weight", 1.5)),
         "sinkhorn_unk_fg_capacity_weight": float(cfg.get("sinkhorn_unk_fg_capacity_weight", 1.5)),
         "c3_fg_not_bg_weight": float(cfg.get("c3_fg_not_bg_weight", 0.10)),
+        "c8_temporal_consistency_enabled": bool(cfg.get("c8_temporal_consistency_enabled", False)),
+        "c8_temporal_consistency_weight": float(cfg.get("c8_temporal_consistency_weight", 0.0)),
+        "c8_temporal_consistency_mode": str(cfg.get("c8_temporal_consistency_mode", "sym_kl")),
     }
 
 
@@ -252,6 +255,7 @@ def build_stagec_semantic_plumbing_c3_minimal_coupled(
     valid_column_mask: np.ndarray | None = None,
     track_objectness_tensor: Any | None = None,
     prototype_features_tensor: Any | None = None,
+    temporal_pair_indices: tuple[tuple[int, int], ...] | np.ndarray | None = None,
     loss_dict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """C3 minimal additive plumbing with C2 assignment + torch-coupled semantic loss."""
@@ -358,6 +362,10 @@ def build_stagec_semantic_plumbing_c3_minimal_coupled(
         alignment_weight=float(cfg.get("c3_alignment_weight", 1.0)),
         coverage_weight=float(cfg.get("c3_coverage_weight", 0.25)),
         fg_not_bg_weight=float(cfg.get("c3_fg_not_bg_weight", 0.10)),
+        temporal_consistency_enabled=bool(cfg.get("c8_temporal_consistency_enabled", False)),
+        temporal_consistency_weight=float(cfg.get("c8_temporal_consistency_weight", 0.0)),
+        temporal_consistency_mode=str(cfg.get("c8_temporal_consistency_mode", "sym_kl")),
+        temporal_pair_indices=temporal_pair_indices,
         eps=float(cfg.get("c3_eps", 1e-8)),
     )
     objectness_np: np.ndarray | None
