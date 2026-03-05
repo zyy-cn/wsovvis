@@ -23,10 +23,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable tiny/canonical smoke mode with synthetic fallback seed",
     )
     p.add_argument(
-        "--stagec-summary-in-json",
+        "--stagec-summary-json",
         type=Path,
         default=None,
         help="Optional Stage C summary JSON used as round0 seed input",
+    )
+    p.add_argument(
+        "--stagec-summary-in-json",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     p.add_argument(
         "--round-summary-root",
@@ -62,15 +68,23 @@ def _as_int_list(values: Any) -> list[int]:
 
 def _seed_from_stagec_summary(path: Path) -> dict[str, Any]:
     payload = _load_json(path)
+    selected_video_id = payload.get("selected_video_id")
+    if not isinstance(selected_video_id, str) or not selected_video_id.strip():
+        raise ValueError(f"Stage C summary missing non-empty selected_video_id: {path}")
     selected_positive_ids = _as_int_list(payload.get("selected_positive_label_ids"))
     final = payload.get("final")
     final_candidate_ids = _as_int_list(final.get("candidate_label_ids")) if isinstance(final, dict) else []
     candidate_ids = final_candidate_ids or selected_positive_ids
+    if not candidate_ids:
+        raise ValueError(
+            f"Stage C summary must provide candidate labels via final.candidate_label_ids "
+            f"or selected_positive_label_ids: {path}"
+        )
     ws_metrics = payload.get("ws_metrics_summary_v1")
     return {
         "source_kind": "stagec_summary_json",
         "source_path": str(path.resolve()),
-        "selected_video_id": str(payload.get("selected_video_id", "unknown")),
+        "selected_video_id": selected_video_id,
         "positive_label_ids": selected_positive_ids,
         "candidate_label_ids": candidate_ids,
         "assignment_backend": str(payload.get("assignment_backend_requested", "")),
@@ -167,8 +181,9 @@ def main() -> int:
     if args.round_index >= args.max_rounds:
         raise ValueError("--round-index must be < --max-rounds")
 
-    if args.stagec_summary_in_json is not None:
-        seed_state = _seed_from_stagec_summary(args.stagec_summary_in_json.resolve())
+    stagec_summary_path = args.stagec_summary_json or args.stagec_summary_in_json
+    if stagec_summary_path is not None:
+        seed_state = _seed_from_stagec_summary(stagec_summary_path.resolve())
     elif args.tiny_pinned:
         seed_state = _seed_from_tiny_pinned()
     else:

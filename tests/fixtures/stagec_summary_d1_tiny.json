@@ -1,0 +1,20 @@
+{
+  "assignment_backend_requested": "c9_em_minimal_v1",
+  "final": {
+    "candidate_label_ids": [
+      5,
+      7,
+      11
+    ]
+  },
+  "selected_positive_label_ids": [
+    5,
+    7
+  ],
+  "selected_video_id": "video_9",
+  "ws_metrics_summary_v1": {
+    "schema_name": "wsovvis.ws_metrics_summary_v1",
+    "schema_version": "1.0",
+    "scr_macro": 1.0
+  }
+}

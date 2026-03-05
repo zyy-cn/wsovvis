@@ -57,25 +57,13 @@ def test_d0_tiny_round0_pass_through_no_refine(tmp_path: Path) -> None:
 
 
 def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) -> None:
-    stagec_summary = {
-        "selected_video_id": "video_9",
-        "selected_positive_label_ids": [5, 7],
-        "assignment_backend_requested": "c9_em_minimal_v1",
-        "final": {"candidate_label_ids": [5, 7, 11]},
-        "ws_metrics_summary_v1": {
-            "schema_name": "wsovvis.ws_metrics_summary_v1",
-            "schema_version": "1.0",
-            "scr_macro": 1.0,
-        },
-    }
-    stagec_path = tmp_path / "stagec_summary.json"
-    stagec_path.write_text(json.dumps(stagec_summary), encoding="utf-8")
+    fixture_path = _repo_root() / "tests/fixtures/stagec_summary_d1_tiny.json"
     out_json = tmp_path / "d0_summary_round01.json"
     round_root = tmp_path / "rounds_round01"
     proc = _run(
         [
-            "--stagec-summary-in-json",
-            str(stagec_path),
+            "--stagec-summary-json",
+            str(fixture_path),
             "--tiny-pinned",
             "--round-index",
             "0",
@@ -97,11 +85,48 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
     assert round0["round_index"] == 0
     assert round0["refine_applied"] is False
     assert round0["round_input_summary"]["source_kind"] == "stagec_summary_json"
+    assert round0["round_input_summary"]["selected_video_id"] == "video_9"
+    assert round0["round_output_summary"]["candidate_label_ids"] == [5, 7, 11]
     assert round0["ws_metrics_summary_v1"]["schema_name"] == "wsovvis.ws_metrics_summary_v1"
     assert round1["round_index"] == 1
     assert round1["refine_mode_requested"] == "minimal"
     assert round1["refine_applied"] is True
+    assert round1["round_input_summary"]["source_kind"] == "previous_round_output"
     refine_summary = round1["round_input_summary"]["refine_summary"]
     assert refine_summary["applied"] is True
     assert refine_summary["refine_mode"] == "minimal"
     assert 909001 in round1["round_output_summary"]["candidate_label_ids"]
+    assert run_summary["schema_name"] == "wsovvis.stage_d_loop_summary_v1"
+    assert run_summary["schema_version"] == "1.0"
+    assert len(run_summary["round_paths"]) == 2
+
+
+def test_d0_stagec_contract_validation_rejects_missing_video_id(tmp_path: Path) -> None:
+    stagec_path = tmp_path / "bad_stagec_summary.json"
+    stagec_path.write_text(
+        json.dumps(
+            {
+                "selected_positive_label_ids": [10],
+                "final": {"candidate_label_ids": [10]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(stagec_path),
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "1",
+            "--refine-mode",
+            "none",
+            "--round-summary-root",
+            str(tmp_path / "rounds_bad"),
+            "--out-json",
+            str(tmp_path / "bad_out.json"),
+        ]
+    )
+    assert proc.returncode != 0
+    assert "selected_video_id" in proc.stderr
