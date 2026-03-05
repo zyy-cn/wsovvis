@@ -13,6 +13,7 @@ from wsovvis.track_feature_export.stagec_semantic_slice_v1 import (
     build_stagec_candidate_set_v1,
     build_stagec_prototype_candidate_stub_v1,
     compute_stagec_semantic_loss_hook_c3_minimal_v1,
+    run_stagec_assignment_em_minimal_v1,
     compute_stagec_semantic_loss_hook_stub_v1,
     run_stagec_assignment_mil_minimal_v1,
     run_stagec_assignment_sinkhorn_minimal_v1,
@@ -44,6 +45,8 @@ def _build_c4_backend_config_echo(cfg: Mapping[str, Any], assignment_backend: st
         "sinkhorn_bg_capacity_weight": float(cfg.get("sinkhorn_bg_capacity_weight", 1.5)),
         "sinkhorn_unk_fg_capacity_weight": float(cfg.get("sinkhorn_unk_fg_capacity_weight", 1.5)),
         "mil_temperature": float(cfg.get("mil_temperature", 0.10)),
+        "em_temperature": float(cfg.get("em_temperature", 0.10)),
+        "em_iterations": int(cfg.get("em_iterations", 6)),
         "c3_fg_not_bg_weight": float(cfg.get("c3_fg_not_bg_weight", 0.10)),
         "c8_temporal_consistency_enabled": bool(cfg.get("c8_temporal_consistency_enabled", False)),
         "c8_temporal_consistency_weight": float(cfg.get("c8_temporal_consistency_weight", 0.0)),
@@ -98,9 +101,9 @@ def build_stagec_semantic_plumbing_c0(
     assignment_backend = cfg.get("assignment_backend", "c0_uniform_stub_v1")
     _require(
         isinstance(assignment_backend, str)
-        and assignment_backend in {"c0_uniform_stub_v1", "c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1"},
+        and assignment_backend in {"c0_uniform_stub_v1", "c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1", "c9_em_minimal_v1"},
         "stage_c_semantic.assignment_backend",
-        "must be one of {'c0_uniform_stub_v1','c2_sinkhorn_minimal_v1','c9_mil_minimal_v1'}",
+        "must be one of {'c0_uniform_stub_v1','c2_sinkhorn_minimal_v1','c9_mil_minimal_v1','c9_em_minimal_v1'}",
     )
     if assignment_backend == "c2_sinkhorn_minimal_v1":
         assignment = run_stagec_assignment_sinkhorn_minimal_v1(
@@ -116,6 +119,13 @@ def build_stagec_semantic_plumbing_c0(
         assignment = run_stagec_assignment_mil_minimal_v1(
             batch,
             temperature=float(cfg.get("mil_temperature", 0.10)),
+            eps=float(cfg.get("sinkhorn_eps", 1e-12)),
+        )
+    elif assignment_backend == "c9_em_minimal_v1":
+        assignment = run_stagec_assignment_em_minimal_v1(
+            batch,
+            temperature=float(cfg.get("em_temperature", 0.10)),
+            em_iterations=int(cfg.get("em_iterations", 6)),
             eps=float(cfg.get("sinkhorn_eps", 1e-12)),
         )
     else:
@@ -290,9 +300,9 @@ def build_stagec_semantic_plumbing_c3_minimal_coupled(
 
     assignment_backend = cfg.get("assignment_backend", "c2_sinkhorn_minimal_v1")
     _require(
-        assignment_backend in {"c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1"},
+        assignment_backend in {"c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1", "c9_em_minimal_v1"},
         "stage_c_semantic.assignment_backend",
-        "C3 minimal path requires assignment_backend in {'c2_sinkhorn_minimal_v1','c9_mil_minimal_v1'}",
+        "C3 minimal path requires assignment_backend in {'c2_sinkhorn_minimal_v1','c9_mil_minimal_v1','c9_em_minimal_v1'}",
     )
 
     _require(hasattr(track_features_tensor, "shape"), "track_features_tensor", "must be tensor-like with shape")
@@ -353,11 +363,19 @@ def build_stagec_semantic_plumbing_c3_minimal_coupled(
             unk_fg_capacity_weight=float(cfg.get("sinkhorn_unk_fg_capacity_weight", 1.5)),
         )
     else:
-        assignment = run_stagec_assignment_mil_minimal_v1(
-            batch,
-            temperature=float(cfg.get("mil_temperature", 0.10)),
-            eps=float(cfg.get("sinkhorn_eps", 1e-12)),
-        )
+        if assignment_backend == "c9_mil_minimal_v1":
+            assignment = run_stagec_assignment_mil_minimal_v1(
+                batch,
+                temperature=float(cfg.get("mil_temperature", 0.10)),
+                eps=float(cfg.get("sinkhorn_eps", 1e-12)),
+            )
+        else:
+            assignment = run_stagec_assignment_em_minimal_v1(
+                batch,
+                temperature=float(cfg.get("em_temperature", 0.10)),
+                em_iterations=int(cfg.get("em_iterations", 6)),
+                eps=float(cfg.get("sinkhorn_eps", 1e-12)),
+            )
 
     loss_key = cfg.get("loss_key", "loss_stage_c_semantic")
     _require(isinstance(loss_key, str) and loss_key, "stage_c_semantic.loss_key", "must be non-empty string")

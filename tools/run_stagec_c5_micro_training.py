@@ -27,7 +27,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=0.08, help="Optimizer learning rate")
     p.add_argument(
         "--assignment-backend",
-        choices=("c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1"),
+        choices=("c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1", "c9_em_minimal_v1"),
         default="c2_sinkhorn_minimal_v1",
         help="Stage C attribution backend for micro-training compare.",
     )
@@ -42,6 +42,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.10,
         help="C9 MIL minimal temperature for row-wise softmax assignment.",
+    )
+    p.add_argument(
+        "--em-temperature",
+        type=float,
+        default=0.10,
+        help="C9 EM minimal temperature for E-step responsibilities.",
+    )
+    p.add_argument(
+        "--em-iterations",
+        type=int,
+        default=6,
+        help="C9 EM minimal number of E/M update iterations.",
     )
     p.add_argument("--cache-root", type=Path, default=Path("/tmp/wsovvis_stagec_c5_clip_cache"), help="C1 prototype cache root")
     p.add_argument(
@@ -375,6 +387,8 @@ def main() -> int:
     args = _build_parser().parse_args()
     if args.steps < 1:
         raise ValueError("--steps must be >= 1")
+    if args.em_iterations < 1:
+        raise ValueError("--em-iterations must be >= 1")
     if not np.isfinite(args.lr) or args.lr <= 0:
         raise ValueError("--lr must be finite and > 0")
     if not np.isfinite(args.temporal_consistency_weight) or args.temporal_consistency_weight < 0:
@@ -402,6 +416,8 @@ def main() -> int:
         "assignment_backend": str(args.assignment_backend),
         "sinkhorn_temperature": float(args.sinkhorn_temperature),
         "mil_temperature": float(args.mil_temperature),
+        "em_temperature": float(args.em_temperature),
+        "em_iterations": int(args.em_iterations),
         "sinkhorn_iterations": 20,
         "sinkhorn_tolerance": 1e-6,
         "sinkhorn_eps": 1e-12,
@@ -458,6 +474,8 @@ def main() -> int:
         "lr": float(args.lr),
         "sinkhorn_temperature": float(args.sinkhorn_temperature),
         "mil_temperature": float(args.mil_temperature),
+        "em_temperature": float(args.em_temperature),
+        "em_iterations": int(args.em_iterations),
         "assignment_backend_requested": str(args.assignment_backend),
         "temporal_consistency_enabled": bool(args.temporal_consistency_enabled),
         "temporal_consistency_weight": float(args.temporal_consistency_weight),

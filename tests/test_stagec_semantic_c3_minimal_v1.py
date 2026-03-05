@@ -143,6 +143,55 @@ def test_stagec_c3_minimal_plumbing_supports_c9_mil_backend(tmp_path) -> None:
     assert float(track.grad.abs().sum().item()) > 0.0
 
 
+def test_stagec_c3_minimal_plumbing_supports_c9_em_backend(tmp_path) -> None:
+    track = torch.nn.Parameter(
+        torch.tensor(
+            [
+                [1.1, 0.1, 0.0, 0.0],
+                [0.0, 1.0, 0.1, 0.0],
+                [0.2, 0.0, 0.9, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+    )
+    out = build_stagec_semantic_plumbing_c3_minimal_coupled(
+        {
+            "enabled": True,
+            "loss_key": "loss_stage_c_semantic",
+            "assignment_backend": "c9_em_minimal_v1",
+            "em_temperature": 0.12,
+            "em_iterations": 4,
+            "c3_alignment_weight": 1.0,
+            "c3_coverage_weight": 0.3,
+            "c3_fg_not_bg_weight": 0.1,
+            "c3_score_temperature": 0.2,
+        },
+        track_features_tensor=track,
+        positive_label_ids=(101, 202),
+        topk_label_ids=(101, 202, 303),
+        merge_mode="yp_plus_topk",
+        include_bg=True,
+        include_unk_fg=True,
+        cache_root=tmp_path / "clip_cache_c3_em_smoke",
+        label_text_by_id={
+            101: "person",
+            202: "dog",
+            303: "car",
+            STAGEC_BG_LABEL_ID: "background",
+            "__unk_fg__": "unknown foreground",
+        },
+    )
+
+    assert out["assignment_backend"] == "c9_em_minimal_v1"
+    assert out["loss_applied"] is True
+    loss = out["semantic_loss_tensor"]
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert track.grad is not None
+    assert torch.isfinite(track.grad).all()
+    assert float(track.grad.abs().sum().item()) > 0.0
+
+
 def test_stagec_c3_minimal_loss_changes_when_transport_p_changes() -> None:
     batch = StageCSemanticBatchV1(
         track_features=np.array(

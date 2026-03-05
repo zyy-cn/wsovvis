@@ -536,6 +536,91 @@ def run_stagec_assignment_mil_minimal_v1(
     )
 
 
+def run_stagec_assignment_em_minimal_v1(
+    batch: StageCSemanticBatchV1,
+    *,
+    temperature: float = 0.10,
+    em_iterations: int = 6,
+    eps: float = 1e-12,
+) -> StageCSemanticAssignmentOutputV1:
+    """C9 minimal EM-style attribution baseline.
+
+    This is intentionally a lightweight baseline:
+      - E-step: masked row-wise posterior with additive log-prior.
+      - M-step: update global class prior from posterior column means.
+      - candidate_matrix <= 0 entries remain forbidden.
+      - if a row has no allowed columns, fallback prefers bg, then unk_fg, else all cols.
+    """
+
+    normalized = normalize_stagec_semantic_batch_v1(batch)
+    _require(np.isfinite(float(temperature)) and float(temperature) > 0.0, "temperature", "must be finite and > 0")
+    _require(isinstance(em_iterations, int) and em_iterations >= 1, "em_iterations", "must be integer >= 1")
+    _require(np.isfinite(float(eps)) and float(eps) > 0.0, "eps", "must be finite and > 0")
+
+    n_track, _ = normalized.track_features.shape
+    n_cand = normalized.prototype_features.shape[0]
+    valid_track_mask = normalized.valid_track_mask if normalized.valid_track_mask is not None else np.ones((n_track,), dtype=np.bool_)
+    valid_column_mask = (
+        normalized.valid_column_mask if normalized.valid_column_mask is not None else np.ones((n_cand,), dtype=np.bool_)
+    )
+
+    soft = np.zeros((n_track, n_cand), dtype=np.float32)
+    valid_rows = np.flatnonzero(valid_track_mask)
+    valid_cols = np.flatnonzero(valid_column_mask)
+    if valid_rows.size == 0 or valid_cols.size == 0:
+        return StageCSemanticAssignmentOutputV1(
+            soft_assignment=soft,
+            valid_track_mask=valid_track_mask,
+            valid_column_mask=valid_column_mask,
+            backend="c9_em_minimal_v1",
+        )
+
+    row_sub = normalized.track_features[valid_rows].astype(np.float64, copy=False)
+    col_sub = normalized.prototype_features[valid_cols].astype(np.float64, copy=False)
+    score = row_sub @ col_sub.T
+    _require(np.isfinite(score).all(), "score_matrix", "must be finite")
+
+    cand = normalized.candidate_matrix[np.ix_(valid_rows, valid_cols)].astype(np.float64, copy=False)
+    allowed = cand > 0.0
+    valid_label_ids = tuple(normalized.candidate_label_ids[col] for col in valid_cols)
+    bg_pos = valid_label_ids.index(STAGEC_BG_LABEL_ID) if STAGEC_BG_LABEL_ID in valid_label_ids else None
+    unk_pos = valid_label_ids.index(STAGEC_UNK_FG_LABEL_ID) if STAGEC_UNK_FG_LABEL_ID in valid_label_ids else None
+    for i in range(allowed.shape[0]):
+        if allowed[i].any():
+            continue
+        if bg_pos is not None:
+            allowed[i, int(bg_pos)] = True
+        elif unk_pos is not None:
+            allowed[i, int(unk_pos)] = True
+        else:
+            allowed[i, :] = True
+
+    log_prior = np.full((valid_cols.size,), -np.log(float(valid_cols.size)), dtype=np.float64)
+    posterior = np.zeros_like(score, dtype=np.float64)
+    for _ in range(int(em_iterations)):
+        logits = score / float(temperature) + log_prior.reshape(1, -1)
+        logits = np.where(allowed, logits, -1e12)
+        row_max = np.max(logits, axis=1, keepdims=True)
+        stable = logits - row_max
+        exp_scores = np.exp(stable)
+        exp_scores = np.where(allowed, np.maximum(exp_scores, float(eps)), 0.0)
+        row_sums = np.maximum(np.sum(exp_scores, axis=1, keepdims=True), float(eps))
+        posterior = exp_scores / row_sums
+        posterior = np.where(allowed, posterior, 0.0)
+        posterior = posterior / np.maximum(np.sum(posterior, axis=1, keepdims=True), float(eps))
+        prior = np.maximum(np.mean(posterior, axis=0), float(eps))
+        prior = prior / np.maximum(np.sum(prior), float(eps))
+        log_prior = np.log(prior)
+
+    soft[np.ix_(valid_rows, valid_cols)] = posterior.astype(np.float32)
+    return StageCSemanticAssignmentOutputV1(
+        soft_assignment=soft,
+        valid_track_mask=valid_track_mask,
+        valid_column_mask=valid_column_mask,
+        backend="c9_em_minimal_v1",
+    )
+
+
 def summarize_stagec_assignment_observability_c4_minimal_v1(
     *,
     batch: StageCSemanticBatchV1,
@@ -733,9 +818,9 @@ def compute_stagec_semantic_loss_hook_c3_minimal_v1(
     batch = normalize_stagec_semantic_batch_v1(hook_input.batch)
     assignment = hook_input.assignment
     _require(
-        assignment.backend in {"c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1"},
+        assignment.backend in {"c2_sinkhorn_minimal_v1", "c9_mil_minimal_v1", "c9_em_minimal_v1"},
         "assignment.backend",
-        "must be one of {'c2_sinkhorn_minimal_v1','c9_mil_minimal_v1'} for C3",
+        "must be one of {'c2_sinkhorn_minimal_v1','c9_mil_minimal_v1','c9_em_minimal_v1'} for C3",
     )
     _require(isinstance(hook_input.loss_key, str) and hook_input.loss_key, "hook_input.loss_key", "must be non-empty")
     _require(np.isfinite(float(hook_input.loss_weight)), "hook_input.loss_weight", "must be finite")

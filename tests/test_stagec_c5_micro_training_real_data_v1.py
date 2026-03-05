@@ -97,6 +97,15 @@ def test_real_backed_micro_batch_loader_smoke(tmp_path: Path) -> None:
     assert batch["selected_num_temporal_pairs"] == 0
 
 
+def test_c5_parser_supports_em_backend_and_defaults() -> None:
+    module = _load_c5_script_module()
+    parser = module._build_parser()
+    args = parser.parse_args(["--assignment-backend", "c9_em_minimal_v1"])
+    assert args.assignment_backend == "c9_em_minimal_v1"
+    assert args.em_temperature == pytest.approx(0.10)
+    assert args.em_iterations == 6
+
+
 def test_real_backed_loader_respects_min_positive_labels_and_preferred_video(tmp_path: Path) -> None:
     run_root = tmp_path / "runs" / "wsovvis_seqformer" / "18"
     sidecar_root = run_root / "d2" / "inference" / "feature_export_v1"
