@@ -66,6 +66,11 @@ def test_d0_tiny_round0_pass_through_no_refine(tmp_path: Path) -> None:
     assert round0["round_input_summary"]["source_kind"] == "tiny_pinned_synthetic_seed"
     assert round0["round_output_summary"]["orchestration_status"] == "pass_through_baseline"
     assert round0["upstream_risk_guardrail_v1"] is None
+    assert round0["train_summary"] is None
+    assert run_summary["train_hook"] == "none"
+    assert run_summary["train_steps"] == 2
+    assert run_summary["train_seed"] == 20260305
+    assert run_summary["train_hook_applied_round_count"] == 0
 
 
 def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) -> None:
@@ -317,3 +322,53 @@ def test_d0_minimal_multiadd_policy_cap1_drops_n_minus_1(tmp_path: Path) -> None
     assert run_summary["round_policy_kept_count_total"] == 1
     assert run_summary["round_policy_dropped_count_total"] == 2
     assert run_summary["candidate_label_ids_count_delta_total"] == 1
+
+
+def test_d0_stagec_micro_train_hook_runs_per_round(tmp_path: Path) -> None:
+    fixture_path = _repo_root() / "tests/fixtures/stagec_summary_d1_tiny.json"
+    out_json = tmp_path / "d0_train_hook_summary.json"
+    round_root = tmp_path / "rounds_train_hook"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(fixture_path),
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "2",
+            "--refine-mode",
+            "minimal",
+            "--round-policy",
+            "none",
+            "--train-hook",
+            "stagec_micro_train_v1",
+            "--train-steps",
+            "2",
+            "--train-seed",
+            "20260305",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    assert run_summary["train_hook"] == "stagec_micro_train_v1"
+    assert run_summary["train_steps"] == 2
+    assert run_summary["train_seed"] == 20260305
+    assert run_summary["train_hook_applied_round_count"] == 2
+    round0 = run_summary["round_summaries"][0]
+    round1 = run_summary["round_summaries"][1]
+    train0 = round0["train_summary"]
+    train1 = round1["train_summary"]
+    assert train0["status"] == "PASS"
+    assert train1["status"] == "PASS"
+    assert train0["hook_name"] == "stagec_micro_train_v1"
+    assert train1["hook_name"] == "stagec_micro_train_v1"
+    assert train0["train_steps"] == 2
+    assert train1["train_steps"] == 2
+    assert train0["train_seed_effective"] == 20260305
+    assert train1["train_seed_effective"] == 20260306
+    assert train0["data_mode"] == "synthetic_v1"
+    assert train1["data_mode"] == "synthetic_v1"

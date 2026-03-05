@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +66,24 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional deterministic seed for bounded smoke reproducibility",
+    )
+    p.add_argument(
+        "--train-hook",
+        choices=("none", "stagec_micro_train_v1"),
+        default="none",
+        help="Optional bounded per-round training hook",
+    )
+    p.add_argument(
+        "--train-steps",
+        type=int,
+        default=2,
+        help="Step count for bounded training hook execution",
+    )
+    p.add_argument(
+        "--train-seed",
+        type=int,
+        default=20260305,
+        help="Base seed for bounded training hook execution",
     )
     return p
 
@@ -256,6 +276,65 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _run_train_hook(
+    *,
+    hook_name: str,
+    round_index: int,
+    train_steps: int,
+    train_seed: int,
+    round_summary_root: Path,
+) -> dict[str, Any] | None:
+    if hook_name == "none":
+        return None
+    if hook_name != "stagec_micro_train_v1":
+        raise ValueError(f"unsupported --train-hook: {hook_name}")
+    effective_seed = int(train_seed) + int(round_index)
+    out_json = round_summary_root / "train" / f"round{round_index}_train_summary.json"
+    cmd = [
+        sys.executable,
+        "tools/run_stagec_c5_micro_training.py",
+        "--data-mode",
+        "synthetic_v1",
+        "--steps",
+        str(int(train_steps)),
+        "--seed",
+        str(effective_seed),
+        "--out-json",
+        str(out_json),
+    ]
+    proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        return {
+            "status": "FAILED",
+            "hook_name": "stagec_micro_train_v1",
+            "command": cmd,
+            "returncode": int(proc.returncode),
+            "stderr_tail": proc.stderr[-4000:],
+            "stdout_tail": proc.stdout[-4000:],
+            "train_steps": int(train_steps),
+            "train_seed_base": int(train_seed),
+            "train_seed_effective": int(effective_seed),
+            "summary_json_path": str(out_json),
+        }
+
+    payload = _load_json(out_json)
+    final = payload.get("final", {}) if isinstance(payload.get("final"), dict) else {}
+    return {
+        "status": "PASS",
+        "hook_name": "stagec_micro_train_v1",
+        "command": cmd,
+        "returncode": int(proc.returncode),
+        "train_steps": int(payload.get("steps", train_steps)),
+        "train_seed_base": int(train_seed),
+        "train_seed_effective": int(effective_seed),
+        "summary_json_path": str(out_json),
+        "data_mode": payload.get("data_mode"),
+        "selected_video_id": payload.get("selected_video_id"),
+        "assignment_backend_requested": payload.get("assignment_backend_requested"),
+        "final_loss_total": float(final.get("loss_total", 0.0)),
+    }
+
+
 def main() -> int:
     args = _build_parser().parse_args()
     if args.seed is not None:
@@ -268,6 +347,8 @@ def main() -> int:
         raise ValueError("--max-rounds must be >= 1")
     if args.round_index >= args.max_rounds:
         raise ValueError("--round-index must be < --max-rounds")
+    if args.train_steps < 1:
+        raise ValueError("--train-steps must be >= 1")
 
     stagec_summary_path = args.stagec_summary_json or args.stagec_summary_in_json
     if stagec_summary_path is not None:
@@ -330,6 +411,19 @@ def main() -> int:
             round_policy_stats = {"reason": "round0_seed"}
             candidate_count_before = int(len(_as_int_list(current_state.get("candidate_label_ids"))))
 
+        train_summary = _run_train_hook(
+            hook_name=str(args.train_hook),
+            round_index=int(round_index),
+            train_steps=int(args.train_steps),
+            train_seed=int(args.train_seed),
+            round_summary_root=args.round_summary_root,
+        )
+        if isinstance(train_summary, dict) and train_summary.get("status") != "PASS":
+            raise RuntimeError(
+                "training hook failed for "
+                f"round={round_index}: returncode={train_summary.get('returncode')}"
+            )
+
         round_input = _build_round_input_summary(
             round_index=round_index,
             max_rounds=int(args.max_rounds),
@@ -372,6 +466,7 @@ def main() -> int:
             "candidate_label_ids_count_delta": int(candidate_count_after - candidate_count_before),
             "round_input_summary": round_input,
             "round_output_summary": round_output,
+            "train_summary": train_summary,
             "ws_metrics_summary_v1": current_state.get("ws_metrics_summary_v1"),
             "upstream_risk_guardrail_v1": current_state.get("upstream_risk_guardrail_v1"),
         }
@@ -401,6 +496,12 @@ def main() -> int:
         "schema_name": "wsovvis.stage_d_loop_summary_v1",
         "schema_version": "1.0",
         "seed": int(args.seed) if args.seed is not None else None,
+        "train_hook": str(args.train_hook),
+        "train_steps": int(args.train_steps),
+        "train_seed": int(args.train_seed),
+        "train_hook_applied_round_count": int(
+            sum(1 for s in round_summaries if isinstance(s.get("train_summary"), dict))
+        ),
         "round_index_start": int(args.round_index),
         "max_rounds": int(args.max_rounds),
         "refine_mode": str(args.refine_mode),
