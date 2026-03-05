@@ -357,6 +357,8 @@ def test_d0_stagec_micro_train_hook_runs_per_round(tmp_path: Path) -> None:
     assert run_summary["train_hook"] == "stagec_micro_train_v1"
     assert run_summary["train_steps"] == 2
     assert run_summary["train_seed"] == 20260305
+    assert run_summary["train_data_mode"] == "synthetic_v1"
+    assert run_summary["train_real_run_root"] is None
     assert run_summary["train_hook_applied_round_count"] == 2
     round0 = run_summary["round_summaries"][0]
     round1 = run_summary["round_summaries"][1]
@@ -372,3 +374,7 @@ def test_d0_stagec_micro_train_hook_runs_per_round(tmp_path: Path) -> None:
     assert train1["train_seed_effective"] == 20260306
     assert train0["data_mode"] == "synthetic_v1"
     assert train1["data_mode"] == "synthetic_v1"
+    assert train0["train_data_mode_requested"] == "synthetic_v1"
+    assert train1["train_data_mode_requested"] == "synthetic_v1"
+    assert train0["train_real_run_root_requested"] is None
+    assert train1["train_real_run_root_requested"] is None

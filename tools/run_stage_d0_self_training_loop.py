@@ -85,6 +85,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20260305,
         help="Base seed for bounded training hook execution",
     )
+    p.add_argument(
+        "--train-data-mode",
+        choices=("real_sidecar_v1", "synthetic_v1"),
+        default="synthetic_v1",
+        help="Data mode for stagec_micro_train_v1 bounded training hook",
+    )
+    p.add_argument(
+        "--train-real-run-root",
+        type=Path,
+        default=Path("runs/wsovvis_seqformer/18"),
+        help="Real Stage B run root for train-data-mode=real_sidecar_v1",
+    )
     return p
 
 
@@ -282,6 +294,8 @@ def _run_train_hook(
     round_index: int,
     train_steps: int,
     train_seed: int,
+    train_data_mode: str,
+    train_real_run_root: Path,
     round_summary_root: Path,
 ) -> dict[str, Any] | None:
     if hook_name == "none":
@@ -294,14 +308,25 @@ def _run_train_hook(
         sys.executable,
         "tools/run_stagec_c5_micro_training.py",
         "--data-mode",
-        "synthetic_v1",
+        str(train_data_mode),
         "--steps",
         str(int(train_steps)),
         "--seed",
         str(effective_seed),
+    ]
+    if str(train_data_mode) == "real_sidecar_v1":
+        cmd.extend(
+            [
+                "--real-run-root",
+                str(train_real_run_root),
+            ]
+        )
+    cmd.extend(
+        [
         "--out-json",
         str(out_json),
-    ]
+        ]
+    )
     proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
     if proc.returncode != 0:
         return {
@@ -315,6 +340,10 @@ def _run_train_hook(
             "train_seed_base": int(train_seed),
             "train_seed_effective": int(effective_seed),
             "summary_json_path": str(out_json),
+            "train_data_mode_requested": str(train_data_mode),
+            "train_real_run_root_requested": (
+                str(train_real_run_root.resolve()) if str(train_data_mode) == "real_sidecar_v1" else None
+            ),
         }
 
     payload = _load_json(out_json)
@@ -328,6 +357,10 @@ def _run_train_hook(
         "train_seed_base": int(train_seed),
         "train_seed_effective": int(effective_seed),
         "summary_json_path": str(out_json),
+        "train_data_mode_requested": str(train_data_mode),
+        "train_real_run_root_requested": (
+            str(train_real_run_root.resolve()) if str(train_data_mode) == "real_sidecar_v1" else None
+        ),
         "data_mode": payload.get("data_mode"),
         "selected_video_id": payload.get("selected_video_id"),
         "assignment_backend_requested": payload.get("assignment_backend_requested"),
@@ -416,6 +449,8 @@ def main() -> int:
             round_index=int(round_index),
             train_steps=int(args.train_steps),
             train_seed=int(args.train_seed),
+            train_data_mode=str(args.train_data_mode),
+            train_real_run_root=Path(args.train_real_run_root),
             round_summary_root=args.round_summary_root,
         )
         if isinstance(train_summary, dict) and train_summary.get("status") != "PASS":
@@ -499,6 +534,10 @@ def main() -> int:
         "train_hook": str(args.train_hook),
         "train_steps": int(args.train_steps),
         "train_seed": int(args.train_seed),
+        "train_data_mode": str(args.train_data_mode),
+        "train_real_run_root": (
+            str(Path(args.train_real_run_root).resolve()) if str(args.train_data_mode) == "real_sidecar_v1" else None
+        ),
         "train_hook_applied_round_count": int(
             sum(1 for s in round_summaries if isinstance(s.get("train_summary"), dict))
         ),
