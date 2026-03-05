@@ -14,9 +14,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-rounds", type=int, default=1, help="Exclusive max round index")
     p.add_argument(
         "--refine-mode",
-        choices=("none", "minimal"),
+        choices=("none", "minimal", "minimal_multiadd_v1"),
         default="none",
         help="Refine mode applied before rounds after round0",
+    )
+    p.add_argument(
+        "--refine-multiadd-count",
+        type=int,
+        default=3,
+        help="Number of deterministic additions for refine-mode=minimal_multiadd_v1",
     )
     p.add_argument(
         "--round-policy",
@@ -138,6 +144,26 @@ def _minimal_refine(previous_round_output: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _minimal_multiadd_refine(previous_round_output: dict[str, Any], count: int) -> dict[str, Any]:
+    base_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
+    if not base_ids:
+        base_ids = _as_int_list(previous_round_output.get("positive_label_ids"))
+    requested_ids = [909000 + idx for idx in range(1, int(count) + 1)]
+    requested_set = set(requested_ids)
+    refined = sorted(set(base_ids) | requested_set)
+    return {
+        "schema_name": "wsovvis.stage_d_refine_summary_v1",
+        "schema_version": "1.0",
+        "refine_mode": "minimal_multiadd_v1",
+        "refine_multiadd_count": int(count),
+        "applied": True,
+        "rule_id": "append_refine_marker_labels_v1",
+        "input_candidate_label_ids": base_ids,
+        "output_candidate_label_ids": refined,
+        "added_label_ids": [x for x in requested_ids if x not in set(base_ids)],
+    }
+
+
 def _apply_round_policy(
     *,
     round_index: int,
@@ -234,6 +260,8 @@ def main() -> int:
     args = _build_parser().parse_args()
     if args.seed is not None:
         random.seed(int(args.seed))
+    if args.refine_multiadd_count < 0:
+        raise ValueError("--refine-multiadd-count must be >= 0")
     if args.round_index < 0:
         raise ValueError("--round-index must be >= 0")
     if args.max_rounds < 1:
@@ -263,6 +291,12 @@ def main() -> int:
             if args.refine_mode == "minimal":
                 refine_summary = _minimal_refine(previous_round_output)
                 refined_ids = _as_int_list(refine_summary["output_candidate_label_ids"])
+            elif args.refine_mode == "minimal_multiadd_v1":
+                if round_index >= 1:
+                    refine_summary = _minimal_multiadd_refine(previous_round_output, int(args.refine_multiadd_count))
+                    refined_ids = _as_int_list(refine_summary["output_candidate_label_ids"])
+                else:
+                    refined_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
             else:
                 refined_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
 
@@ -323,6 +357,14 @@ def main() -> int:
             "round_policy_stats": round_policy_stats,
             "round_refine_additions_count": int(len(round_refine_added_label_ids)),
             "round_refine_added_label_ids": round_refine_added_label_ids,
+            "round_refine_mode": (
+                str(refine_summary.get("refine_mode")) if isinstance(refine_summary, dict) else "none"
+            ),
+            "round_refine_multiadd_count": (
+                int(refine_summary.get("refine_multiadd_count"))
+                if isinstance(refine_summary, dict) and isinstance(refine_summary.get("refine_multiadd_count"), int)
+                else None
+            ),
             "round_policy_kept_count": int(round_policy_kept_count),
             "round_policy_dropped_count": int(round_policy_dropped_count),
             "candidate_label_ids_count_before": int(candidate_count_before),
@@ -362,6 +404,7 @@ def main() -> int:
         "round_index_start": int(args.round_index),
         "max_rounds": int(args.max_rounds),
         "refine_mode": str(args.refine_mode),
+        "refine_multiadd_count": int(args.refine_multiadd_count),
         "round_policy_name": str(args.round_policy),
         "round_policy_applied": any(bool(s.get("round_policy_applied")) for s in round_summaries),
         "round_policy_notes": (

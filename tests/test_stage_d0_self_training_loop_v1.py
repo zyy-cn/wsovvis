@@ -225,3 +225,95 @@ def test_d0_round_policy_cli_rejects_invalid_choice() -> None:
     )
     assert proc.returncode != 0
     assert "invalid choice" in proc.stderr
+
+
+def test_d0_minimal_multiadd_round_policy_none_keeps_all_added_ids(tmp_path: Path) -> None:
+    fixture_path = _repo_root() / "tests/fixtures/stagec_summary_d1_tiny.json"
+    out_json = tmp_path / "d0_multiadd_none_summary.json"
+    round_root = tmp_path / "rounds_multiadd_none"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(fixture_path),
+            "--seed",
+            "20260305",
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "2",
+            "--refine-mode",
+            "minimal_multiadd_v1",
+            "--refine-multiadd-count",
+            "3",
+            "--round-policy",
+            "none",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    round1 = run_summary["round_summaries"][1]
+    assert round1["refine_mode_requested"] == "minimal_multiadd_v1"
+    assert round1["round_refine_mode"] == "minimal_multiadd_v1"
+    assert round1["round_refine_multiadd_count"] == 3
+    assert round1["round_refine_additions_count"] == 3
+    assert round1["round_refine_added_label_ids"] == [909001, 909002, 909003]
+    assert round1["round_policy_name"] == "none"
+    assert round1["round_policy_applied"] is False
+    assert round1["round_policy_kept_count"] == 0
+    assert round1["round_policy_dropped_count"] == 0
+    assert round1["candidate_label_ids_count_before"] == 3
+    assert round1["candidate_label_ids_count_after"] == 6
+    assert round1["candidate_label_ids_count_delta"] == 3
+    assert round1["round_output_summary"]["candidate_label_ids"] == [5, 7, 11, 909001, 909002, 909003]
+
+
+def test_d0_minimal_multiadd_policy_cap1_drops_n_minus_1(tmp_path: Path) -> None:
+    fixture_path = _repo_root() / "tests/fixtures/stagec_summary_d1_tiny.json"
+    out_json = tmp_path / "d0_multiadd_cap1_summary.json"
+    round_root = tmp_path / "rounds_multiadd_cap1"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(fixture_path),
+            "--seed",
+            "20260305",
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "2",
+            "--refine-mode",
+            "minimal_multiadd_v1",
+            "--refine-multiadd-count",
+            "3",
+            "--round-policy",
+            "minimal_curriculum_v1",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    round1 = run_summary["round_summaries"][1]
+    assert round1["round_refine_additions_count"] == 3
+    assert round1["round_refine_added_label_ids"] == [909001, 909002, 909003]
+    assert round1["round_policy_applied"] is True
+    assert round1["round_policy_stats"]["k"] == 1
+    assert round1["round_policy_stats"]["input_additions_count"] == 3
+    assert round1["round_policy_stats"]["kept_addition_ids"] == [909001]
+    assert round1["round_policy_stats"]["dropped_addition_ids"] == [909002, 909003]
+    assert round1["round_policy_kept_count"] == 1
+    assert round1["round_policy_dropped_count"] == 2
+    assert round1["candidate_label_ids_count_before"] == 3
+    assert round1["candidate_label_ids_count_after"] == 4
+    assert round1["candidate_label_ids_count_delta"] == 1
+    assert round1["round_output_summary"]["candidate_label_ids"] == [5, 7, 11, 909001]
+    assert run_summary["round_refine_additions_count_total"] == 3
+    assert run_summary["round_policy_kept_count_total"] == 1
+    assert run_summary["round_policy_dropped_count_total"] == 2
+    assert run_summary["candidate_label_ids_count_delta_total"] == 1
