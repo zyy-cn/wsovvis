@@ -83,7 +83,7 @@ def test_stage_d_snapshot_happy_path_detects_round_paths(tmp_path: Path) -> None
         },
     )
 
-    proc = _run(["--loop-summary-json", str(loop_path), "--out-json", str(out_json)])
+    proc = _run(["--loop", str(loop_path), "--out-json", str(out_json)])
     assert proc.returncode == 0, proc.stderr
     assert "STAGE_D_SNAPSHOT" in proc.stdout
     assert "round1" in proc.stdout
@@ -116,10 +116,9 @@ def test_stage_d_snapshot_missing_required_field_fails_fast(tmp_path: Path) -> N
         [
             "--loop-summary-json",
             str(loop_path),
-            "--round0-summary-json",
+            "--round0",
             str(round0_path),
         ]
     )
     assert proc.returncode != 0
     assert "candidate_label_ids_count_delta" in proc.stderr
-

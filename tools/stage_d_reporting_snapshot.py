@@ -12,9 +12,30 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Build a compact read-only Stage D snapshot from existing round/loop summaries."
     )
-    p.add_argument("--loop-summary-json", type=Path, required=True, help="Path to Stage D loop summary JSON")
-    p.add_argument("--round0-summary-json", type=Path, default=None, help="Optional explicit round0 summary JSON")
-    p.add_argument("--round1-summary-json", type=Path, default=None, help="Optional explicit round1 summary JSON")
+    p.add_argument(
+        "--loop-summary-json",
+        "--loop",
+        dest="loop_summary_json",
+        type=Path,
+        required=True,
+        help="Path to Stage D loop summary JSON",
+    )
+    p.add_argument(
+        "--round0-summary-json",
+        "--round0",
+        dest="round0_summary_json",
+        type=Path,
+        default=None,
+        help="Optional explicit round0 summary JSON",
+    )
+    p.add_argument(
+        "--round1-summary-json",
+        "--round1",
+        dest="round1_summary_json",
+        type=Path,
+        default=None,
+        help="Optional explicit round1 summary JSON",
+    )
     p.add_argument(
         "--round-summary-root",
         type=Path,
