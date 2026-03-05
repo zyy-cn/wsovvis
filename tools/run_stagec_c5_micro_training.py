@@ -25,6 +25,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=6, help="Number of micro-training steps")
     p.add_argument("--seed", type=int, default=20260305, help="Global random seed")
     p.add_argument("--lr", type=float, default=0.08, help="Optimizer learning rate")
+    p.add_argument(
+        "--sinkhorn-temperature",
+        type=float,
+        default=0.10,
+        help="C2 Sinkhorn temperature (tau). Primary sweep factor for C6.",
+    )
     p.add_argument("--cache-root", type=Path, default=Path("/tmp/wsovvis_stagec_c5_clip_cache"), help="C1 prototype cache root")
     p.add_argument(
         "--real-run-root",
@@ -49,6 +55,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=6,
         help="Cap positive labels from annotation-derived video labels",
+    )
+    p.add_argument(
+        "--min-positive-labels",
+        type=int,
+        default=1,
+        help="Require at least this many positive labels when selecting real-backed sample.",
+    )
+    p.add_argument(
+        "--preferred-video-id",
+        type=str,
+        default=None,
+        help="Optional explicit video_id to select in real mode (must satisfy selection constraints).",
     )
     p.add_argument("--out-json", type=Path, default=None, help="Optional path to write full run summary JSON")
     return p
@@ -150,6 +168,8 @@ def load_real_backed_micro_batch(
     sample_video_limit: int,
     max_tracks: int,
     max_positive_labels: int,
+    min_positive_labels: int = 1,
+    preferred_video_id: str | None = None,
 ) -> dict[str, Any]:
     if sample_video_limit < 1:
         raise ValueError("sample_video_limit must be >= 1")
@@ -157,6 +177,8 @@ def load_real_backed_micro_batch(
         raise ValueError("max_tracks must be >= 1")
     if max_positive_labels < 1:
         raise ValueError("max_positive_labels must be >= 1")
+    if min_positive_labels < 1:
+        raise ValueError("min_positive_labels must be >= 1")
 
     bridge_payload, bridge_summary = build_normalized_bridge_input_from_real_stageb_sidecar(
         run_root=run_root,
@@ -167,6 +189,7 @@ def load_real_backed_micro_batch(
 
     selected_video: dict[str, Any] | None = None
     selected_positive_ids: list[int] = []
+    preferred_key = None if preferred_video_id is None else str(preferred_video_id)
     for result in bridge_payload.get("stageb_video_results", ()):
         if not isinstance(result, dict):
             continue
@@ -176,16 +199,23 @@ def load_real_backed_micro_batch(
         if not isinstance(tracks, list) or not tracks:
             continue
         video_id = str(result.get("video_id"))
+        if preferred_key is not None and video_id != preferred_key:
+            continue
         positives = labels_by_video.get(video_id, [])
-        if not positives:
+        if len(positives) < min_positive_labels:
             continue
         selected_video = result
         selected_positive_ids = positives[:max_positive_labels]
         break
     if selected_video is None:
+        if preferred_key is not None:
+            raise ValueError(
+                "failed to select preferred video with required labels/tracks; "
+                f"run_root={run_root}; preferred_video_id={preferred_key}; min_positive_labels={min_positive_labels}"
+            )
         raise ValueError(
-            "failed to select real-backed video with success tracks and non-empty annotation labels; "
-            f"run_root={run_root}"
+            "failed to select real-backed video with success tracks and sufficient annotation labels; "
+            f"run_root={run_root}; min_positive_labels={min_positive_labels}"
         )
 
     selected_tracks = selected_video["tracks"][:max_tracks]
@@ -212,6 +242,7 @@ def load_real_backed_micro_batch(
         "selected_num_tracks_total": int(len(selected_video["tracks"])),
         "selected_num_tracks_used": int(track_features_np.shape[0]),
         "selected_num_positive_labels": int(len(positive_label_ids)),
+        "selected_positive_label_ids": [int(x) for x in positive_label_ids],
         "split_annotation_json_path": str(split_json_path),
         "bridge_summary": bridge_summary,
     }
@@ -264,6 +295,8 @@ def main() -> int:
             sample_video_limit=int(args.sample_video_limit),
             max_tracks=int(args.max_tracks),
             max_positive_labels=int(args.max_positive_labels),
+            min_positive_labels=int(args.min_positive_labels),
+            preferred_video_id=args.preferred_video_id,
         )
     else:
         batch = _build_synthetic_batch()
@@ -274,7 +307,7 @@ def main() -> int:
         "loss_key": "loss_stage_c_semantic",
         "loss_weight": 1.0,
         "assignment_backend": "c2_sinkhorn_minimal_v1",
-        "sinkhorn_temperature": 0.10,
+        "sinkhorn_temperature": float(args.sinkhorn_temperature),
         "sinkhorn_iterations": 20,
         "sinkhorn_tolerance": 1e-6,
         "sinkhorn_eps": 1e-12,
@@ -318,11 +351,15 @@ def main() -> int:
         "selected_num_tracks_total": batch["selected_num_tracks_total"],
         "selected_num_tracks_used": batch["selected_num_tracks_used"],
         "selected_num_positive_labels": batch["selected_num_positive_labels"],
+        "selected_positive_label_ids": batch["selected_positive_label_ids"],
         "split_annotation_json_path": batch["split_annotation_json_path"],
         "bridge_summary": batch["bridge_summary"],
         "seed": int(args.seed),
         "steps": int(args.steps),
         "lr": float(args.lr),
+        "sinkhorn_temperature": float(args.sinkhorn_temperature),
+        "min_positive_labels": int(args.min_positive_labels),
+        "preferred_video_id": args.preferred_video_id,
         "backend_locked": final["assignment_backend"] == "c2_sinkhorn_minimal_v1",
         "final": final,
         "all_steps": step_summaries,
