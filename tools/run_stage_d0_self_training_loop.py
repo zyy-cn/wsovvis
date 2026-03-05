@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional path to write top-level Stage D0 run summary JSON",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional deterministic seed for bounded smoke reproducibility",
     )
     return p
 
@@ -225,6 +232,8 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = _build_parser().parse_args()
+    if args.seed is not None:
+        random.seed(int(args.seed))
     if args.round_index < 0:
         raise ValueError("--round-index must be >= 0")
     if args.max_rounds < 1:
@@ -349,6 +358,7 @@ def main() -> int:
         "status": "PASS",
         "schema_name": "wsovvis.stage_d_loop_summary_v1",
         "schema_version": "1.0",
+        "seed": int(args.seed) if args.seed is not None else None,
         "round_index_start": int(args.round_index),
         "max_rounds": int(args.max_rounds),
         "refine_mode": str(args.refine_mode),

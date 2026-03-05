@@ -76,6 +76,8 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
         [
             "--stagec-summary-json",
             str(fixture_path),
+            "--seed",
+            "20260305",
             "--tiny-pinned",
             "--round-index",
             "0",
@@ -123,6 +125,7 @@ def test_d0_round0_round1_with_minimal_refine_and_stagec_seed(tmp_path: Path) ->
     assert 909001 in round1["round_output_summary"]["candidate_label_ids"]
     assert run_summary["schema_name"] == "wsovvis.stage_d_loop_summary_v1"
     assert run_summary["schema_version"] == "1.0"
+    assert run_summary["seed"] == 20260305
     assert run_summary["round_policy_name"] == "minimal_curriculum_v1"
     assert run_summary["round_policy_applied"] is True
     assert run_summary["round_policy_stats"]["policy_applied_round_count"] == 1
