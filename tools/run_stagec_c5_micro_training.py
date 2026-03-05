@@ -97,7 +97,12 @@ def _resolve_split_annotation_path(run_root: Path) -> Path:
     if val_path.is_absolute():
         return val_path
     repo_root = Path.cwd()
-    candidate_paths = [repo_root / val_path, run_root / val_path]
+    candidate_paths = [repo_root / val_path]
+    probe = run_root
+    while probe != probe.parent:
+        candidate_paths.append(probe / val_path)
+        probe = probe.parent
+    candidate_paths.append(Path.cwd() / val_path)
     for candidate in candidate_paths:
         if candidate.exists():
             return candidate
