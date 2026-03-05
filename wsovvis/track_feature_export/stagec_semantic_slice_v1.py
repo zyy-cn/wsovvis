@@ -343,6 +343,119 @@ def run_stagec_assignment_stub_v1(batch: StageCSemanticBatchV1) -> StageCSemanti
     )
 
 
+def run_stagec_assignment_sinkhorn_minimal_v1(
+    batch: StageCSemanticBatchV1,
+    *,
+    temperature: float = 0.10,
+    iterations: int = 20,
+    tolerance: float = 1e-6,
+    eps: float = 1e-12,
+    bg_capacity_weight: float = 1.5,
+    unk_fg_capacity_weight: float = 1.5,
+) -> StageCSemanticAssignmentOutputV1:
+    """C2 minimal masked Sinkhorn assignment.
+
+    Semantics:
+      - valid rows are normalized to row-mass ~= 1;
+      - column masses follow a soft target capacity vector;
+      - `candidate_matrix <= 0` entries are treated as forbidden transport edges.
+      - richer diagnostics and semantic-loss coupling are intentionally deferred to C3/C4.
+    """
+
+    normalized = normalize_stagec_semantic_batch_v1(batch)
+    _require(np.isfinite(float(temperature)) and float(temperature) > 0.0, "temperature", "must be finite and > 0")
+    _require(isinstance(iterations, int) and iterations >= 1, "iterations", "must be integer >= 1")
+    _require(np.isfinite(float(tolerance)) and float(tolerance) >= 0.0, "tolerance", "must be finite and >= 0")
+    _require(np.isfinite(float(eps)) and float(eps) > 0.0, "eps", "must be finite and > 0")
+    _require(
+        np.isfinite(float(bg_capacity_weight)) and float(bg_capacity_weight) >= 0.0,
+        "bg_capacity_weight",
+        "must be finite and >= 0",
+    )
+    _require(
+        np.isfinite(float(unk_fg_capacity_weight)) and float(unk_fg_capacity_weight) >= 0.0,
+        "unk_fg_capacity_weight",
+        "must be finite and >= 0",
+    )
+
+    n_track, _ = normalized.track_features.shape
+    n_cand = normalized.prototype_features.shape[0]
+    valid_track_mask = normalized.valid_track_mask if normalized.valid_track_mask is not None else np.ones((n_track,), dtype=np.bool_)
+    valid_column_mask = (
+        normalized.valid_column_mask if normalized.valid_column_mask is not None else np.ones((n_cand,), dtype=np.bool_)
+    )
+
+    soft = np.zeros((n_track, n_cand), dtype=np.float32)
+    valid_rows = np.flatnonzero(valid_track_mask)
+    valid_cols = np.flatnonzero(valid_column_mask)
+    if valid_rows.size == 0 or valid_cols.size == 0:
+        return StageCSemanticAssignmentOutputV1(
+            soft_assignment=soft,
+            valid_track_mask=valid_track_mask,
+            valid_column_mask=valid_column_mask,
+            backend="c2_sinkhorn_minimal_v1",
+        )
+
+    row_sub = normalized.track_features[valid_rows].astype(np.float64, copy=False)
+    col_sub = normalized.prototype_features[valid_cols].astype(np.float64, copy=False)
+    score = row_sub @ col_sub.T
+    _require(np.isfinite(score).all(), "score_matrix", "must be finite")
+
+    cand = normalized.candidate_matrix[np.ix_(valid_rows, valid_cols)].astype(np.float64, copy=False)
+    allowed = cand > 0.0
+    valid_label_ids = tuple(normalized.candidate_label_ids[col] for col in valid_cols)
+    bg_pos = valid_label_ids.index(STAGEC_BG_LABEL_ID) if STAGEC_BG_LABEL_ID in valid_label_ids else None
+    unk_pos = valid_label_ids.index(STAGEC_UNK_FG_LABEL_ID) if STAGEC_UNK_FG_LABEL_ID in valid_label_ids else None
+    for i in range(allowed.shape[0]):
+        if allowed[i].any():
+            continue
+        if bg_pos is not None:
+            allowed[i, int(bg_pos)] = True
+        elif unk_pos is not None:
+            allowed[i, int(unk_pos)] = True
+        else:
+            allowed[i, :] = True
+
+    score_masked = np.where(allowed, score, -1e12)
+    row_max = np.max(score_masked, axis=1, keepdims=True)
+    stable = (score_masked - row_max) / float(temperature)
+    kernel = np.exp(stable)
+    kernel = np.where(allowed, np.maximum(kernel, float(eps)), 0.0)
+    _require(np.isfinite(kernel).all(), "kernel", "must be finite")
+
+    target_col_mass = np.full((valid_cols.size,), 1.0, dtype=np.float64)
+    if bg_pos is not None:
+        target_col_mass[int(bg_pos)] *= float(bg_capacity_weight)
+    if unk_pos is not None:
+        target_col_mass[int(unk_pos)] *= float(unk_fg_capacity_weight)
+    target_col_mass_sum = float(np.sum(target_col_mass))
+    _require(target_col_mass_sum > 0.0, "target_col_mass", "sum must be > 0")
+    target_col_mass = target_col_mass / target_col_mass_sum * float(valid_rows.size)
+
+    plan = kernel.copy()
+    for _ in range(int(iterations)):
+        row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(eps))
+        plan = plan / row_sums
+        col_sums = np.maximum(np.sum(plan, axis=0, keepdims=True), float(eps))
+        plan = plan * (target_col_mass.reshape(1, -1) / col_sums)
+        row_err = float(np.sum(np.abs(np.sum(plan, axis=1) - 1.0)))
+        col_err = float(np.sum(np.abs(np.sum(plan, axis=0) - target_col_mass)))
+        if max(row_err, col_err) <= float(tolerance):
+            break
+
+    row_sums = np.maximum(np.sum(plan, axis=1, keepdims=True), float(eps))
+    posterior = plan / row_sums
+    posterior = np.where(allowed, posterior, 0.0)
+    posterior = posterior / np.maximum(np.sum(posterior, axis=1, keepdims=True), float(eps))
+    soft[np.ix_(valid_rows, valid_cols)] = posterior.astype(np.float32)
+    return StageCSemanticAssignmentOutputV1(
+        soft_assignment=soft,
+        valid_track_mask=valid_track_mask,
+        valid_column_mask=valid_column_mask,
+        backend="c2_sinkhorn_minimal_v1",
+    )
+
+
 def compute_stagec_semantic_loss_hook_stub_v1(
     hook_input: StageCSemanticLossHookInputV1,
 ) -> StageCSemanticLossHookOutputV1:

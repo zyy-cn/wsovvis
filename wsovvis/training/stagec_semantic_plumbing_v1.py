@@ -13,6 +13,7 @@ from wsovvis.track_feature_export.stagec_semantic_slice_v1 import (
     build_stagec_candidate_set_v1,
     build_stagec_prototype_candidate_stub_v1,
     compute_stagec_semantic_loss_hook_stub_v1,
+    run_stagec_assignment_sinkhorn_minimal_v1,
     run_stagec_assignment_stub_v1,
 )
 
@@ -74,7 +75,24 @@ def build_stagec_semantic_plumbing_c0(
         valid_track_mask=valid_track_mask,
         valid_column_mask=valid_column_mask,
     )
-    assignment = run_stagec_assignment_stub_v1(batch)
+    assignment_backend = cfg.get("assignment_backend", "c0_uniform_stub_v1")
+    _require(
+        isinstance(assignment_backend, str) and assignment_backend in {"c0_uniform_stub_v1", "c2_sinkhorn_minimal_v1"},
+        "stage_c_semantic.assignment_backend",
+        "must be one of {'c0_uniform_stub_v1','c2_sinkhorn_minimal_v1'}",
+    )
+    if assignment_backend == "c2_sinkhorn_minimal_v1":
+        assignment = run_stagec_assignment_sinkhorn_minimal_v1(
+            batch,
+            temperature=float(cfg.get("sinkhorn_temperature", 0.10)),
+            iterations=int(cfg.get("sinkhorn_iterations", 20)),
+            tolerance=float(cfg.get("sinkhorn_tolerance", 1e-6)),
+            eps=float(cfg.get("sinkhorn_eps", 1e-12)),
+            bg_capacity_weight=float(cfg.get("sinkhorn_bg_capacity_weight", 1.5)),
+            unk_fg_capacity_weight=float(cfg.get("sinkhorn_unk_fg_capacity_weight", 1.5)),
+        )
+    else:
+        assignment = run_stagec_assignment_stub_v1(batch)
     loss_output = compute_stagec_semantic_loss_hook_stub_v1(
         StageCSemanticLossHookInputV1(
             batch=batch,
@@ -97,6 +115,7 @@ def build_stagec_semantic_plumbing_c0(
         "loss_applied": False,
         "loss_key": loss_output.loss_key,
         "loss_value": float(loss_output.loss_value),
+        "assignment_backend": assignment.backend,
         "inserted_into_loss_dict": inserted_into_loss_dict,
         "shape_summary": {
             "F": tuple(batch.track_features.shape),

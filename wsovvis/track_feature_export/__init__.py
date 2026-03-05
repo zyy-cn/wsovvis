@@ -65,6 +65,7 @@ from .stagec_semantic_slice_v1 import (
     compute_stagec_semantic_loss_hook_stub_v1,
     merge_stagec_candidate_label_ids_v1,
     normalize_stagec_semantic_batch_v1,
+    run_stagec_assignment_sinkhorn_minimal_v1,
     run_stagec_assignment_stub_v1,
     select_stagec_topk_label_ids_from_scores_v1,
 )
@@ -128,6 +129,7 @@ __all__ = [
     "load_task_local_input",
     "merge_stagec_candidate_label_ids_v1",
     "normalize_stagec_semantic_batch_v1",
+    "run_stagec_assignment_sinkhorn_minimal_v1",
     "run_stagec1_mil_baseline_offline",
     "run_stagec_assignment_stub_v1",
     "save_stagec_clip_text_prototype_cache_v1",
