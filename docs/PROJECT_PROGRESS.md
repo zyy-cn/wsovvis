@@ -972,7 +972,42 @@ Add a focused helper to standardize canonical-runner wsovvis_live linkage triage
 
 ---
 
-## Validation evidence highlights (through Stage D closure + N28)
+## 2026-03-05 — N29.r1 completed (real-runner canonical replay verification closure + docs continuity sync)
+
+### Scope
+Close the remaining N29 gap with one real-runner canonical replay proof using integrated bootstrap preflight flags, then perform minimal continuity docs sync.
+
+### Completed
+- Confirmed N29 integrated bootstrap preflight options are present in canonical replay wrapper:
+  - `tools/run_stage_d11_canonical_replay.sh`
+  - flags: `--bootstrap-link-check`, `--bootstrap-link-fix`, `--bootstrap-runner-root`
+- Executed one real canonical replay smoke on `gpu4090d` with conda-first runtime and integrated preflight enabled.
+- Replay used bootstrap fix + enforced re-check in-wrapper and reached pass:
+  - `D11_CANONICAL_REPLAY=PASS`
+- Maintained fixed validation ladder and hard-stop behavior (no `SKIPPED` continuation).
+
+### Validation
+- Real runner path: `/home/zyy/code/wsovvis_runner_n29r1` (branch `staged-nonzero-semantics`, runtime commit `f36c93d336ed09d7e2cf515a3516b76f7656282a`).
+- Conda-first preflight passed:
+  - `source ~/software/miniconda3/etc/profile.d/conda.sh`
+  - `conda activate wsovvis`
+  - `python -m pytest --version` -> `pytest 9.0.2`
+- Canonical replay command:
+  - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-fix --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+- Bootstrap stages observed:
+  - `bootstrap_link_preflight_fix` -> `FIXED` on managed links
+  - `bootstrap_link_preflight_recheck` -> `OK` on managed links
+- Replay smoke stages passed:
+  - `n10_layered_fast_gate PASS`
+  - `pilot_helper_smoke PASS`
+  - `D11_CANONICAL_REPLAY=PASS`
+
+### Notes
+- N29.r1 closure remained tooling/verification/docs only; no Stage D semantic expansion.
+
+---
+
+## Validation evidence highlights (through Stage D closure + N29.r1)
 
 ### Canonical remote validation discipline (preserved)
 - Canonical remote host/path usage remained consistent in PASS evidence:

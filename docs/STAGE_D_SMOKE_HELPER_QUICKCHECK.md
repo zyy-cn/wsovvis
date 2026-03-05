@@ -75,6 +75,8 @@ bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-
 bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-fix --bootstrap-runner-root "$PWD"
 ```
 
+Note: `--help` output only confirms flag surface visibility; it is not execution verification of bootstrap preflight behavior.
+
 Branch-local CI mirror for quick pipeline wiring (N13):
 
 ```bash

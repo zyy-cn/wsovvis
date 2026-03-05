@@ -1,4 +1,4 @@
-# Session Handoff: Stage D Closure Complete (D1-D12) + N13/N14/N15 Tooling Wiring
+# Session Handoff: Stage D Closure Complete (D1-D12) + N13/N14/N15 + N29.r1 Verification Closure
 
 ## Current status snapshot
 - Stage D1-D12 is completed and closed for this milestone.
@@ -27,8 +27,17 @@
   - canonical-runner wsovvis_live link check/fix helper added:
     - `tools/check_canonical_runner_bootstrap_links.py`
   - helper docs integrated into Stage D quick-check runbook.
-- Latest branch head at this closure sync point:
-  - `staged-nonzero-semantics` / `origin/staged-nonzero-semantics` -> `fe94247aff03853f1c8ddd85f023a7957084a367`
+- N29.r1 is complete and closed:
+  - N29 bootstrap preflight integration landed in `tools/run_stage_d11_canonical_replay.sh`.
+  - real-runner canonical replay verified once on `gpu4090d` with integrated bootstrap fix+recheck preflight and fixed ladder.
+  - canonical replay command used:
+    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-fix --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+  - closure replay markers:
+    - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_fix PASS`
+    - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_recheck PASS`
+    - `D11_CANONICAL_REPLAY=PASS`
+- Latest verified runtime head at this closure sync point:
+  - `staged-nonzero-semantics` / `origin/staged-nonzero-semantics` -> `f36c93d336ed09d7e2cf515a3516b76f7656282a`
 - Current state remains tooling/docs continuity lock, not new training behavior implementation.
 
 ## What is stable and must be preserved
@@ -80,6 +89,7 @@
   - `codex/2026030304_staged_nonzero_semantics/32_output.txt` (N27 implementation + canonical targeted PASS, replay blocker evidence)
   - `codex/2026030304_staged_nonzero_semantics/33_output.txt` (N27.r1 bootstrap fix + replay PASS)
   - `codex/2026030304_staged_nonzero_semantics/34_output.txt` (N28 helper + docs integration closure)
+  - `codex/2026030502_stage_d_n29r1_real_runner_canonical_replay_and_docs_sync_tier2/01_output.txt` (N29.r1 real-runner replay closure + docs sync)
 
 ## Operational continuity notes (N26/N27/N28)
 - Keep canonical-first verification pattern when local pytest is unavailable:
