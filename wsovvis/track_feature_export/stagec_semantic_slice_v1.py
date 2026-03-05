@@ -485,3 +485,116 @@ def compute_stagec_semantic_loss_hook_stub_v1(
         loss_value=0.0,
         diagnostics=diagnostics,
     )
+
+
+def compute_stagec_semantic_loss_hook_c3_minimal_v1(
+    hook_input: StageCSemanticLossHookInputV1,
+    *,
+    track_features_tensor: Any,
+    prototype_features_tensor: Any,
+    positive_label_ids: Sequence[int | str] | None = None,
+    track_objectness: Any | None = None,
+    score_temperature: float = 0.10,
+    coverage_target: float = 0.50,
+    alignment_weight: float = 1.0,
+    coverage_weight: float = 0.25,
+    fg_not_bg_weight: float = 0.10,
+    eps: float = 1e-8,
+) -> tuple[Any, StageCSemanticLossHookOutputV1]:
+    """C3 minimal semantic loss coupling with torch autograd support."""
+
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - validated in remote canonical env
+        raise StageCSemanticSliceError("torch is required for C3 minimal semantic loss path") from exc
+
+    batch = normalize_stagec_semantic_batch_v1(hook_input.batch)
+    assignment = hook_input.assignment
+    _require(assignment.backend == "c2_sinkhorn_minimal_v1", "assignment.backend", "must be c2_sinkhorn_minimal_v1 for C3")
+    _require(isinstance(hook_input.loss_key, str) and hook_input.loss_key, "hook_input.loss_key", "must be non-empty")
+    _require(np.isfinite(float(hook_input.loss_weight)), "hook_input.loss_weight", "must be finite")
+    _require(np.isfinite(float(score_temperature)) and float(score_temperature) > 0.0, "score_temperature", "must be finite and > 0")
+    _require(np.isfinite(float(coverage_target)) and float(coverage_target) >= 0.0, "coverage_target", "must be finite and >= 0")
+    _require(np.isfinite(float(alignment_weight)) and float(alignment_weight) >= 0.0, "alignment_weight", "must be finite and >= 0")
+    _require(np.isfinite(float(coverage_weight)) and float(coverage_weight) >= 0.0, "coverage_weight", "must be finite and >= 0")
+    _require(np.isfinite(float(fg_not_bg_weight)) and float(fg_not_bg_weight) >= 0.0, "fg_not_bg_weight", "must be finite and >= 0")
+    _require(np.isfinite(float(eps)) and float(eps) > 0.0, "eps", "must be finite and > 0")
+
+    _require(
+        tuple(track_features_tensor.shape) == tuple(batch.track_features.shape),
+        "track_features_tensor.shape",
+        "must match batch.track_features shape",
+    )
+    _require(
+        tuple(prototype_features_tensor.shape) == tuple(batch.prototype_features.shape),
+        "prototype_features_tensor.shape",
+        "must match batch.prototype_features shape",
+    )
+
+    if track_objectness is None:
+        objectness = torch.ones((batch.track_features.shape[0],), dtype=track_features_tensor.dtype, device=track_features_tensor.device)
+    else:
+        objectness = track_objectness.to(dtype=track_features_tensor.dtype, device=track_features_tensor.device)
+        _require(tuple(objectness.shape) == (batch.track_features.shape[0],), "track_objectness.shape", "must be [N_track]")
+
+    p = torch.as_tensor(assignment.soft_assignment, dtype=track_features_tensor.dtype, device=track_features_tensor.device)
+    valid_track = torch.as_tensor(
+        assignment.valid_track_mask.astype(np.float32),
+        dtype=track_features_tensor.dtype,
+        device=track_features_tensor.device,
+    )
+    valid_col = torch.as_tensor(
+        assignment.valid_column_mask.astype(np.float32),
+        dtype=track_features_tensor.dtype,
+        device=track_features_tensor.device,
+    )
+    p = p * valid_track.unsqueeze(1) * valid_col.unsqueeze(0)
+    p = p / torch.clamp(p.sum(dim=1, keepdim=True), min=float(eps))
+
+    logits = (track_features_tensor @ prototype_features_tensor.transpose(0, 1)) / float(score_temperature)
+    log_probs = torch.log_softmax(logits, dim=1)
+    alignment_per_track = -(p * log_probs).sum(dim=1)
+    alignment_loss = (alignment_per_track * valid_track).sum() / torch.clamp(valid_track.sum(), min=1.0)
+
+    positives = set(positive_label_ids or ())
+    pos_cols = [idx for idx, label_id in enumerate(batch.candidate_label_ids) if label_id in positives]
+    if pos_cols:
+        pos_p = p[:, pos_cols]
+        positive_presence = 1.0 - torch.prod(1.0 - pos_p, dim=0)
+        coverage_loss = torch.relu(float(coverage_target) - positive_presence).mean()
+    else:
+        coverage_loss = torch.zeros((), dtype=track_features_tensor.dtype, device=track_features_tensor.device)
+
+    if STAGEC_BG_LABEL_ID in batch.candidate_label_ids:
+        bg_idx = int(batch.candidate_label_ids.index(STAGEC_BG_LABEL_ID))
+        fg_not_bg_loss = ((objectness * p[:, bg_idx]) * valid_track).sum() / torch.clamp(valid_track.sum(), min=1.0)
+    else:
+        fg_not_bg_loss = torch.zeros((), dtype=track_features_tensor.dtype, device=track_features_tensor.device)
+
+    total = (
+        float(alignment_weight) * alignment_loss
+        + float(coverage_weight) * coverage_loss
+        + float(fg_not_bg_weight) * fg_not_bg_loss
+    )
+    total = float(hook_input.loss_weight) * total
+
+    diagnostics = {
+        "interface_version": "stagec_semantic_c3_v1",
+        "loss_hook_version": "stagec_semantic_loss_hook_c3_minimal_v1",
+        "n_track": int(batch.track_features.shape[0]),
+        "n_cand": int(batch.prototype_features.shape[0]),
+        "embedding_dim": int(batch.track_features.shape[1]),
+        "assignment_backend": assignment.backend,
+        "component_alignment": float(alignment_loss.detach().cpu().item()),
+        "component_coverage": float(coverage_loss.detach().cpu().item()),
+        "component_fg_not_bg": float(fg_not_bg_loss.detach().cpu().item()),
+        "num_positive_columns": int(len(pos_cols)),
+    }
+    hook_output = StageCSemanticLossHookOutputV1(
+        enabled=True,
+        applied=True,
+        loss_key=hook_input.loss_key,
+        loss_value=float(total.detach().cpu().item()),
+        diagnostics=diagnostics,
+    )
+    return total, hook_output
