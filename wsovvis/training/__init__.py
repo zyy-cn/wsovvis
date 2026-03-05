@@ -9,6 +9,10 @@ from .staged_attribution_plumbing_v1 import (
     consume_stage_d_attribution_config,
     resolve_stage_d_attribution_plumbing,
 )
+from .stagec_semantic_plumbing_v1 import (
+    StageCSemanticPlumbingError,
+    build_stagec_semantic_plumbing_c0,
+)
 
 __all__ = [
     "StageDAttributionPlumbingConfig",
@@ -18,4 +22,6 @@ __all__ = [
     "build_stage_d_objective_coupling_decision",
     "consume_stage_d_attribution_config",
     "resolve_stage_d_attribution_plumbing",
+    "StageCSemanticPlumbingError",
+    "build_stagec_semantic_plumbing_c0",
 ]
