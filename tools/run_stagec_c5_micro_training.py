@@ -68,6 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional explicit video_id to select in real mode (must satisfy selection constraints).",
     )
+    p.add_argument(
+        "--annotation-json",
+        type=Path,
+        default=None,
+        help="Optional explicit annotation JSON path used for positive-label lookup.",
+    )
     p.add_argument("--out-json", type=Path, default=None, help="Optional path to write full run summary JSON")
     return p
 
@@ -127,6 +133,30 @@ def _resolve_split_annotation_path(run_root: Path) -> Path:
     return candidate_paths[0]
 
 
+def _annotation_candidate_paths(run_root: Path, explicit_annotation_json: Path | None) -> list[Path]:
+    if explicit_annotation_json is not None:
+        p = explicit_annotation_json
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        return [p]
+
+    resolved = _resolve_split_annotation_path(run_root)
+    candidates: list[Path] = [resolved]
+    name = resolved.name
+    if "agnostic" not in name:
+        return candidates
+
+    variant_names = [name.replace("_agnostic_for_test", ""), name.replace("_agnostic", "")]
+    for variant_name in variant_names:
+        if variant_name == name:
+            continue
+        variant_path = resolved.with_name(variant_name)
+        if variant_path.exists() and variant_path not in candidates:
+            # Prefer non-agnostic variant first when present.
+            candidates.insert(0, variant_path)
+    return candidates
+
+
 def _load_annotation_label_lookup(split_json_path: Path) -> tuple[dict[str, list[int]], dict[int, str]]:
     payload = json.loads(split_json_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -170,6 +200,7 @@ def load_real_backed_micro_batch(
     max_positive_labels: int,
     min_positive_labels: int = 1,
     preferred_video_id: str | None = None,
+    annotation_json_path: Path | None = None,
 ) -> dict[str, Any]:
     if sample_video_limit < 1:
         raise ValueError("sample_video_limit must be >= 1")
@@ -184,29 +215,41 @@ def load_real_backed_micro_batch(
         run_root=run_root,
         sample_video_limit=sample_video_limit,
     )
-    split_json_path = _resolve_split_annotation_path(run_root)
-    labels_by_video, cat_name_by_id = _load_annotation_label_lookup(split_json_path)
-
     selected_video: dict[str, Any] | None = None
     selected_positive_ids: list[int] = []
+    selected_split_json_path: Path | None = None
+    selected_cat_name_by_id: dict[int, str] = {}
     preferred_key = None if preferred_video_id is None else str(preferred_video_id)
-    for result in bridge_payload.get("stageb_video_results", ()):
-        if not isinstance(result, dict):
+    for split_json_path in _annotation_candidate_paths(run_root, annotation_json_path):
+        if not split_json_path.exists():
             continue
-        if result.get("runtime_status") != "success":
+        labels_by_video, cat_name_by_id = _load_annotation_label_lookup(split_json_path)
+        candidate_rows: list[tuple[int, int, str, dict[str, Any], list[int]]] = []
+        for idx, result in enumerate(bridge_payload.get("stageb_video_results", ())):
+            if not isinstance(result, dict):
+                continue
+            if result.get("runtime_status") != "success":
+                continue
+            tracks = result.get("tracks")
+            if not isinstance(tracks, list) or not tracks:
+                continue
+            video_id = str(result.get("video_id"))
+            if preferred_key is not None and video_id != preferred_key:
+                continue
+            positives = labels_by_video.get(video_id, [])
+            if len(positives) < min_positive_labels:
+                continue
+            candidate_rows.append((len(positives), idx, video_id, result, positives))
+        if not candidate_rows:
             continue
-        tracks = result.get("tracks")
-        if not isinstance(tracks, list) or not tracks:
-            continue
-        video_id = str(result.get("video_id"))
-        if preferred_key is not None and video_id != preferred_key:
-            continue
-        positives = labels_by_video.get(video_id, [])
-        if len(positives) < min_positive_labels:
-            continue
-        selected_video = result
+
+        candidate_rows.sort(key=lambda row: (-row[0], row[2], row[1]))
+        _, _, _, selected_video, positives = candidate_rows[0]
         selected_positive_ids = positives[:max_positive_labels]
+        selected_split_json_path = split_json_path
+        selected_cat_name_by_id = cat_name_by_id
         break
+
     if selected_video is None:
         if preferred_key is not None:
             raise ValueError(
@@ -228,7 +271,7 @@ def load_real_backed_micro_batch(
 
     positive_label_ids = tuple(int(x) for x in selected_positive_ids)
     topk_label_ids = tuple(positive_label_ids)
-    label_text = {int(cid): str(cat_name_by_id.get(int(cid), f"class_{int(cid)}")) for cid in positive_label_ids}
+    label_text = {int(cid): str(selected_cat_name_by_id.get(int(cid), f"class_{int(cid)}")) for cid in positive_label_ids}
     label_text["__bg__"] = "background"
     label_text["__unk_fg__"] = "unknown foreground"
 
@@ -243,7 +286,7 @@ def load_real_backed_micro_batch(
         "selected_num_tracks_used": int(track_features_np.shape[0]),
         "selected_num_positive_labels": int(len(positive_label_ids)),
         "selected_positive_label_ids": [int(x) for x in positive_label_ids],
-        "split_annotation_json_path": str(split_json_path),
+        "split_annotation_json_path": str(selected_split_json_path) if selected_split_json_path is not None else None,
         "bridge_summary": bridge_summary,
     }
 
@@ -297,6 +340,7 @@ def main() -> int:
             max_positive_labels=int(args.max_positive_labels),
             min_positive_labels=int(args.min_positive_labels),
             preferred_video_id=args.preferred_video_id,
+            annotation_json_path=args.annotation_json,
         )
     else:
         batch = _build_synthetic_batch()
