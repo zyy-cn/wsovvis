@@ -921,7 +921,7 @@ Close N27 and N27.r1 by hardening replay/CLI skipped-pilot output assertions and
   - added compact field parsing/assertion strategy to reduce brittle full-line coupling,
   - preserved contradiction-path fail-fast guarantees (no false PASS markers).
 - N27 canonical targeted tests passed (`3 passed`) on canonical runner.
-- N27.r1 closed by repairing fresh-runner wsovvis_live symlink bootstrap in `/home/zyy/code/wsovvis_runner_n27`:
+- N27.r1 closed by repairing canonical-runner wsovvis_live symlink bootstrap in `/home/zyy/code/wsovvis_runner`:
   - `third_party/CutLER`, `third_party/dinov2`, `runs`, `weights`, `data`
 - Canonical replay rerun passed after bootstrap fix (`D11_CANONICAL_REPLAY=PASS`).
 - Runbook continuity updated to document the exact linkage pattern and first-check commands.
@@ -987,13 +987,13 @@ Close the remaining N29 gap with one real-runner canonical replay proof using in
 - Maintained fixed validation ladder and hard-stop behavior (no `SKIPPED` continuation).
 
 ### Validation
-- Real runner path: `/home/zyy/code/wsovvis_runner_n29r1` (branch `staged-nonzero-semantics`, runtime commit `f36c93d336ed09d7e2cf515a3516b76f7656282a`).
+- Real runner path: `/home/zyy/code/wsovvis_runner` (branch `staged-nonzero-semantics`, runtime commit `f36c93d336ed09d7e2cf515a3516b76f7656282a`).
 - Conda-first preflight passed:
   - `source ~/software/miniconda3/etc/profile.d/conda.sh`
   - `conda activate wsovvis`
   - `python -m pytest --version` -> `pytest 9.0.2`
 - Canonical replay command:
-  - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-fix --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+  - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-fix --bootstrap-runner-root /home/zyy/code/wsovvis_runner`
 - Bootstrap stages observed:
   - `bootstrap_link_preflight_fix` -> `FIXED` on managed links
   - `bootstrap_link_preflight_recheck` -> `OK` on managed links
@@ -1017,16 +1017,16 @@ Execute the N29 integrated bootstrap-preflight replay flow on the real canonical
   - `bash -n tools/run_stage_d11_canonical_replay.sh`
   - `bash tools/run_stage_d11_canonical_replay.sh --help`
 - Real-runner conda-first preflight captured:
-  - runner: `/home/zyy/code/wsovvis_runner_n29r1`
+  - runner: `/home/zyy/code/wsovvis_runner`
   - branch/head: `staged-nonzero-semantics` / `f36c93d336ed09d7e2cf515a3516b76f7656282a`
   - `python -m pytest --version` -> `pytest 9.0.2`
 - Integrated bootstrap check path executed on real runner:
-  - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+  - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner`
   - preflight check status remained `OK` on managed links.
 - Exactly one successful canonical replay smoke recorded in this closure run:
   - command run with conda-first + explicit runtime PYTHONPATH:
-    - `export PYTHONPATH=/home/zyy/code/wsovvis_runner_n29r1/third_party/VNext:${PYTHONPATH:-}`
-    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+    - `export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}`
+    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner`
   - result markers:
     - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_check PASS`
     - `D11_CANONICAL_REPLAY_STAGE=n10_layered_fast_gate PASS`
@@ -1034,7 +1034,7 @@ Execute the N29 integrated bootstrap-preflight replay flow on the real canonical
     - `D11_CANONICAL_REPLAY=PASS`
 
 ### Validation notes
-- Initial canonical path probe at `/home/zyy/code/wsovvis_runner` surfaced an older wrapper that did not yet expose N29 bootstrap flags (`Unknown argument: --bootstrap-link-check`), so real-runner validation was executed on the N29 runner path `/home/zyy/code/wsovvis_runner_n29r1`.
+- Canonical validation policy update: use only `/home/zyy/code/wsovvis_runner`; do not use `wsovvis_runner_*` side runners. If wrapper/version mismatch appears, sync/reset the canonical runner in-place before rerun.
 - No repo tooling code changes were required for N29 flow logic in this closure refresh.
 
 ### Next-step lock

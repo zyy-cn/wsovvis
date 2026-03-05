@@ -214,12 +214,12 @@ assert_log_has "D10_PILOT_APPLIED=True" "$REPLAY_LOG"
 - Cause: nested quoting around overrides and `PYTHONPATH`.
 - Fix: prefer `tools/remote_verify_wsovvis.sh` and keep commands simple; use `${PYTHONPATH:-}` in both env and command contexts.
 
-4. Fresh runner bootstrap missing shared symlinks (`DINOV2.REPO_PATH` / weights path asserts)
-- Cause: new runner clone misses non-git symlinks expected by canonical replay smoke.
+4. Canonical runner bootstrap missing shared symlinks (`DINOV2.REPO_PATH` / weights path asserts)
+- Cause: canonical runner state cleanup/reset removed non-git symlinks expected by canonical replay smoke.
 - Preferred helper (check/fix, idempotent for symlink cases):
 ```bash
-python tools/check_canonical_runner_bootstrap_links.py --runner-root /home/zyy/code/wsovvis_runner_n27 --check
-python tools/check_canonical_runner_bootstrap_links.py --runner-root /home/zyy/code/wsovvis_runner_n27 --fix
+python tools/check_canonical_runner_bootstrap_links.py --runner-root /home/zyy/code/wsovvis_runner --check
+python tools/check_canonical_runner_bootstrap_links.py --runner-root /home/zyy/code/wsovvis_runner --fix
 ```
 - Managed paths and expected targets:
   - `third_party/CutLER -> ../../wsovvis_live/third_party/CutLER`
@@ -231,7 +231,7 @@ python tools/check_canonical_runner_bootstrap_links.py --runner-root /home/zyy/c
   - `OK`, `MISSING`, `BROKEN_SYMLINK`, `WRONG_TARGET`, `FIXED`, `SKIPPED`
 - First check:
 ```bash
-cd /home/zyy/code/wsovvis_runner_n27
+cd /home/zyy/code/wsovvis_runner
 ls -l third_party/CutLER third_party/dinov2 runs weights data
 ```
 - Canonical linkage pattern:

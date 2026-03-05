@@ -31,8 +31,8 @@
   - N29 bootstrap preflight integration is present in `tools/run_stage_d11_canonical_replay.sh`.
   - tooling/verification/docs-only closure refresh executed on real runner with fixed ladder and one successful replay smoke.
   - canonical replay command used:
-    - `export PYTHONPATH=/home/zyy/code/wsovvis_runner_n29r1/third_party/VNext:${PYTHONPATH:-}`
-    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+    - `export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}`
+    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner`
   - closure replay markers:
     - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_check PASS`
     - `D11_CANONICAL_REPLAY_STAGE=n10_layered_fast_gate PASS`
@@ -62,7 +62,7 @@
 
 ## Canonical remote validation discipline (authoritative)
 - Host alias: `gpu4090d`
-- Runner repo (latest PASS evidence): `/home/zyy/code/wsovvis_runner_n29r1`
+- Runner repo (single canonical path): `/home/zyy/code/wsovvis_runner`
 - Conda-first activation:
   - `source ~/software/miniconda3/etc/profile.d/conda.sh`
   - `conda activate wsovvis`
@@ -71,6 +71,7 @@
 - PYTHONPATH must use dual form with `${PYTHONPATH:-}`:
   - `export PYTHONPATH="$PWD/third_party/VNext:$PWD/third_party/CutLER:$PWD:${PYTHONPATH:-}"`
 - If claiming PASS, confirm local intended commit equals remote checked-out `HEAD`.
+- Do not create `wsovvis_runner_*` side directories or use `git worktree` for canonical runs; resolve dirty state via git inside `/home/zyy/code/wsovvis_runner`.
 - Task-output path discipline:
   - required: `codex/<task_dir>/xx_output.txt` (sibling to the current prompt)
   - forbidden: repo-root `xx_output.txt`
