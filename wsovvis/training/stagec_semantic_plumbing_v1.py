@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 
+from wsovvis.track_feature_export.stagec_clip_text_prototype_cache_v1 import (
+    get_or_build_stagec_clip_text_prototype_cache_v1,
+)
 from wsovvis.track_feature_export.stagec_semantic_slice_v1 import (
     StageCSemanticLossHookInputV1,
+    build_stagec_candidate_set_v1,
     build_stagec_prototype_candidate_stub_v1,
     compute_stagec_semantic_loss_hook_stub_v1,
     run_stagec_assignment_stub_v1,
@@ -105,3 +110,79 @@ def build_stagec_semantic_plumbing_c0(
         },
         "diagnostics": dict(loss_output.diagnostics),
     }
+
+
+def build_stagec_semantic_plumbing_c1_clip_text_default(
+    raw_config: Mapping[str, Any] | None,
+    *,
+    track_features: np.ndarray,
+    positive_label_ids: tuple[int | str, ...] | None = None,
+    topk_label_ids: tuple[int | str, ...] | None = None,
+    topk_score_items: tuple[tuple[int | str, float], ...] | None = None,
+    topk_k: int = 0,
+    merge_mode: str = "yp_plus_topk",
+    track_label_ids: tuple[tuple[int | str, ...], ...] | None = None,
+    include_bg: bool = False,
+    include_unk_fg: bool = False,
+    cache_root: str | Path = ".cache/stagec_clip_text_proto_v1",
+    label_text_by_id: Mapping[int | str, str] | None = None,
+    model_name: str = "clip-vit-b32",
+    prompt_variant: str = "default",
+    valid_track_mask: np.ndarray | None = None,
+    valid_column_mask: np.ndarray | None = None,
+    loss_dict: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """C1 additive plumbing: candidate assembly + CLIP text prototype cache path."""
+
+    _require(isinstance(track_features, np.ndarray), "track_features", "must be numpy ndarray")
+    _require(track_features.ndim == 2, "track_features", "must be rank-2 [N_track, D]")
+    _require(track_features.shape[1] > 0, "track_features.shape[1]", "must be > 0")
+    n_track, embedding_dim = int(track_features.shape[0]), int(track_features.shape[1])
+
+    candidate_set = build_stagec_candidate_set_v1(
+        n_track=n_track,
+        positive_label_ids=positive_label_ids,
+        topk_label_ids=topk_label_ids,
+        topk_score_items=topk_score_items,
+        topk_k=topk_k,
+        merge_mode=merge_mode,
+        track_label_ids=track_label_ids,
+        include_bg=include_bg,
+        include_unk_fg=include_unk_fg,
+    )
+    _require(len(candidate_set.candidate_label_ids) > 0, "candidate_label_ids", "must be non-empty for enabled C1 path")
+
+    proto_cache = get_or_build_stagec_clip_text_prototype_cache_v1(
+        cache_root=cache_root,
+        candidate_label_ids=candidate_set.candidate_label_ids,
+        label_text_by_id=label_text_by_id,
+        model_name=model_name,
+        prompt_variant=prompt_variant,
+        embedding_dim=embedding_dim,
+    )
+    result = build_stagec_semantic_plumbing_c0(
+        raw_config=raw_config,
+        track_features=track_features,
+        prototype_features=proto_cache.prototype_features,
+        candidate_label_ids=candidate_set.candidate_label_ids,
+        candidate_matrix=candidate_set.candidate_matrix,
+        valid_track_mask=valid_track_mask,
+        valid_column_mask=valid_column_mask,
+        loss_dict=loss_dict,
+    )
+    result["interface_version"] = "stagec_semantic_c1_v1"
+    result["candidate_summary"] = {
+        "merge_mode": merge_mode,
+        "candidate_label_ids": tuple(candidate_set.candidate_label_ids),
+        "n_cand": int(len(candidate_set.candidate_label_ids)),
+    }
+    result["prototype_cache"] = {
+        "backend": "clip_text_default_v1",
+        "cache_key": proto_cache.cache_key,
+        "cache_hit": bool(proto_cache.cache_hit),
+        "model_name": proto_cache.model_name,
+        "prompt_variant": proto_cache.prompt_variant,
+        "metadata_path": str(proto_cache.metadata_path),
+        "tensor_path": str(proto_cache.tensor_path),
+    }
+    return result

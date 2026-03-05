@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
+
+STAGEC_BG_LABEL_ID = "__bg__"
+STAGEC_UNK_FG_LABEL_ID = "__unk_fg__"
 
 
 class StageCSemanticSliceError(ValueError):
@@ -74,6 +77,173 @@ class StageCSemanticLossHookOutputV1:
     diagnostics: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class StageCCandidateSetV1:
+    candidate_label_ids: tuple[int | str, ...]
+    candidate_matrix: np.ndarray
+
+
+def _is_valid_label_id(label_id: object) -> bool:
+    return (isinstance(label_id, int) and not isinstance(label_id, bool)) or (
+        isinstance(label_id, str) and bool(label_id)
+    )
+
+
+def _normalize_label_id(label_id: object, *, field_path: str) -> int | str:
+    _require(_is_valid_label_id(label_id), field_path, "must be non-empty string or integer")
+    return label_id  # type: ignore[return-value]
+
+
+def _dedupe_stable_label_ids(label_ids: Iterable[int | str]) -> list[int | str]:
+    seen: set[int | str] = set()
+    ordered: list[int | str] = []
+    for label_id in label_ids:
+        if label_id in seen:
+            continue
+        seen.add(label_id)
+        ordered.append(label_id)
+    return ordered
+
+
+def merge_stagec_candidate_label_ids_v1(
+    *,
+    positive_label_ids: Sequence[int | str] | None = None,
+    topk_label_ids: Sequence[int | str] | None = None,
+    merge_mode: str = "yp_plus_topk",
+    include_bg: bool = False,
+    include_unk_fg: bool = False,
+    bg_label_id: int | str = STAGEC_BG_LABEL_ID,
+    unk_fg_label_id: int | str = STAGEC_UNK_FG_LABEL_ID,
+) -> tuple[int | str, ...]:
+    """Build deterministic Stage C C1 candidate labels from Y'/TopK sources."""
+
+    _require(
+        merge_mode in ("yp_only", "topk_only", "yp_plus_topk"),
+        "merge_mode",
+        "must be one of {'yp_only','topk_only','yp_plus_topk'}",
+    )
+    positives = [
+        _normalize_label_id(v, field_path=f"positive_label_ids[{i}]")
+        for i, v in enumerate(() if positive_label_ids is None else positive_label_ids)
+    ]
+    topk = [
+        _normalize_label_id(v, field_path=f"topk_label_ids[{i}]")
+        for i, v in enumerate(() if topk_label_ids is None else topk_label_ids)
+    ]
+
+    merged: list[int | str] = []
+    if merge_mode in ("yp_only", "yp_plus_topk"):
+        merged.extend(positives)
+    if merge_mode in ("topk_only", "yp_plus_topk"):
+        merged.extend(topk)
+    merged = _dedupe_stable_label_ids(merged)
+
+    if include_bg:
+        bg = _normalize_label_id(bg_label_id, field_path="bg_label_id")
+        if bg not in merged:
+            merged.append(bg)
+    if include_unk_fg:
+        unk = _normalize_label_id(unk_fg_label_id, field_path="unk_fg_label_id")
+        if unk not in merged:
+            merged.append(unk)
+    return tuple(merged)
+
+
+def select_stagec_topk_label_ids_from_scores_v1(
+    *,
+    label_score_items: Sequence[tuple[int | str, float]],
+    topk_k: int,
+) -> tuple[int | str, ...]:
+    """Select TopK labels with deterministic tie-breaking.
+
+    Scores are ranked descending. Ties are broken by first appearance index.
+    Duplicated labels keep the maximum score seen.
+    """
+
+    _require(isinstance(topk_k, int), "topk_k", "must be integer")
+    _require(topk_k >= 0, "topk_k", "must be >= 0")
+    best_score_by_label: dict[int | str, float] = {}
+    first_idx_by_label: dict[int | str, int] = {}
+    for idx, (raw_label, raw_score) in enumerate(label_score_items):
+        label = _normalize_label_id(raw_label, field_path=f"label_score_items[{idx}][0]")
+        score = float(raw_score)
+        _require(np.isfinite(score), f"label_score_items[{idx}][1]", "must be finite")
+        if label not in first_idx_by_label:
+            first_idx_by_label[label] = idx
+        prev = best_score_by_label.get(label)
+        if prev is None or score > prev:
+            best_score_by_label[label] = score
+    ranked = sorted(best_score_by_label.items(), key=lambda kv: (-kv[1], first_idx_by_label[kv[0]]))
+    return tuple(label for label, _ in ranked[:topk_k])
+
+
+def build_stagec_candidate_matrix_from_track_label_sets_v1(
+    *,
+    track_label_ids: Sequence[Sequence[int | str]],
+    candidate_label_ids: Sequence[int | str],
+) -> np.ndarray:
+    """Build [N_track, N_cand] candidate membership matrix from per-track labels."""
+
+    normalized_candidates = [
+        _normalize_label_id(v, field_path=f"candidate_label_ids[{i}]") for i, v in enumerate(candidate_label_ids)
+    ]
+    n_track = len(track_label_ids)
+    n_cand = len(normalized_candidates)
+    matrix = np.zeros((n_track, n_cand), dtype=np.float32)
+    col_by_label = {label_id: col for col, label_id in enumerate(normalized_candidates)}
+    for row, labels in enumerate(track_label_ids):
+        normalized_labels = {
+            _normalize_label_id(v, field_path=f"track_label_ids[{row}]") for v in labels
+        }
+        for label_id in normalized_labels:
+            col = col_by_label.get(label_id)
+            if col is not None:
+                matrix[row, col] = 1.0
+    return matrix
+
+
+def build_stagec_candidate_set_v1(
+    *,
+    n_track: int,
+    positive_label_ids: Sequence[int | str] | None = None,
+    topk_label_ids: Sequence[int | str] | None = None,
+    topk_score_items: Sequence[tuple[int | str, float]] | None = None,
+    topk_k: int = 0,
+    merge_mode: str = "yp_plus_topk",
+    track_label_ids: Sequence[Sequence[int | str]] | None = None,
+    include_bg: bool = False,
+    include_unk_fg: bool = False,
+) -> StageCCandidateSetV1:
+    """C1 candidate-set assembly with deterministic order and dedup."""
+
+    _require(isinstance(n_track, int), "n_track", "must be integer")
+    _require(n_track >= 0, "n_track", "must be >= 0")
+    _require(isinstance(topk_k, int), "topk_k", "must be integer")
+    _require(topk_k >= 0, "topk_k", "must be >= 0")
+    if topk_label_ids is None and topk_score_items is not None:
+        topk_label_ids = select_stagec_topk_label_ids_from_scores_v1(label_score_items=topk_score_items, topk_k=topk_k)
+    elif topk_label_ids is not None and topk_k > 0:
+        topk_label_ids = tuple(topk_label_ids[:topk_k])
+
+    candidate_label_ids = merge_stagec_candidate_label_ids_v1(
+        positive_label_ids=positive_label_ids,
+        topk_label_ids=topk_label_ids,
+        merge_mode=merge_mode,
+        include_bg=include_bg,
+        include_unk_fg=include_unk_fg,
+    )
+    n_cand = len(candidate_label_ids)
+    if track_label_ids is not None:
+        _require(len(track_label_ids) == n_track, "track_label_ids", "length must match n_track")
+        matrix = build_stagec_candidate_matrix_from_track_label_sets_v1(
+            track_label_ids=track_label_ids,
+            candidate_label_ids=candidate_label_ids,
+        )
+    else:
+        matrix = np.ones((n_track, n_cand), dtype=np.float32) if n_cand > 0 else np.zeros((n_track, 0), dtype=np.float32)
+    return StageCCandidateSetV1(candidate_label_ids=candidate_label_ids, candidate_matrix=matrix)
+
+
 def normalize_stagec_semantic_batch_v1(batch: StageCSemanticBatchV1) -> StageCSemanticBatchV1:
     _require(isinstance(batch.track_features, np.ndarray), "batch.track_features", "must be numpy ndarray")
     _require(batch.track_features.ndim == 2, "batch.track_features", "must be rank-2 [N_track, D]")
@@ -103,10 +273,7 @@ def normalize_stagec_semantic_batch_v1(batch: StageCSemanticBatchV1) -> StageCSe
     _require(isinstance(batch.candidate_label_ids, tuple), "batch.candidate_label_ids", "must be tuple")
     _require(len(batch.candidate_label_ids) == n_cand, "batch.candidate_label_ids", "length must match N_cand")
     for idx, label_id in enumerate(batch.candidate_label_ids):
-        ok = (isinstance(label_id, int) and not isinstance(label_id, bool)) or (
-            isinstance(label_id, str) and bool(label_id)
-        )
-        _require(ok, f"batch.candidate_label_ids[{idx}]", "must be non-empty string or integer")
+        _require(_is_valid_label_id(label_id), f"batch.candidate_label_ids[{idx}]", "must be non-empty string or integer")
 
     valid_track_mask = _validate_mask(batch.valid_track_mask, name="batch.valid_track_mask", expected_length=n_track)
     valid_column_mask = _validate_mask(batch.valid_column_mask, name="batch.valid_column_mask", expected_length=n_cand)

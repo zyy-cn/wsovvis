@@ -11,6 +11,7 @@ from .staged_attribution_plumbing_v1 import (
 )
 from .stagec_semantic_plumbing_v1 import (
     StageCSemanticPlumbingError,
+    build_stagec_semantic_plumbing_c1_clip_text_default,
     build_stagec_semantic_plumbing_c0,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "consume_stage_d_attribution_config",
     "resolve_stage_d_attribution_plumbing",
     "StageCSemanticPlumbingError",
+    "build_stagec_semantic_plumbing_c1_clip_text_default",
     "build_stagec_semantic_plumbing_c0",
 ]
