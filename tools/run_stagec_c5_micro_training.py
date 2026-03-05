@@ -388,6 +388,7 @@ def _build_synthetic_batch() -> dict[str, Any]:
         "selected_num_tracks_total": 4,
         "selected_num_tracks_used": 4,
         "selected_num_positive_labels": 2,
+        "selected_positive_label_ids": [101, 202],
         "temporal_pair_indices": ((0, 1), (1, 2), (2, 3)),
         "selected_num_temporal_pairs": 3,
         "split_annotation_json_path": None,
