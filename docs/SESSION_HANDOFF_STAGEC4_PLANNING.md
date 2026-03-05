@@ -41,7 +41,5 @@
 - C4.3-B repair + targeted canonical pass + determinism pass: `codex/2026030302_stagec4-c43-coverage-unkfg/07_output.txt`
 
 ## Next-step continuation (single concrete target)
-- Stage D planning/spec-lock task:
-  - define training-loop integration boundary for Stage C outputs,
-  - lock acceptance gates (parity/determinism/schema compatibility) before implementation,
-  - keep C4 scorer behavior/defaults unchanged unless a new gated milestone explicitly authorizes changes.
+- Policy-synced execution order (2026-03-05): run **N29.r1** first (real-runner canonical replay with integrated bootstrap preflight), then move to substantive Stage C semantic mainline in minimal slices (`C0 -> C1 -> C2 -> C3 -> C4`).
+- Exception rule: allow at most **1-2 extra prompts** only for unexpected blockers/errors, then return to the mainline sequence.

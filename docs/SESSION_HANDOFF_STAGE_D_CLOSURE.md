@@ -28,13 +28,15 @@
     - `tools/check_canonical_runner_bootstrap_links.py`
   - helper docs integrated into Stage D quick-check runbook.
 - N29.r1 is complete and closed:
-  - N29 bootstrap preflight integration landed in `tools/run_stage_d11_canonical_replay.sh`.
-  - real-runner canonical replay verified once on `gpu4090d` with integrated bootstrap fix+recheck preflight and fixed ladder.
+  - N29 bootstrap preflight integration is present in `tools/run_stage_d11_canonical_replay.sh`.
+  - tooling/verification/docs-only closure refresh executed on real runner with fixed ladder and one successful replay smoke.
   - canonical replay command used:
-    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-fix --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+    - `export PYTHONPATH=/home/zyy/code/wsovvis_runner_n29r1/third_party/VNext:${PYTHONPATH:-}`
+    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
   - closure replay markers:
-    - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_fix PASS`
-    - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_recheck PASS`
+    - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_check PASS`
+    - `D11_CANONICAL_REPLAY_STAGE=n10_layered_fast_gate PASS`
+    - `D11_CANONICAL_REPLAY_STAGE=pilot_helper_smoke PASS`
     - `D11_CANONICAL_REPLAY=PASS`
 - Latest verified runtime head at this closure sync point:
   - `staged-nonzero-semantics` / `origin/staged-nonzero-semantics` -> `f36c93d336ed09d7e2cf515a3516b76f7656282a`
@@ -60,7 +62,7 @@
 
 ## Canonical remote validation discipline (authoritative)
 - Host alias: `gpu4090d`
-- Runner repo: `/home/zyy/code/wsovvis_runner`
+- Runner repo (latest PASS evidence): `/home/zyy/code/wsovvis_runner_n29r1`
 - Conda-first activation:
   - `source ~/software/miniconda3/etc/profile.d/conda.sh`
   - `conda activate wsovvis`
@@ -90,6 +92,7 @@
   - `codex/2026030304_staged_nonzero_semantics/33_output.txt` (N27.r1 bootstrap fix + replay PASS)
   - `codex/2026030304_staged_nonzero_semantics/34_output.txt` (N28 helper + docs integration closure)
   - `codex/2026030502_stage_d_n29r1_real_runner_canonical_replay_and_docs_sync_tier2/01_output.txt` (N29.r1 real-runner replay closure + docs sync)
+  - `codex/2026030501_stage_d_n29_bootstrap_preflight_replay_closure_tier2/04_output.txt` (N29.r1 tooling/verification/docs-only closure refresh)
 
 ## Operational continuity notes (N26/N27/N28)
 - Keep canonical-first verification pattern when local pytest is unavailable:
@@ -108,4 +111,6 @@
   - existing non-symlink conflicts are reported as `SKIPPED` for manual review.
 
 ## Recommended next step (single best step)
-Define the next Stage D follow-up milestone for research-facing nonzero supervision semantics with explicit acceptance gates before implementation.
+Run Stage C semantic development mainline next, starting at **C0** (minimal semantic vertical-slice interface freeze), then continue `C1 -> C2 -> C3 -> C4` under minimal scope discipline.
+
+Exception rule: permit at most **1-2 extra prompts** only when unexpected blockers/errors appear, then return immediately to the mainline sequence above.

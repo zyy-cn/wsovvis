@@ -171,6 +171,7 @@ tools/run_stage_d9_helper_tests_quick.sh
 bash tools/run_stage_d10_layered_fast_gate.sh
 bash tools/run_stage_d10_layered_fast_gate.sh --with-pilot-smoke --pilot-on-mode pilot --pilot-on-weight 0.25 --pilot-scale 1e-6
 bash tools/run_stage_d11_canonical_replay.sh
+bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root "$PWD"
 bash tools/run_stage_d13_ci_quick_pipeline.sh
 python -m pytest -q tests/test_stage_d9_smoke_helper_v1.py
 tools/run_stage_d10_quick_checks.sh
@@ -181,6 +182,7 @@ tools/run_stage_d10_quick_checks.sh --on-mode pilot --on-weight 0.25 --pilot-sca
 Notes:
 - Use `${PYTHONPATH:-}` (not `$PYTHONPATH`) to avoid shell failures under `set -u`.
 - Keep quick checks targeted and GPU-free unless a task explicitly requires full D9/D10 smoke.
+- On canonical runner replay, keep `third_party/VNext` in `PYTHONPATH`; otherwise SeqFormer imports can fail (`detectron2.projects.seqformer`).
 
 Portable remote replay post-check assertions (prefer `rg`, fallback `grep`):
 

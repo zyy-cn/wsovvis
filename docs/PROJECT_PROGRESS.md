@@ -1007,6 +1007,41 @@ Close the remaining N29 gap with one real-runner canonical replay proof using in
 
 ---
 
+## 2026-03-05 — N29.r1 tooling/verification/docs-only closure refresh (real-runner integrated replay check path)
+
+### Scope
+Execute the N29 integrated bootstrap-preflight replay flow on the real canonical runner with fixed ladder discipline and stop after one successful replay smoke.
+
+### Completed
+- Local lightweight checks passed:
+  - `bash -n tools/run_stage_d11_canonical_replay.sh`
+  - `bash tools/run_stage_d11_canonical_replay.sh --help`
+- Real-runner conda-first preflight captured:
+  - runner: `/home/zyy/code/wsovvis_runner_n29r1`
+  - branch/head: `staged-nonzero-semantics` / `f36c93d336ed09d7e2cf515a3516b76f7656282a`
+  - `python -m pytest --version` -> `pytest 9.0.2`
+- Integrated bootstrap check path executed on real runner:
+  - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+  - preflight check status remained `OK` on managed links.
+- Exactly one successful canonical replay smoke recorded in this closure run:
+  - command run with conda-first + explicit runtime PYTHONPATH:
+    - `export PYTHONPATH=/home/zyy/code/wsovvis_runner_n29r1/third_party/VNext:${PYTHONPATH:-}`
+    - `bash tools/run_stage_d11_canonical_replay.sh --bootstrap-link-check --bootstrap-runner-root /home/zyy/code/wsovvis_runner_n29r1`
+  - result markers:
+    - `D11_CANONICAL_REPLAY_STAGE=bootstrap_link_preflight_check PASS`
+    - `D11_CANONICAL_REPLAY_STAGE=n10_layered_fast_gate PASS`
+    - `D11_CANONICAL_REPLAY_STAGE=pilot_helper_smoke PASS`
+    - `D11_CANONICAL_REPLAY=PASS`
+
+### Validation notes
+- Initial canonical path probe at `/home/zyy/code/wsovvis_runner` surfaced an older wrapper that did not yet expose N29 bootstrap flags (`Unknown argument: --bootstrap-link-check`), so real-runner validation was executed on the N29 runner path `/home/zyy/code/wsovvis_runner_n29r1`.
+- No repo tooling code changes were required for N29 flow logic in this closure refresh.
+
+### Next-step lock
+- Next prompt is Stage C mainline C0 (minimal semantic vertical slice interface freeze), unless a new blocker appears.
+
+---
+
 ## Validation evidence highlights (through Stage D closure + N29.r1)
 
 ### Canonical remote validation discipline (preserved)
@@ -1094,8 +1129,10 @@ Close the remaining N29 gap with one real-runner canonical replay proof using in
 - ✅ Stage D1-D12 completed (unified integration line through helper/runbook/quick-check reinforcement)
 - ✅ Stage D12 completed (quick-check wiring + runbook/docs reinforcement)
 - ▶️ Current state: **Stage D closure complete (docs-sync + continuity lock)**
-- ▶️ Next candidate direction (research-facing): **nonzero supervision semantics under a new gated Stage D follow-up**
-- ▶️ Next candidate direction (feature-facing): **longer smoke/training validation and CI depth expansion without changing current semantics**
+- ▶️ Policy-synced near-term execution order (2026-03-05):
+  - first: **N29.r1** canonical replay with integrated bootstrap preflight as final infra closure;
+  - then: return to **Stage C substantive semantic mainline** (`C0 -> C1 -> C2 -> C3 -> C4` minimal vertical slices).
+- ▶️ Exception rule: allow at most **1-2 extra prompts** only for unexpected blockers/errors, then return to the mainline sequence above.
 
 ### Stage D closure constraints (must remain true)
 - default-OFF compatibility remains mandatory.
