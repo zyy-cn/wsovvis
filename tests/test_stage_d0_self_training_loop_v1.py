@@ -538,6 +538,7 @@ def test_d0_minimal_regression_guard_blocks_round2_high_risk_additions(tmp_path:
     assert round2["round_guard_stats"]["fallback_high_risk_used"] is False
 
     assert run_summary["round_guard_name"] == "minimal_regression_guard_v1"
+    assert run_summary["guard_variant"] == "minimal_regression_guard_v1"
     assert run_summary["round_guard_stats"]["rounds_with_rejected_additions"] == [2]
     assert run_summary["round_guard_stats"]["rejected_additions_total"] == 1
     assert run_summary["round_guard_stats"]["accepted_additions_total"] == 1
@@ -594,3 +595,117 @@ def test_d0_minimal_regression_guard_uses_fallback_when_upstream_risk_missing(tm
     assert round2["round_guard_stats"]["upstream_risk_guardrail_v1_present"] is False
     assert round2["round_guard_stats"]["fallback_high_risk_used"] is True
     assert round2["candidate_label_ids_count_after"] == 4
+
+
+def test_d0_accept_top1_guard_keeps_one_under_high_risk(tmp_path: Path) -> None:
+    stagec_path = tmp_path / "stagec_high_risk_summary_keep_top1.json"
+    stagec_path.write_text(
+        json.dumps(
+            {
+                "assignment_backend_requested": "c9_em_minimal_v1",
+                "selected_video_id": "video_9",
+                "selected_positive_label_ids": [5, 7],
+                "final": {"candidate_label_ids": [5, 7, 11]},
+                "unknown_handling_diagnostics_v1": {
+                    "risk_guardrail_v1": {
+                        "risk_score": 3,
+                        "risk_level": "high",
+                        "triggered": True,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_json = tmp_path / "d0_guarded_keep_top1_summary.json"
+    round_root = tmp_path / "rounds_guarded_keep_top1"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(stagec_path),
+            "--seed",
+            "20260306",
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "3",
+            "--refine-mode",
+            "minimal_multiadd_v1",
+            "--refine-multiadd-count",
+            "3",
+            "--round-policy",
+            "none",
+            "--round-guard",
+            "accept_top1_only_under_guard_v1",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    round2 = run_summary["round_summaries"][2]
+
+    assert round2["guard_variant"] == "accept_top1_only_under_guard_v1"
+    assert round2["proposed_addition_ids"] == [909004, 909005, 909006]
+    assert round2["accepted_addition_ids"] == [909004]
+    assert round2["rejected_addition_ids"] == [909005, 909006]
+    assert round2["guard_decision"] == "accept_top1_only_due_to_high_risk_v1"
+    assert round2["candidate_label_ids_count_after"] == 7
+    assert round2["round_output_summary"]["candidate_label_ids"] == [5, 7, 11, 909001, 909002, 909003, 909004]
+    assert run_summary["guard_variant"] == "accept_top1_only_under_guard_v1"
+    assert run_summary["round_guard_stats"]["accepted_additions_total"] == 4
+    assert run_summary["round_guard_stats"]["rejected_additions_total"] == 2
+
+
+def test_d0_accept_top1_guard_uses_fallback_trigger(tmp_path: Path) -> None:
+    stagec_path = tmp_path / "stagec_no_risk_summary_keep_top1.json"
+    stagec_path.write_text(
+        json.dumps(
+            {
+                "assignment_backend_requested": "c9_em_minimal_v1",
+                "selected_video_id": "video_9",
+                "selected_positive_label_ids": [5, 7],
+                "final": {"candidate_label_ids": [5, 7, 11]},
+                "unknown_handling_diagnostics_v1": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_json = tmp_path / "d0_guarded_keep_top1_fallback_summary.json"
+    round_root = tmp_path / "rounds_guarded_keep_top1_fallback"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(stagec_path),
+            "--seed",
+            "20260307",
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "3",
+            "--refine-mode",
+            "minimal_multiadd_v1",
+            "--refine-multiadd-count",
+            "2",
+            "--round-policy",
+            "none",
+            "--round-guard",
+            "accept_top1_only_under_guard_v1",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    round2 = run_summary["round_summaries"][2]
+
+    assert round2["proposed_addition_ids"] == [909003, 909004]
+    assert round2["accepted_addition_ids"] == [909003]
+    assert round2["rejected_addition_ids"] == [909004]
+    assert round2["guard_decision"] == "accept_top1_only_due_to_high_risk_v1"
+    assert "fallback_guard_v1 triggered" in round2["guard_decision_reason"]
+    assert round2["round_guard_stats"]["fallback_high_risk_used"] is True

@@ -36,7 +36,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--round-guard",
-        choices=("none", "minimal_regression_guard_v1"),
+        choices=("none", "minimal_regression_guard_v1", "accept_top1_only_under_guard_v1"),
         default="none",
         help="Optional round-level guard applied after proposals/policy to avoid late-round regressions.",
     )
@@ -281,7 +281,7 @@ def _apply_round_guard(
     previous_candidate_ids: list[int],
     candidate_ids_after_policy: list[int],
     upstream_risk_guardrail_v1: Any,
-) -> tuple[list[int], str, list[int], list[int], dict[str, Any]]:
+) -> tuple[list[int], str, list[int], list[int], list[int], dict[str, Any]]:
     base_set = set(previous_candidate_ids)
     proposed_addition_ids = [label_id for label_id in candidate_ids_after_policy if label_id not in base_set]
     if round_guard == "none":
@@ -289,10 +289,11 @@ def _apply_round_guard(
             candidate_ids_after_policy,
             "round_guard=none; no round-guard gating applied",
             proposed_addition_ids,
+            proposed_addition_ids,
             [],
             {},
         )
-    if round_guard != "minimal_regression_guard_v1":
+    if round_guard not in {"minimal_regression_guard_v1", "accept_top1_only_under_guard_v1"}:
         raise ValueError(f"unsupported --round-guard: {round_guard}")
 
     upstream_risk_present = isinstance(upstream_risk_guardrail_v1, dict)
@@ -311,7 +312,7 @@ def _apply_round_guard(
     elif fallback_high_risk:
         decision_reason = "fallback_guard_v1 triggered: upstream_risk_guardrail_v1 absent at round>=2 with proposed additions"
     else:
-        decision_reason = "no high-risk trigger active; additions allowed under minimal_regression_guard_v1"
+        decision_reason = f"no high-risk trigger active; additions allowed under {round_guard}"
     guard_stats: dict[str, Any] = {
         "upstream_risk_guardrail_v1_present": bool(upstream_risk_present),
         "risk_guardrail_v1_level": risk_level,
@@ -322,9 +323,23 @@ def _apply_round_guard(
         "guard_decision_reason": str(decision_reason),
     }
     if round_index >= 2 and trigger_condition_high_risk and proposed_addition_ids:
+        if round_guard == "accept_top1_only_under_guard_v1":
+            accepted_addition_ids = proposed_addition_ids[:1]
+            accepted_set = set(accepted_addition_ids)
+            rejected_addition_ids = [x for x in proposed_addition_ids if x not in accepted_set]
+            guarded_candidate_ids = [x for x in candidate_ids_after_policy if x in base_set or x in accepted_set]
+            return (
+                guarded_candidate_ids,
+                "accept_top1_only_due_to_high_risk_v1",
+                proposed_addition_ids,
+                accepted_addition_ids,
+                rejected_addition_ids,
+                guard_stats,
+            )
         return (
             [label_id for label_id in candidate_ids_after_policy if label_id in base_set],
             "reject_all_additions_due_to_high_risk_v1",
+            proposed_addition_ids,
             [],
             proposed_addition_ids,
             guard_stats,
@@ -332,6 +347,7 @@ def _apply_round_guard(
     return (
         candidate_ids_after_policy,
         "allow_additions_under_guard_v1",
+        proposed_addition_ids,
         proposed_addition_ids,
         [],
         guard_stats,
@@ -557,14 +573,20 @@ def main() -> int:
                 previous_candidate_ids=previous_ids,
                 refined_candidate_ids=refined_ids,
             )
-            guarded_ids, guard_decision, accepted_addition_ids, rejected_addition_ids, round_guard_stats = _apply_round_guard(
+            (
+                guarded_ids,
+                guard_decision,
+                proposed_addition_ids,
+                accepted_addition_ids,
+                rejected_addition_ids,
+                round_guard_stats,
+            ) = _apply_round_guard(
                 round_index=round_index,
                 round_guard=str(args.round_guard),
                 previous_candidate_ids=previous_ids,
                 candidate_ids_after_policy=gated_ids,
                 upstream_risk_guardrail_v1=current_state.get("upstream_risk_guardrail_v1"),
             )
-            proposed_addition_ids = [label_id for label_id in refined_ids if label_id not in set(previous_ids)]
             round_policy_kept_count = int(len(_as_int_list(round_policy_stats.get("kept_addition_ids"))))
             round_policy_dropped_count = int(len(_as_int_list(round_policy_stats.get("dropped_addition_ids"))))
             current_state = {
@@ -637,6 +659,7 @@ def main() -> int:
             "round_policy_notes": str(round_policy_notes),
             "round_policy_stats": round_policy_stats,
             "round_guard_name": str(args.round_guard),
+            "guard_variant": str(args.round_guard),
             "proposed_addition_ids": proposed_addition_ids,
             "accepted_addition_ids": accepted_addition_ids,
             "rejected_addition_ids": rejected_addition_ids,
@@ -717,6 +740,7 @@ def main() -> int:
         "refine_multiadd_count": int(args.refine_multiadd_count),
         "round_policy_name": str(args.round_policy),
         "round_guard_name": str(args.round_guard),
+        "guard_variant": str(args.round_guard),
         "round_policy_applied": any(bool(s.get("round_policy_applied")) for s in round_summaries),
         "round_policy_notes": (
             "round_policy=none; no round-policy gating applied"
@@ -729,6 +753,11 @@ def main() -> int:
             else (
                 "round_guard=minimal_regression_guard_v1 rejects round>=2 additions when "
                 "upstream risk_guardrail_v1 is high(score>=3) or when upstream risk is absent and additions are proposed"
+                if args.round_guard == "minimal_regression_guard_v1"
+                else (
+                    "round_guard=accept_top1_only_under_guard_v1 keeps top-1 proposed addition at round>=2 "
+                    "under the same high-risk trigger where minimal_regression_guard_v1 rejects all additions"
+                )
             )
         ),
         "round_policy_stats": {
