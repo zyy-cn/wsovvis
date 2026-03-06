@@ -296,8 +296,8 @@ def _apply_round_guard(
         raise ValueError(f"unsupported --round-guard: {round_guard}")
 
     guardrail = upstream_risk_guardrail_v1 if isinstance(upstream_risk_guardrail_v1, dict) else {}
-    risk_level = str(guardrail.get("level", "")).strip().lower()
-    risk_score_raw = guardrail.get("score", 0)
+    risk_level = str(guardrail.get("risk_level", guardrail.get("level", ""))).strip().lower()
+    risk_score_raw = guardrail.get("risk_score", guardrail.get("score", 0))
     try:
         risk_score = int(risk_score_raw)
     except (TypeError, ValueError):
