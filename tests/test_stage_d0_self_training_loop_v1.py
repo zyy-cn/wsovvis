@@ -324,6 +324,52 @@ def test_d0_minimal_multiadd_policy_cap1_drops_n_minus_1(tmp_path: Path) -> None
     assert run_summary["candidate_label_ids_count_delta_total"] == 1
 
 
+def test_d0_minimal_multiadd_iterative_adds_new_ids_in_round1_and_round2(tmp_path: Path) -> None:
+    fixture_path = _repo_root() / "tests/fixtures/stagec_summary_d1_tiny.json"
+    out_json = tmp_path / "d0_multiadd_iter_summary.json"
+    round_root = tmp_path / "rounds_multiadd_iter"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(fixture_path),
+            "--seed",
+            "20260305",
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "3",
+            "--refine-mode",
+            "minimal_multiadd_iter_v1",
+            "--round-policy",
+            "minimal_curriculum_v1",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    round1 = run_summary["round_summaries"][1]
+    round2 = run_summary["round_summaries"][2]
+    assert round1["round_refine_mode"] == "minimal_multiadd_iter_v1"
+    assert round2["round_refine_mode"] == "minimal_multiadd_iter_v1"
+    assert round1["round_refine_additions_count"] == 1
+    assert round2["round_refine_additions_count"] == 1
+    assert round1["round_refine_added_label_ids"] == [909001]
+    assert round2["round_refine_added_label_ids"] == [909002]
+    assert round1["round_policy_kept_count"] == 1
+    assert round2["round_policy_kept_count"] == 1
+    assert round1["round_policy_dropped_count"] == 0
+    assert round2["round_policy_dropped_count"] == 0
+    assert round1["candidate_label_ids_count_after"] == 4
+    assert round2["candidate_label_ids_count_after"] == 5
+    assert run_summary["round_refine_additions_count_total"] == 2
+    assert run_summary["round_policy_kept_count_total"] == 2
+    assert run_summary["round_policy_dropped_count_total"] == 0
+    assert run_summary["candidate_label_ids_count_delta_total"] == 2
+
+
 def test_d0_stagec_micro_train_hook_runs_per_round(tmp_path: Path) -> None:
     fixture_path = _repo_root() / "tests/fixtures/stagec_summary_d1_tiny.json"
     out_json = tmp_path / "d0_train_hook_summary.json"

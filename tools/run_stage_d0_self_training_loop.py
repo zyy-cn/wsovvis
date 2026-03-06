@@ -18,7 +18,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-rounds", type=int, default=1, help="Exclusive max round index")
     p.add_argument(
         "--refine-mode",
-        choices=("none", "minimal", "minimal_multiadd_v1"),
+        choices=("none", "minimal", "minimal_multiadd_v1", "minimal_multiadd_iter_v1"),
         default="none",
         help="Refine mode applied before rounds after round0",
     )
@@ -200,6 +200,32 @@ def _minimal_multiadd_refine(previous_round_output: dict[str, Any], count: int) 
         "input_candidate_label_ids": base_ids,
         "output_candidate_label_ids": refined,
         "added_label_ids": [x for x in requested_ids if x not in set(base_ids)],
+    }
+
+
+def _minimal_multiadd_iter_refine(previous_round_output: dict[str, Any], count: int) -> dict[str, Any]:
+    base_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
+    if not base_ids:
+        base_ids = _as_int_list(previous_round_output.get("positive_label_ids"))
+    existing = set(base_ids)
+    requested_ids: list[int] = []
+    next_id = 909001
+    while len(requested_ids) < int(count):
+        if next_id not in existing:
+            requested_ids.append(next_id)
+            existing.add(next_id)
+        next_id += 1
+    refined = sorted(existing)
+    return {
+        "schema_name": "wsovvis.stage_d_refine_summary_v1",
+        "schema_version": "1.0",
+        "refine_mode": "minimal_multiadd_iter_v1",
+        "refine_multiadd_count": int(count),
+        "applied": True,
+        "rule_id": "append_refine_marker_labels_iterative_v1",
+        "input_candidate_label_ids": base_ids,
+        "output_candidate_label_ids": refined,
+        "added_label_ids": requested_ids,
     }
 
 
@@ -436,6 +462,12 @@ def main() -> int:
             elif args.refine_mode == "minimal_multiadd_v1":
                 if round_index >= 1:
                     refine_summary = _minimal_multiadd_refine(previous_round_output, int(args.refine_multiadd_count))
+                    refined_ids = _as_int_list(refine_summary["output_candidate_label_ids"])
+                else:
+                    refined_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
+            elif args.refine_mode == "minimal_multiadd_iter_v1":
+                if round_index >= 1:
+                    refine_summary = _minimal_multiadd_iter_refine(previous_round_output, 1)
                     refined_ids = _as_int_list(refine_summary["output_candidate_label_ids"])
                 else:
                     refined_ids = _as_int_list(previous_round_output.get("candidate_label_ids"))
