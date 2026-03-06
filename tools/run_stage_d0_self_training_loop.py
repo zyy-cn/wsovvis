@@ -295,7 +295,8 @@ def _apply_round_guard(
     if round_guard != "minimal_regression_guard_v1":
         raise ValueError(f"unsupported --round-guard: {round_guard}")
 
-    guardrail = upstream_risk_guardrail_v1 if isinstance(upstream_risk_guardrail_v1, dict) else {}
+    upstream_risk_present = isinstance(upstream_risk_guardrail_v1, dict)
+    guardrail = upstream_risk_guardrail_v1 if upstream_risk_present else {}
     risk_level = str(guardrail.get("risk_level", guardrail.get("level", ""))).strip().lower()
     risk_score_raw = guardrail.get("risk_score", guardrail.get("score", 0))
     try:
@@ -303,13 +304,24 @@ def _apply_round_guard(
     except (TypeError, ValueError):
         risk_score = 0
     high_risk = risk_level == "high" and risk_score >= 3
+    fallback_high_risk = bool(round_index >= 2 and proposed_addition_ids and not upstream_risk_present)
+    trigger_condition_high_risk = bool(high_risk or fallback_high_risk)
+    if high_risk:
+        decision_reason = "upstream_risk_guardrail_v1 indicates high risk (risk_level=high and risk_score>=3)"
+    elif fallback_high_risk:
+        decision_reason = "fallback_guard_v1 triggered: upstream_risk_guardrail_v1 absent at round>=2 with proposed additions"
+    else:
+        decision_reason = "no high-risk trigger active; additions allowed under minimal_regression_guard_v1"
     guard_stats: dict[str, Any] = {
+        "upstream_risk_guardrail_v1_present": bool(upstream_risk_present),
         "risk_guardrail_v1_level": risk_level,
         "risk_guardrail_v1_score": int(risk_score),
         "trigger_condition_round_index_ge_2": bool(round_index >= 2),
-        "trigger_condition_high_risk": bool(high_risk),
+        "trigger_condition_high_risk": bool(trigger_condition_high_risk),
+        "fallback_high_risk_used": bool(fallback_high_risk),
+        "guard_decision_reason": str(decision_reason),
     }
-    if round_index >= 2 and high_risk and proposed_addition_ids:
+    if round_index >= 2 and trigger_condition_high_risk and proposed_addition_ids:
         return (
             [label_id for label_id in candidate_ids_after_policy if label_id in base_set],
             "reject_all_additions_due_to_high_risk_v1",
@@ -629,6 +641,7 @@ def main() -> int:
             "accepted_addition_ids": accepted_addition_ids,
             "rejected_addition_ids": rejected_addition_ids,
             "guard_decision": str(guard_decision),
+            "guard_decision_reason": str(round_guard_stats.get("guard_decision_reason", "")),
             "round_guard_stats": round_guard_stats,
             "round_refine_additions_count": int(len(round_refine_added_label_ids)),
             "round_refine_added_label_ids": round_refine_added_label_ids,
@@ -713,7 +726,10 @@ def main() -> int:
         "round_guard_notes": (
             "round_guard=none; no round-guard gating applied"
             if args.round_guard == "none"
-            else "round_guard=minimal_regression_guard_v1 rejects round>=2 additions when risk_guardrail_v1 is high(score>=3)"
+            else (
+                "round_guard=minimal_regression_guard_v1 rejects round>=2 additions when "
+                "upstream risk_guardrail_v1 is high(score>=3) or when upstream risk is absent and additions are proposed"
+            )
         ),
         "round_policy_stats": {
             "rounds_with_policy_applied": [
