@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 from collections.abc import Mapping, Sequence
@@ -33,6 +34,31 @@ def _collect_missing_fields(round_summary: Mapping[str, Any]) -> list[str]:
     return missing
 
 
+def _build_predictions_by_missing_rate(
+    candidate_label_ids: Sequence[int],
+    missing_rates: Sequence[float] = (0.0, 0.5, 1.0),
+) -> dict[str, list[int]]:
+    cand = list(candidate_label_ids)
+    n = len(cand)
+    out: dict[str, list[int]] = {}
+    for m in missing_rates:
+        m_float = float(m)
+        if not (0.0 <= m_float <= 1.0):
+            raise ValueError(f"missing_rate must be in [0,1], got {m_float}")
+        if m_float >= 1.0:
+            k = 0
+        elif m_float <= 0.0:
+            k = n
+        else:
+            k = int(math.ceil((1.0 - m_float) * float(n)))
+            if k < 0:
+                k = 0
+            if k > n:
+                k = n
+        out[str(m_float)] = cand[:k]
+    return out
+
+
 def build_ws_metrics_summary_v1_from_stage_d_round_summary(
     round_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -53,16 +79,13 @@ def build_ws_metrics_summary_v1_from_stage_d_round_summary(
         field_path="round_output_summary.candidate_label_ids",
     )
 
+    predictions_by_missing_rate = _build_predictions_by_missing_rate(candidate_label_ids)
     ws_eval_bundle = {
         "gt_entities": positive_label_ids,
         "predicted_entities": candidate_label_ids,
-        "predictions_by_missing_rate": {
-            "0.0": candidate_label_ids,
-            "0.5": candidate_label_ids,
-            "1.0": candidate_label_ids,
-        },
+        "predictions_by_missing_rate": predictions_by_missing_rate,
     }
-    return build_ws_metrics_summary_v1(
+    summary = build_ws_metrics_summary_v1(
         {
             "video_id": round_output_summary["selected_video_id"],
             "assignment_backend": round_output_summary.get("assignment_backend"),
@@ -71,6 +94,17 @@ def build_ws_metrics_summary_v1_from_stage_d_round_summary(
             "ws_eval_bundle": ws_eval_bundle,
         }
     )
+    gt_set = set(positive_label_ids)
+    cand_set = set(candidate_label_ids)
+    intersection_size = len(gt_set & cand_set)
+    union_size = len(gt_set | cand_set)
+    summary["stage_d_extras"] = {
+        "candidate_size": int(len(candidate_label_ids)),
+        "positive_size": int(len(positive_label_ids)),
+        "jaccard": float(intersection_size / union_size) if union_size > 0 else 1.0,
+        "overreach": int(len(candidate_label_ids) - intersection_size),
+    }
+    return summary
 
 
 def build_ws_metrics_summary_v1_from_stage_d_round_summary_json(
