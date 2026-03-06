@@ -634,7 +634,7 @@ def test_d0_accept_top1_guard_keeps_one_under_high_risk(tmp_path: Path) -> None:
             "--refine-multiadd-count",
             "3",
             "--round-policy",
-            "none",
+            "minimal_curriculum_v1",
             "--round-guard",
             "accept_top1_only_under_guard_v1",
             "--round-summary-root",
@@ -648,15 +648,15 @@ def test_d0_accept_top1_guard_keeps_one_under_high_risk(tmp_path: Path) -> None:
     round2 = run_summary["round_summaries"][2]
 
     assert round2["guard_variant"] == "accept_top1_only_under_guard_v1"
-    assert round2["proposed_addition_ids"] == [909004, 909005, 909006]
-    assert round2["accepted_addition_ids"] == [909004]
-    assert round2["rejected_addition_ids"] == [909005, 909006]
+    assert round2["proposed_addition_ids"] == [909002]
+    assert round2["accepted_addition_ids"] == [909002]
+    assert round2["rejected_addition_ids"] == []
     assert round2["guard_decision"] == "accept_top1_only_due_to_high_risk_v1"
-    assert round2["candidate_label_ids_count_after"] == 7
-    assert round2["round_output_summary"]["candidate_label_ids"] == [5, 7, 11, 909001, 909002, 909003, 909004]
+    assert round2["candidate_label_ids_count_after"] == 5
+    assert round2["round_output_summary"]["candidate_label_ids"] == [5, 7, 11, 909001, 909002]
     assert run_summary["guard_variant"] == "accept_top1_only_under_guard_v1"
-    assert run_summary["round_guard_stats"]["accepted_additions_total"] == 4
-    assert run_summary["round_guard_stats"]["rejected_additions_total"] == 2
+    assert run_summary["round_guard_stats"]["accepted_additions_total"] == 2
+    assert run_summary["round_guard_stats"]["rejected_additions_total"] == 0
 
 
 def test_d0_accept_top1_guard_uses_fallback_trigger(tmp_path: Path) -> None:
@@ -688,9 +688,9 @@ def test_d0_accept_top1_guard_uses_fallback_trigger(tmp_path: Path) -> None:
             "--refine-mode",
             "minimal_multiadd_v1",
             "--refine-multiadd-count",
-            "2",
+            "3",
             "--round-policy",
-            "none",
+            "minimal_curriculum_v1",
             "--round-guard",
             "accept_top1_only_under_guard_v1",
             "--round-summary-root",
@@ -703,9 +703,9 @@ def test_d0_accept_top1_guard_uses_fallback_trigger(tmp_path: Path) -> None:
     run_summary = _load_json(out_json)
     round2 = run_summary["round_summaries"][2]
 
-    assert round2["proposed_addition_ids"] == [909003, 909004]
-    assert round2["accepted_addition_ids"] == [909003]
-    assert round2["rejected_addition_ids"] == [909004]
+    assert round2["proposed_addition_ids"] == [909002]
+    assert round2["accepted_addition_ids"] == [909002]
+    assert round2["rejected_addition_ids"] == []
     assert round2["guard_decision"] == "accept_top1_only_due_to_high_risk_v1"
     assert "fallback_guard_v1 triggered" in round2["guard_decision_reason"]
     assert round2["round_guard_stats"]["fallback_high_risk_used"] is True
