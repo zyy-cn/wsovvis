@@ -106,6 +106,36 @@ def test_c5_parser_supports_em_backend_and_defaults() -> None:
     assert args.assignment_backend == "c9_em_minimal_v1"
     assert args.em_temperature == pytest.approx(0.10)
     assert args.em_iterations == 6
+    assert args.candidate_label_ids_json is None
+
+
+def test_c5_candidate_label_ids_override_changes_effective_candidates(tmp_path: Path) -> None:
+    out_json = tmp_path / "micro_summary_candidate_override.json"
+    candidate_json = tmp_path / "candidate_ids.json"
+    _write_json(candidate_json, {"candidate_label_ids": [101, 202, 303, 909001]})
+    subprocess.run(
+        [
+            sys.executable,
+            "tools/run_stagec_c5_micro_training.py",
+            "--data-mode",
+            "synthetic_v1",
+            "--steps",
+            "1",
+            "--candidate-label-ids-json",
+            str(candidate_json),
+            "--out-json",
+            str(out_json),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_summary = json.loads(out_json.read_text(encoding="utf-8"))
+    assert run_summary["candidate_label_ids_json_path"] == str(candidate_json.resolve())
+    assert run_summary["candidate_label_ids_requested"] == [101, 202, 303, 909001]
+    assert run_summary["candidate_label_ids_effective"] == [101, 202, 303, 909001]
+    assert run_summary["candidate_label_ids_effective_count"] == 4
+    assert 909001 in run_summary["final"]["candidate_label_ids"]
 
 
 def test_real_backed_loader_respects_min_positive_labels_and_preferred_video(tmp_path: Path) -> None:

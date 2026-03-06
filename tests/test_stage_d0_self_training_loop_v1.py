@@ -378,3 +378,9 @@ def test_d0_stagec_micro_train_hook_runs_per_round(tmp_path: Path) -> None:
     assert train1["train_data_mode_requested"] == "synthetic_v1"
     assert train0["train_real_run_root_requested"] is None
     assert train1["train_real_run_root_requested"] is None
+    assert train0["train_candidate_label_ids_count"] == 3
+    assert train1["train_candidate_label_ids_count"] == 4
+    assert train0["train_candidate_label_ids_effective_count"] == 3
+    assert train1["train_candidate_label_ids_effective_count"] == 4
+    assert Path(train0["candidate_label_ids_json_path"]).exists()
+    assert Path(train1["candidate_label_ids_json_path"]).exists()

@@ -297,6 +297,7 @@ def _run_train_hook(
     train_data_mode: str,
     train_real_run_root: Path,
     round_summary_root: Path,
+    candidate_label_ids: list[int],
 ) -> dict[str, Any] | None:
     if hook_name == "none":
         return None
@@ -304,6 +305,16 @@ def _run_train_hook(
         raise ValueError(f"unsupported --train-hook: {hook_name}")
     effective_seed = int(train_seed) + int(round_index)
     out_json = round_summary_root / "train" / f"round{round_index}_train_summary.json"
+    candidate_json = round_summary_root / "train" / f"round{round_index}_candidate_label_ids.json"
+    _write_json(
+        candidate_json,
+        {
+            "schema_name": "wsovvis.stage_d_round_train_candidate_labels_v1",
+            "schema_version": "1.0",
+            "round_index": int(round_index),
+            "candidate_label_ids": _as_int_list(candidate_label_ids),
+        },
+    )
     cmd = [
         sys.executable,
         "tools/run_stagec_c5_micro_training.py",
@@ -313,6 +324,8 @@ def _run_train_hook(
         str(int(train_steps)),
         "--seed",
         str(effective_seed),
+        "--candidate-label-ids-json",
+        str(candidate_json),
     ]
     if str(train_data_mode) == "real_sidecar_v1":
         cmd.extend(
@@ -340,6 +353,8 @@ def _run_train_hook(
             "train_seed_base": int(train_seed),
             "train_seed_effective": int(effective_seed),
             "summary_json_path": str(out_json),
+            "candidate_label_ids_json_path": str(candidate_json),
+            "train_candidate_label_ids_count": int(len(_as_int_list(candidate_label_ids))),
             "train_data_mode_requested": str(train_data_mode),
             "train_real_run_root_requested": (
                 str(train_real_run_root.resolve()) if str(train_data_mode) == "real_sidecar_v1" else None
@@ -357,6 +372,8 @@ def _run_train_hook(
         "train_seed_base": int(train_seed),
         "train_seed_effective": int(effective_seed),
         "summary_json_path": str(out_json),
+        "candidate_label_ids_json_path": str(candidate_json),
+        "train_candidate_label_ids_count": int(len(_as_int_list(candidate_label_ids))),
         "train_data_mode_requested": str(train_data_mode),
         "train_real_run_root_requested": (
             str(train_real_run_root.resolve()) if str(train_data_mode) == "real_sidecar_v1" else None
@@ -364,7 +381,11 @@ def _run_train_hook(
         "data_mode": payload.get("data_mode"),
         "selected_video_id": payload.get("selected_video_id"),
         "assignment_backend_requested": payload.get("assignment_backend_requested"),
+        "train_candidate_label_ids_effective_count": int(payload.get("candidate_label_ids_effective_count", 0)),
         "final_loss_total": float(final.get("loss_total", 0.0)),
+        "final_loss_component_alignment": float(final.get("loss_component_alignment", 0.0)),
+        "final_loss_component_coverage": float(final.get("loss_component_coverage", 0.0)),
+        "final_loss_component_fg_not_bg": float(final.get("loss_component_fg_not_bg", 0.0)),
     }
 
 
@@ -452,6 +473,7 @@ def main() -> int:
             train_data_mode=str(args.train_data_mode),
             train_real_run_root=Path(args.train_real_run_root),
             round_summary_root=args.round_summary_root,
+            candidate_label_ids=_as_int_list(current_state.get("candidate_label_ids")),
         )
         if isinstance(train_summary, dict) and train_summary.get("status") != "PASS":
             raise RuntimeError(

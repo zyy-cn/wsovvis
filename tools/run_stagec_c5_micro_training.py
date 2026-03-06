@@ -127,6 +127,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional path for ws_metrics_summary_v1 artifact. Requires --emit-ws-metrics-summary-v1.",
     )
+    p.add_argument(
+        "--candidate-label-ids-json",
+        type=Path,
+        default=None,
+        help="Optional JSON path with candidate_label_ids list to make training depend on round state.",
+    )
     p.add_argument("--out-json", type=Path, default=None, help="Optional path to write full run summary JSON")
     return p
 
@@ -396,6 +402,57 @@ def _build_synthetic_batch() -> dict[str, Any]:
     }
 
 
+def _normalize_candidate_label_ids(values: Any) -> list[int]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("candidate_label_ids must be a JSON list")
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for idx, raw in enumerate(values):
+        if not isinstance(raw, int) or isinstance(raw, bool):
+            raise ValueError(f"candidate_label_ids[{idx}] must be integer")
+        item = int(raw)
+        if item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    if not normalized:
+        raise ValueError("candidate_label_ids must be non-empty")
+    return normalized
+
+
+def _load_candidate_label_ids_json(path: Path) -> list[int]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        return _normalize_candidate_label_ids(payload.get("candidate_label_ids"))
+    return _normalize_candidate_label_ids(payload)
+
+
+def _apply_candidate_label_ids_override(
+    *,
+    batch: dict[str, Any],
+    requested_candidate_label_ids: list[int],
+    candidate_label_ids_json_path: Path,
+) -> dict[str, Any]:
+    requested = list(requested_candidate_label_ids)
+    effective = list(requested)
+    existing_positive = [int(x) for x in batch.get("positive_label_ids", ())]
+    effective_set = set(effective)
+    for label_id in existing_positive:
+        if label_id not in effective_set:
+            effective.append(label_id)
+            effective_set.add(label_id)
+    label_text_by_id = dict(batch.get("label_text_by_id", {}))
+    for label_id in effective:
+        label_text_by_id.setdefault(label_id, f"class_{label_id}")
+
+    out = dict(batch)
+    out["topk_label_ids"] = tuple(effective)
+    out["label_text_by_id"] = label_text_by_id
+    out["candidate_label_ids_requested"] = requested
+    out["candidate_label_ids_effective"] = effective
+    out["candidate_label_ids_json_path"] = str(candidate_label_ids_json_path)
+    return out
+
+
 def _extract_predicted_label_ids(final_step: dict[str, Any]) -> list[int]:
     ids: list[int] = []
     for item in final_step.get("candidate_label_ids", ()):
@@ -551,6 +608,19 @@ def main() -> int:
         )
     else:
         batch = _build_synthetic_batch()
+    if args.candidate_label_ids_json is not None:
+        candidate_label_ids_json_path = args.candidate_label_ids_json.resolve()
+        requested_candidate_label_ids = _load_candidate_label_ids_json(candidate_label_ids_json_path)
+        batch = _apply_candidate_label_ids_override(
+            batch=batch,
+            requested_candidate_label_ids=requested_candidate_label_ids,
+            candidate_label_ids_json_path=candidate_label_ids_json_path,
+        )
+    else:
+        batch = dict(batch)
+        batch["candidate_label_ids_requested"] = [int(x) for x in batch.get("topk_label_ids", ())]
+        batch["candidate_label_ids_effective"] = [int(x) for x in batch.get("topk_label_ids", ())]
+        batch["candidate_label_ids_json_path"] = None
     optimizer = torch.optim.Adam([batch["track_features_tensor"]], lr=float(args.lr))
 
     config = {
@@ -621,6 +691,10 @@ def main() -> int:
         "em_temperature": float(args.em_temperature),
         "em_iterations": int(args.em_iterations),
         "assignment_backend_requested": str(args.assignment_backend),
+        "candidate_label_ids_json_path": batch["candidate_label_ids_json_path"],
+        "candidate_label_ids_requested": batch["candidate_label_ids_requested"],
+        "candidate_label_ids_effective": batch["candidate_label_ids_effective"],
+        "candidate_label_ids_effective_count": int(len(batch["candidate_label_ids_effective"])),
         "temporal_consistency_enabled": bool(args.temporal_consistency_enabled),
         "temporal_consistency_weight": float(args.temporal_consistency_weight),
         "temporal_consistency_mode": str(args.temporal_consistency_mode),
