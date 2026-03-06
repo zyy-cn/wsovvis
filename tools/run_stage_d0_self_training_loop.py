@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from wsovvis.metrics import build_ws_metrics_summary_v1_from_stage_d_round_summary
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run Stage D0 self-training loop skeleton (round0/round1)")
@@ -96,6 +98,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("runs/wsovvis_seqformer/18"),
         help="Real Stage B run root for train-data-mode=real_sidecar_v1",
+    )
+    p.add_argument(
+        "--emit-ws-metrics",
+        action="store_true",
+        help="Emit ws_metrics_summary_v1 per round as sidecar JSON using Stage D round summaries.",
     )
     return p
 
@@ -531,20 +538,30 @@ def main() -> int:
         input_path = args.round_summary_root / f"round{round_index}_input_summary.json"
         output_path = args.round_summary_root / f"round{round_index}_output_summary.json"
         summary_path = args.round_summary_root / f"round{round_index}_summary.json"
+        ws_metrics_path: Path | None = None
+        if args.emit_ws_metrics:
+            ws_metrics_summary = build_ws_metrics_summary_v1_from_stage_d_round_summary(round_summary)
+            round_summary["ws_metrics_summary_v1"] = ws_metrics_summary
+            ws_metrics_path = args.round_summary_root / f"round{round_index}_ws_metrics_summary.json"
+            _write_json(ws_metrics_path, ws_metrics_summary)
+            round_summary["ws_metrics_summary_v1_path"] = str(ws_metrics_path)
         _write_json(input_path, round_input)
         _write_json(output_path, round_output)
         _write_json(summary_path, round_summary)
         print(f"D0_ROUND_INPUT_PATH {input_path}")
         print(f"D0_ROUND_OUTPUT_PATH {output_path}")
         print(f"D0_ROUND_SUMMARY_PATH {summary_path}")
+        if ws_metrics_path is not None:
+            print(f"D0_ROUND_WS_METRICS_SUMMARY_PATH {ws_metrics_path}")
 
-        round_paths.append(
-            {
-                "round_input_summary_path": str(input_path),
-                "round_output_summary_path": str(output_path),
-                "round_summary_path": str(summary_path),
-            }
-        )
+        round_path_row = {
+            "round_input_summary_path": str(input_path),
+            "round_output_summary_path": str(output_path),
+            "round_summary_path": str(summary_path),
+        }
+        if ws_metrics_path is not None:
+            round_path_row["round_ws_metrics_summary_path"] = str(ws_metrics_path)
+        round_paths.append(round_path_row)
         round_summaries.append(round_summary)
         previous_round_output = round_output
 
@@ -557,6 +574,7 @@ def main() -> int:
         "train_steps": int(args.train_steps),
         "train_seed": int(args.train_seed),
         "train_data_mode": str(args.train_data_mode),
+        "emit_ws_metrics": bool(args.emit_ws_metrics),
         "train_real_run_root": (
             str(Path(args.train_real_run_root).resolve()) if str(args.train_data_mode) == "real_sidecar_v1" else None
         ),

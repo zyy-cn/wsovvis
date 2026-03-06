@@ -384,3 +384,43 @@ def test_d0_stagec_micro_train_hook_runs_per_round(tmp_path: Path) -> None:
     assert train1["train_candidate_label_ids_effective_count"] >= train1["train_candidate_label_ids_count"]
     assert Path(train0["candidate_label_ids_json_path"]).exists()
     assert Path(train1["candidate_label_ids_json_path"]).exists()
+
+
+def test_d0_emit_ws_metrics_writes_round_sidecars(tmp_path: Path) -> None:
+    fixture_path = _repo_root() / "tests/fixtures/stagec_summary_d1_tiny.json"
+    out_json = tmp_path / "d0_emit_ws_metrics_summary.json"
+    round_root = tmp_path / "rounds_emit_ws_metrics"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(fixture_path),
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "2",
+            "--refine-mode",
+            "minimal",
+            "--round-policy",
+            "minimal_curriculum_v1",
+            "--emit-ws-metrics",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    assert run_summary["emit_ws_metrics"] is True
+    assert len(run_summary["round_summaries"]) == 2
+
+    for idx, summary in enumerate(run_summary["round_summaries"]):
+        ws = summary["ws_metrics_summary_v1"]
+        assert ws["schema_name"] == "wsovvis.ws_metrics_summary_v1"
+        assert ws["schema_version"] == "1.0"
+        assert isinstance(ws["metrics"]["scr"], float)
+        assert isinstance(ws["metrics"]["aurc"], float)
+        ws_path = round_root / f"round{idx}_ws_metrics_summary.json"
+        assert ws_path.exists()
+        sidecar = _load_json(ws_path)
+        assert sidecar["schema_name"] == "wsovvis.ws_metrics_summary_v1"
