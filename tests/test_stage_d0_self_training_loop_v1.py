@@ -470,3 +470,72 @@ def test_d0_emit_ws_metrics_writes_round_sidecars(tmp_path: Path) -> None:
         assert ws_path.exists()
         sidecar = _load_json(ws_path)
         assert sidecar["schema_name"] == "wsovvis.ws_metrics_summary_v1"
+
+
+def test_d0_minimal_regression_guard_blocks_round2_high_risk_additions(tmp_path: Path) -> None:
+    stagec_path = tmp_path / "stagec_high_risk_summary.json"
+    stagec_path.write_text(
+        json.dumps(
+            {
+                "assignment_backend_requested": "c9_em_minimal_v1",
+                "selected_video_id": "video_9",
+                "selected_positive_label_ids": [5, 7],
+                "final": {"candidate_label_ids": [5, 7, 11]},
+                "unknown_handling_diagnostics_v1": {
+                    "risk_guardrail_v1": {
+                        "score": 3,
+                        "level": "high",
+                        "triggered": True,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_json = tmp_path / "d0_guarded_summary.json"
+    round_root = tmp_path / "rounds_guarded"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(stagec_path),
+            "--seed",
+            "20260305",
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "3",
+            "--refine-mode",
+            "minimal_multiadd_iter_v1",
+            "--round-policy",
+            "minimal_curriculum_v1",
+            "--round-guard",
+            "minimal_regression_guard_v1",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+    run_summary = _load_json(out_json)
+    round1 = run_summary["round_summaries"][1]
+    round2 = run_summary["round_summaries"][2]
+
+    assert round1["proposed_addition_ids"] == [909001]
+    assert round1["accepted_addition_ids"] == [909001]
+    assert round1["rejected_addition_ids"] == []
+    assert round1["guard_decision"] == "allow_additions_under_guard_v1"
+    assert round1["candidate_label_ids_count_after"] == 4
+
+    assert round2["proposed_addition_ids"] == [909002]
+    assert round2["accepted_addition_ids"] == []
+    assert round2["rejected_addition_ids"] == [909002]
+    assert round2["guard_decision"] == "reject_all_additions_due_to_high_risk_v1"
+    assert round2["candidate_label_ids_count_after"] == 4
+    assert round2["candidate_label_ids_count_delta"] == 0
+
+    assert run_summary["round_guard_name"] == "minimal_regression_guard_v1"
+    assert run_summary["round_guard_stats"]["rounds_with_rejected_additions"] == [2]
+    assert run_summary["round_guard_stats"]["rejected_additions_total"] == 1
+    assert run_summary["round_guard_stats"]["accepted_additions_total"] == 1
+    assert run_summary["candidate_label_ids_count_delta_total"] == 1

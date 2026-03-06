@@ -13,7 +13,7 @@ from wsovvis.metrics import build_ws_metrics_summary_v1_from_stage_d_round_summa
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Run Stage D0 self-training loop skeleton (round0/round1)")
+    p = argparse.ArgumentParser(description="Run Stage D0 self-training loop skeleton")
     p.add_argument("--round-index", type=int, default=0, help="Starting round index")
     p.add_argument("--max-rounds", type=int, default=1, help="Exclusive max round index")
     p.add_argument(
@@ -33,6 +33,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("none", "minimal_curriculum_v1"),
         default="none",
         help="Optional round-level policy gate applied during round input construction (round>=1)",
+    )
+    p.add_argument(
+        "--round-guard",
+        choices=("none", "minimal_regression_guard_v1"),
+        default="none",
+        help="Optional round-level guard applied after proposals/policy to avoid late-round regressions.",
     )
     p.add_argument(
         "--tiny-pinned",
@@ -268,6 +274,58 @@ def _apply_round_policy(
     return gated_candidate_ids, True, notes, stats
 
 
+def _apply_round_guard(
+    *,
+    round_index: int,
+    round_guard: str,
+    previous_candidate_ids: list[int],
+    candidate_ids_after_policy: list[int],
+    upstream_risk_guardrail_v1: Any,
+) -> tuple[list[int], str, list[int], list[int], dict[str, Any]]:
+    base_set = set(previous_candidate_ids)
+    proposed_addition_ids = [label_id for label_id in candidate_ids_after_policy if label_id not in base_set]
+    if round_guard == "none":
+        return (
+            candidate_ids_after_policy,
+            "round_guard=none; no round-guard gating applied",
+            proposed_addition_ids,
+            [],
+            {},
+        )
+    if round_guard != "minimal_regression_guard_v1":
+        raise ValueError(f"unsupported --round-guard: {round_guard}")
+
+    guardrail = upstream_risk_guardrail_v1 if isinstance(upstream_risk_guardrail_v1, dict) else {}
+    risk_level = str(guardrail.get("level", "")).strip().lower()
+    risk_score_raw = guardrail.get("score", 0)
+    try:
+        risk_score = int(risk_score_raw)
+    except (TypeError, ValueError):
+        risk_score = 0
+    high_risk = risk_level == "high" and risk_score >= 3
+    guard_stats: dict[str, Any] = {
+        "risk_guardrail_v1_level": risk_level,
+        "risk_guardrail_v1_score": int(risk_score),
+        "trigger_condition_round_index_ge_2": bool(round_index >= 2),
+        "trigger_condition_high_risk": bool(high_risk),
+    }
+    if round_index >= 2 and high_risk and proposed_addition_ids:
+        return (
+            [label_id for label_id in candidate_ids_after_policy if label_id in base_set],
+            "reject_all_additions_due_to_high_risk_v1",
+            [],
+            proposed_addition_ids,
+            guard_stats,
+        )
+    return (
+        candidate_ids_after_policy,
+        "allow_additions_under_guard_v1",
+        proposed_addition_ids,
+        [],
+        guard_stats,
+    )
+
+
 def _build_round_input_summary(
     *,
     round_index: int,
@@ -455,6 +513,11 @@ def main() -> int:
         candidate_count_before = 0
         round_policy_kept_count = 0
         round_policy_dropped_count = 0
+        proposed_addition_ids: list[int] = []
+        accepted_addition_ids: list[int] = []
+        rejected_addition_ids: list[int] = []
+        guard_decision = "round0_seed_no_new_additions"
+        round_guard_stats: dict[str, Any] = {}
         if previous_round_output is not None:
             if args.refine_mode == "minimal":
                 refine_summary = _minimal_refine(previous_round_output)
@@ -482,6 +545,14 @@ def main() -> int:
                 previous_candidate_ids=previous_ids,
                 refined_candidate_ids=refined_ids,
             )
+            guarded_ids, guard_decision, accepted_addition_ids, rejected_addition_ids, round_guard_stats = _apply_round_guard(
+                round_index=round_index,
+                round_guard=str(args.round_guard),
+                previous_candidate_ids=previous_ids,
+                candidate_ids_after_policy=gated_ids,
+                upstream_risk_guardrail_v1=current_state.get("upstream_risk_guardrail_v1"),
+            )
+            proposed_addition_ids = [label_id for label_id in refined_ids if label_id not in set(previous_ids)]
             round_policy_kept_count = int(len(_as_int_list(round_policy_stats.get("kept_addition_ids"))))
             round_policy_dropped_count = int(len(_as_int_list(round_policy_stats.get("dropped_addition_ids"))))
             current_state = {
@@ -489,7 +560,7 @@ def main() -> int:
                 "source_path": None,
                 "selected_video_id": previous_round_output.get("selected_video_id"),
                 "positive_label_ids": _as_int_list(previous_round_output.get("positive_label_ids")),
-                "candidate_label_ids": gated_ids,
+                "candidate_label_ids": guarded_ids,
                 "assignment_backend": previous_round_output.get("assignment_backend", ""),
                 "ws_metrics_summary_v1": current_state.get("ws_metrics_summary_v1"),
                 "upstream_risk_guardrail_v1": current_state.get("upstream_risk_guardrail_v1"),
@@ -503,6 +574,14 @@ def main() -> int:
             )
             round_policy_stats = {"reason": "round0_seed"}
             candidate_count_before = int(len(_as_int_list(current_state.get("candidate_label_ids"))))
+            if args.round_guard == "none":
+                guard_decision = "round_guard=none; no round-guard gating applied"
+            else:
+                guard_decision = "round0_seed_no_new_additions"
+                round_guard_stats = {
+                    "trigger_condition_round_index_ge_2": False,
+                    "trigger_condition_high_risk": False,
+                }
 
         train_summary = _run_train_hook(
             hook_name=str(args.train_hook),
@@ -545,6 +624,12 @@ def main() -> int:
             "round_policy_applied": bool(round_policy_applied),
             "round_policy_notes": str(round_policy_notes),
             "round_policy_stats": round_policy_stats,
+            "round_guard_name": str(args.round_guard),
+            "proposed_addition_ids": proposed_addition_ids,
+            "accepted_addition_ids": accepted_addition_ids,
+            "rejected_addition_ids": rejected_addition_ids,
+            "guard_decision": str(guard_decision),
+            "round_guard_stats": round_guard_stats,
             "round_refine_additions_count": int(len(round_refine_added_label_ids)),
             "round_refine_added_label_ids": round_refine_added_label_ids,
             "round_refine_mode": (
@@ -618,11 +703,17 @@ def main() -> int:
         "refine_mode": str(args.refine_mode),
         "refine_multiadd_count": int(args.refine_multiadd_count),
         "round_policy_name": str(args.round_policy),
+        "round_guard_name": str(args.round_guard),
         "round_policy_applied": any(bool(s.get("round_policy_applied")) for s in round_summaries),
         "round_policy_notes": (
             "round_policy=none; no round-policy gating applied"
             if args.round_policy == "none"
             else "round_policy=minimal_curriculum_v1 cap_additions_k=1 on round>=1"
+        ),
+        "round_guard_notes": (
+            "round_guard=none; no round-guard gating applied"
+            if args.round_guard == "none"
+            else "round_guard=minimal_regression_guard_v1 rejects round>=2 additions when risk_guardrail_v1 is high(score>=3)"
         ),
         "round_policy_stats": {
             "rounds_with_policy_applied": [
@@ -632,6 +723,19 @@ def main() -> int:
             ],
             "policy_applied_round_count": int(
                 sum(1 for s in round_summaries if bool(s.get("round_policy_applied")))
+            ),
+        },
+        "round_guard_stats": {
+            "rounds_with_rejected_additions": [
+                int(s.get("round_index"))
+                for s in round_summaries
+                if len(_as_int_list(s.get("rejected_addition_ids"))) > 0
+            ],
+            "rejected_additions_total": int(
+                sum(len(_as_int_list(s.get("rejected_addition_ids"))) for s in round_summaries)
+            ),
+            "accepted_additions_total": int(
+                sum(len(_as_int_list(s.get("accepted_addition_ids"))) for s in round_summaries)
             ),
         },
         "round_refine_additions_count_total": int(
