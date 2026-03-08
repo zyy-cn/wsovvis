@@ -75,3 +75,22 @@ def test_stage_d_ws_metrics_adapter_fail_fast_missing_fields() -> None:
                 }
             }
         )
+
+
+def test_stage_d_ws_metrics_adapter_exposes_hpr_and_uar_when_optional_fields_exist() -> None:
+    out = build_ws_metrics_summary_v1_from_stage_d_round_summary(
+        {
+            "schema_name": "wsovvis.stage_d_round_summary_v1",
+            "round_index": 2,
+            "round_output_summary": {
+                "selected_video_id": "v2",
+                "assignment_backend": "stagec_open_world_core_v1",
+                "positive_label_ids": [48, 145, 314, 465],
+                "candidate_label_ids": [48, 145, 314],
+                "observed_label_ids": [48, 145],
+                "unknown_attributed_label_ids": [314, 909001],
+            },
+        }
+    )
+    assert out["metrics"]["hpr"] == pytest.approx(0.5)
+    assert out["metrics"]["uar"] == pytest.approx(0.5)

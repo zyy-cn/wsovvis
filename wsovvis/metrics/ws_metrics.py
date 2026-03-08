@@ -16,6 +16,26 @@ def set_coverage_recall(gt_entities: Iterable[int], predicted_entities: Iterable
     return float(len(gt & pred)) / float(len(gt))
 
 
+def hidden_positive_recall(hidden_positive_entities: Iterable[int], predicted_entities: Iterable[int]) -> float:
+    """Compute Hidden Positive Recall (HPR).
+
+    HPR is the recall of the hidden-positive subset under the predicted entity set.
+    The empty-hidden-positive case returns 1.0 to match set-level recall semantics.
+    """
+
+    return set_coverage_recall(hidden_positive_entities, predicted_entities)
+
+
+def unknown_attribution_recall(hidden_positive_entities: Iterable[int], unknown_attributed_entities: Iterable[int]) -> float:
+    """Compute Unknown Attribution Recall (UAR).
+
+    UAR is the recall of the hidden-positive subset under the explicit unknown-attribution set.
+    The empty-hidden-positive case returns 1.0 to match set-level recall semantics.
+    """
+
+    return set_coverage_recall(hidden_positive_entities, unknown_attributed_entities)
+
+
 def build_missing_rate_curve(points: Iterable[tuple[float, float]]) -> list[tuple[float, float]]:
     """Validate and sort robustness points as (missing_rate, recall).
 

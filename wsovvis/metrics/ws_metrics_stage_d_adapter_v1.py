@@ -20,6 +20,12 @@ def _as_int_list(values: Any, *, field_path: str) -> list[int]:
     return out
 
 
+def _optional_int_list(values: Any, *, field_path: str) -> list[int] | None:
+    if values is None:
+        return None
+    return _as_int_list(values, field_path=field_path)
+
+
 def _collect_missing_fields(round_summary: Mapping[str, Any]) -> list[str]:
     missing: list[str] = []
     ros = round_summary.get("round_output_summary")
@@ -78,6 +84,18 @@ def build_ws_metrics_summary_v1_from_stage_d_round_summary(
         round_output_summary["candidate_label_ids"],
         field_path="round_output_summary.candidate_label_ids",
     )
+    observed_label_ids = _optional_int_list(
+        round_output_summary.get("observed_label_ids"),
+        field_path="round_output_summary.observed_label_ids",
+    )
+    hidden_positive_label_ids = _optional_int_list(
+        round_output_summary.get("hidden_positive_label_ids"),
+        field_path="round_output_summary.hidden_positive_label_ids",
+    )
+    unknown_attributed_label_ids = _optional_int_list(
+        round_output_summary.get("unknown_attributed_label_ids"),
+        field_path="round_output_summary.unknown_attributed_label_ids",
+    )
 
     predictions_by_missing_rate = _build_predictions_by_missing_rate(candidate_label_ids)
     ws_eval_bundle = {
@@ -85,6 +103,12 @@ def build_ws_metrics_summary_v1_from_stage_d_round_summary(
         "predicted_entities": candidate_label_ids,
         "predictions_by_missing_rate": predictions_by_missing_rate,
     }
+    if observed_label_ids is not None:
+        ws_eval_bundle["observed_entities"] = observed_label_ids
+    if hidden_positive_label_ids is not None:
+        ws_eval_bundle["hidden_positive_entities"] = hidden_positive_label_ids
+    if unknown_attributed_label_ids is not None:
+        ws_eval_bundle["unknown_attributed_entities"] = unknown_attributed_label_ids
     summary = build_ws_metrics_summary_v1(
         {
             "video_id": round_output_summary["selected_video_id"],

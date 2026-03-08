@@ -5,7 +5,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from wsovvis.metrics import aurc_from_curve, missing_rate_curve_from_predictions, set_coverage_recall
+from wsovvis.metrics import (
+    aurc_from_curve,
+    hidden_positive_recall,
+    missing_rate_curve_from_predictions,
+    set_coverage_recall,
+    unknown_attribution_recall,
+)
 
 
 def test_case_a_perfect_prediction() -> None:
@@ -69,6 +75,14 @@ def test_aurc_trapezoid_nontrivial_curve() -> None:
     # [0.75,1.0]: (0.25+0.0)/2 * 0.25 = 0.03125
     # total = 0.5, normalized by (1.0 - 0.0) => 0.5
     assert aurc_from_curve(curve) == 0.5
+
+
+def test_hidden_positive_recall_and_unknown_attribution_recall() -> None:
+    hidden = {7, 8}
+    predicted = {7, 99}
+    unknown_attributed = {8, 100}
+    assert hidden_positive_recall(hidden, predicted) == 0.5
+    assert unknown_attribution_recall(hidden, unknown_attributed) == 0.5
 
 
 def test_optional_cli_demo(tmp_path: Path) -> None:

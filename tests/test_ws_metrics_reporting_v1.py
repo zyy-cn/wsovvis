@@ -23,6 +23,26 @@ def _tiny_stage_summary_fixture() -> dict:
     }
 
 
+def _hidden_positive_stage_summary_fixture() -> dict:
+    return {
+        "video_id": "11",
+        "assignment_backend": "stagec_open_world_core_v1",
+        "steps": 4,
+        "seed": 20260308,
+        "ws_eval_bundle": {
+            "gt_entities": [48, 145, 314, 465],
+            "observed_entities": [48, 145],
+            "predicted_entities": [48, 145, 314],
+            "unknown_attributed_entities": [314, 909001],
+            "predictions_by_missing_rate": {
+                "0.0": [48, 145, 314],
+                "0.5": [48, 145],
+                "1.0": [48],
+            },
+        },
+    }
+
+
 def test_ws_metrics_summary_v1_schema_and_fields_complete() -> None:
     out = build_ws_metrics_summary_v1(_tiny_stage_summary_fixture())
 
@@ -62,3 +82,12 @@ def test_ws_metrics_summary_v1_c10a_fixture_consistency() -> None:
         "steps": 6,
         "seed": 20260305,
     }
+
+
+def test_ws_metrics_summary_v1_exposes_hpr_and_uar_when_hidden_positive_inputs_exist() -> None:
+    out = build_ws_metrics_summary_v1(_hidden_positive_stage_summary_fixture())
+    metrics = out["metrics"]
+
+    assert set(metrics.keys()) == {"scr", "missing_rate_curve", "aurc", "hpr", "uar"}
+    assert metrics["hpr"] == pytest.approx(0.5)
+    assert metrics["uar"] == pytest.approx(0.5)
