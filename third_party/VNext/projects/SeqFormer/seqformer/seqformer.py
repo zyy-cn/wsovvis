@@ -336,8 +336,12 @@ class SeqFormer(nn.Module):
 
 
     def inference_clip(self, output, image_size):
-        mask_cls = output["pred_logits"][0].sigmoid()
+        mask_cls_logits = output["pred_logits"][0]
+        mask_cls = mask_cls_logits.sigmoid()
         mask_pred = output["pred_masks"][0]
+        query_embeddings = output.get("pred_query_embeddings")
+        if query_embeddings is not None:
+            query_embeddings = query_embeddings[0]
 
         # For all 300 masks, we select top 10 as valid masks.
         
@@ -348,12 +352,19 @@ class SeqFormer(nn.Module):
         scores = scores[valid]
         labels = labels[valid]
         mask_cls = mask_cls[valid]
+        mask_cls_logits = mask_cls_logits[valid]
         mask_pred = mask_pred[valid]
+        if query_embeddings is not None:
+            query_embeddings = query_embeddings[valid]
 
         results = Instances(image_size)
         results.scores = scores
         results.pred_classes = labels
         results.cls_probs = mask_cls
+        results.cls_logits = mask_cls_logits
+        results.quality_scores = scores
+        if query_embeddings is not None:
+            results.query_embeddings = query_embeddings
         results.pred_masks = mask_pred
 
         return results
