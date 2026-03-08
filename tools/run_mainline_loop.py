@@ -37,6 +37,7 @@ READ_ORDER = [
 TERMINAL_GATE_TOKEN = "G6"
 TERMINAL_STATUS_LABEL = "Terminal mainline mode"
 TERMINAL_STATUS_ACTIVE = "active"
+TERMINAL_EXPLICIT_LABEL = "Terminal detection explicit"
 
 TERMINAL_REGRESSION_SUITE = {
     "g4": [
@@ -125,7 +126,11 @@ def infer_state(paths: Paths) -> SupervisorState:
     gate_judgment = _find_status_value(status_text, f"Current {active_gate_token} judgment") if active_gate_token != "UNKNOWN" else ""
 
     explicit_terminal_value = _find_status_value(status_text, TERMINAL_STATUS_LABEL)
-    terminal_mode_explicit = explicit_terminal_value.strip("`").lower() == TERMINAL_STATUS_ACTIVE
+    explicit_detection_value = _find_status_value(status_text, TERMINAL_EXPLICIT_LABEL)
+    terminal_mode_explicit = (
+        explicit_terminal_value.strip("`").lower() == TERMINAL_STATUS_ACTIVE
+        or explicit_detection_value.strip("`").lower() == "yes"
+    )
     no_further_gate_reported = "no further gate" in acceptance_text.lower()
 
     terminal_detected = False
