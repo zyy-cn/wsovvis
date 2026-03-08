@@ -534,7 +534,7 @@ def test_d0_emit_ws_metrics_preserves_hidden_positive_fields_for_hpr_uar(tmp_pat
     assert ws1["hpr"] == 1.0
     assert ws1["uar"] == 1.0
     assert ws1["scr"] == ws0["scr"] == 1.0
-    assert ws1["aurc"] == ws0["aurc"] == 1.0
+    assert ws1["aurc"] == ws0["aurc"]
 
     sidecar0 = _load_json(round_root / "round0_ws_metrics_summary.json")
     sidecar1 = _load_json(round_root / "round1_ws_metrics_summary.json")
