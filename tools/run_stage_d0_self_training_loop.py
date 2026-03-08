@@ -130,6 +130,18 @@ def _as_int_list(values: Any) -> list[int]:
     return out
 
 
+def _as_optional_int_list(values: Any) -> list[int] | None:
+    if values is None:
+        return None
+    if not isinstance(values, (list, tuple)):
+        return None
+    out: list[int] = []
+    for value in values:
+        if isinstance(value, int) and not isinstance(value, bool):
+            out.append(int(value))
+    return out
+
+
 def _seed_from_stagec_summary(path: Path) -> dict[str, Any]:
     payload = _load_json(path)
     selected_video_id = payload.get("selected_video_id")
@@ -154,6 +166,9 @@ def _seed_from_stagec_summary(path: Path) -> dict[str, Any]:
         "positive_label_ids": selected_positive_ids,
         "candidate_label_ids": candidate_ids,
         "assignment_backend": str(payload.get("assignment_backend_requested", "")),
+        "observed_label_ids": _as_optional_int_list(payload.get("observed_label_ids")),
+        "hidden_positive_label_ids": _as_optional_int_list(payload.get("hidden_positive_label_ids")),
+        "unknown_attributed_label_ids": _as_optional_int_list(payload.get("unknown_attributed_label_ids")),
         "ws_metrics_summary_v1": ws_metrics if isinstance(ws_metrics, dict) else None,
         "upstream_risk_guardrail_v1": risk_guardrail if isinstance(risk_guardrail, dict) else None,
     }
@@ -167,6 +182,9 @@ def _seed_from_tiny_pinned() -> dict[str, Any]:
         "positive_label_ids": [101, 202],
         "candidate_label_ids": [101, 202, 303],
         "assignment_backend": "d0_tiny_seed_v1",
+        "observed_label_ids": None,
+        "hidden_positive_label_ids": None,
+        "unknown_attributed_label_ids": None,
         "ws_metrics_summary_v1": None,
         "upstream_risk_guardrail_v1": None,
     }
@@ -377,6 +395,9 @@ def _build_round_input_summary(
         "selected_video_id": str(state.get("selected_video_id", "unknown")),
         "positive_label_ids": _as_int_list(state.get("positive_label_ids")),
         "candidate_label_ids": _as_int_list(state.get("candidate_label_ids")),
+        "observed_label_ids": _as_optional_int_list(state.get("observed_label_ids")),
+        "hidden_positive_label_ids": _as_optional_int_list(state.get("hidden_positive_label_ids")),
+        "unknown_attributed_label_ids": _as_optional_int_list(state.get("unknown_attributed_label_ids")),
         "assignment_backend": str(state.get("assignment_backend", "")),
         "ws_metrics_summary_v1_present": isinstance(ws_metrics, dict),
         "upstream_risk_guardrail_v1_present": isinstance(upstream_risk_guardrail, dict),
@@ -397,6 +418,9 @@ def _build_round_output_summary(
         "assignment_backend": str(round_input["assignment_backend"]),
         "positive_label_ids": _as_int_list(round_input.get("positive_label_ids")),
         "candidate_label_ids": candidate_ids,
+        "observed_label_ids": _as_optional_int_list(round_input.get("observed_label_ids")),
+        "hidden_positive_label_ids": _as_optional_int_list(round_input.get("hidden_positive_label_ids")),
+        "unknown_attributed_label_ids": _as_optional_int_list(round_input.get("unknown_attributed_label_ids")),
         "num_candidate_labels": int(len(candidate_ids)),
         "orchestration_status": "pass_through_baseline",
     }
@@ -596,6 +620,13 @@ def main() -> int:
                 "positive_label_ids": _as_int_list(previous_round_output.get("positive_label_ids")),
                 "candidate_label_ids": guarded_ids,
                 "assignment_backend": previous_round_output.get("assignment_backend", ""),
+                "observed_label_ids": _as_optional_int_list(previous_round_output.get("observed_label_ids")),
+                "hidden_positive_label_ids": _as_optional_int_list(
+                    previous_round_output.get("hidden_positive_label_ids")
+                ),
+                "unknown_attributed_label_ids": _as_optional_int_list(
+                    previous_round_output.get("unknown_attributed_label_ids")
+                ),
                 "ws_metrics_summary_v1": current_state.get("ws_metrics_summary_v1"),
                 "upstream_risk_guardrail_v1": current_state.get("upstream_risk_guardrail_v1"),
             }

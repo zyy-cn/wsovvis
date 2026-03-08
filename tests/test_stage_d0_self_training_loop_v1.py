@@ -472,6 +472,78 @@ def test_d0_emit_ws_metrics_writes_round_sidecars(tmp_path: Path) -> None:
         assert sidecar["schema_name"] == "wsovvis.ws_metrics_summary_v1"
 
 
+def test_d0_emit_ws_metrics_preserves_hidden_positive_fields_for_hpr_uar(tmp_path: Path) -> None:
+    stagec_path = tmp_path / "stagec_hidden_positive_summary.json"
+    stagec_path.write_text(
+        json.dumps(
+            {
+                "assignment_backend_requested": "stagec_open_world_core_v1",
+                "selected_video_id": "video_hp",
+                "selected_positive_label_ids": [5, 7],
+                "observed_label_ids": [5],
+                "hidden_positive_label_ids": [7],
+                "unknown_attributed_label_ids": [7],
+                "final": {"candidate_label_ids": [5, 7, 11]},
+                "ws_metrics_summary_v1": {
+                    "schema_name": "wsovvis.ws_metrics_summary_v1",
+                    "schema_version": "1.0",
+                    "metrics": {"scr": 1.0, "hpr": 1.0, "uar": 1.0, "missing_rate_curve": [], "aurc": 1.0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_json = tmp_path / "d0_hidden_positive_summary.json"
+    round_root = tmp_path / "rounds_hidden_positive"
+    proc = _run(
+        [
+            "--stagec-summary-json",
+            str(stagec_path),
+            "--round-index",
+            "0",
+            "--max-rounds",
+            "2",
+            "--refine-mode",
+            "minimal",
+            "--round-policy",
+            "minimal_curriculum_v1",
+            "--emit-ws-metrics",
+            "--round-summary-root",
+            str(round_root),
+            "--out-json",
+            str(out_json),
+        ]
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    run_summary = _load_json(out_json)
+    round0 = run_summary["round_summaries"][0]
+    round1 = run_summary["round_summaries"][1]
+
+    assert round0["round_output_summary"]["observed_label_ids"] == [5]
+    assert round0["round_output_summary"]["hidden_positive_label_ids"] == [7]
+    assert round0["round_output_summary"]["unknown_attributed_label_ids"] == [7]
+    assert round1["round_output_summary"]["observed_label_ids"] == [5]
+    assert round1["round_output_summary"]["hidden_positive_label_ids"] == [7]
+    assert round1["round_output_summary"]["unknown_attributed_label_ids"] == [7]
+
+    ws0 = round0["ws_metrics_summary_v1"]["metrics"]
+    ws1 = round1["ws_metrics_summary_v1"]["metrics"]
+    assert ws0["hpr"] == 1.0
+    assert ws0["uar"] == 1.0
+    assert ws1["hpr"] == 1.0
+    assert ws1["uar"] == 1.0
+    assert ws1["scr"] == ws0["scr"] == 1.0
+    assert ws1["aurc"] == ws0["aurc"] == 1.0
+
+    sidecar0 = _load_json(round_root / "round0_ws_metrics_summary.json")
+    sidecar1 = _load_json(round_root / "round1_ws_metrics_summary.json")
+    assert sidecar0["metrics"]["hpr"] == 1.0
+    assert sidecar0["metrics"]["uar"] == 1.0
+    assert sidecar1["metrics"]["hpr"] == 1.0
+    assert sidecar1["metrics"]["uar"] == 1.0
+
+
 def test_d0_minimal_regression_guard_blocks_round2_high_risk_additions(tmp_path: Path) -> None:
     stagec_path = tmp_path / "stagec_high_risk_summary.json"
     stagec_path.write_text(
