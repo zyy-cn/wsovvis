@@ -461,11 +461,14 @@ def _build_crop_requests(
     segmentations = representative_track.get("segmentations")
     _require(isinstance(segmentations, list) and segmentations, "representative_track.segmentations", "must be a non-empty list")
     start_frame_idx = int(representative_track.get("start_frame_idx", 0))
+    end_frame_idx = int(representative_track.get("end_frame_idx", start_frame_idx + len(segmentations) - 1))
+    support_span = max(1, end_frame_idx - start_frame_idx + 1)
+    use_absolute_offsets = len(segmentations) == int(video_ctx.length) or len(segmentations) > support_span
     visible: List[TrackCropRequest] = []
     for offset, segmentation in enumerate(segmentations):
         if not segmentation:
             continue
-        frame_idx = start_frame_idx + offset
+        frame_idx = offset if use_absolute_offsets else (start_frame_idx + offset)
         _require(
             0 <= frame_idx < len(video_ctx.file_names),
             "representative_track.segmentations",
