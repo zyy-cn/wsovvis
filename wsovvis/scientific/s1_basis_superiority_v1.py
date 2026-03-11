@@ -54,7 +54,7 @@ def _tube_id(row: Mapping[str, Any]) -> str:
 def _to_float(value: Any) -> float:
     if hasattr(value, "tolist"):
         value = value.tolist()
-    if isinstance(value, list):
+    while isinstance(value, list):
         if not value:
             return 0.0
         value = value[0]
