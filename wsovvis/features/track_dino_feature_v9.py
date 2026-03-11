@@ -390,7 +390,12 @@ def _load_predictions(run_root: Path) -> Dict[Tuple[str, str | int], Dict[str, A
         _require(isinstance(payload, list), "instances_predictions.pth", "top-level value must be a list")
         records = [row for row in payload if isinstance(row, dict)]
     else:
-        payload = _load_json(inference_root / "results.json", "results.json")
+        try:
+            payload = json.loads((inference_root / "results.json").read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise _err("results.json", f"file not found: {inference_root / 'results.json'}") from exc
+        except json.JSONDecodeError as exc:
+            raise _err("results.json", f"invalid JSON: {exc}") from exc
         records = _coerce_predictions_json(payload)
 
     result: Dict[Tuple[str, str | int], Dict[str, Any]] = {}
