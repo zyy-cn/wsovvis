@@ -225,11 +225,19 @@ def encode_label_texts_open_clip_v9(label_texts: Sequence[str], config: TextMapC
     device = config.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    pretrained_spec = str(config.text_model_pretrained)
+    pretrained_path = Path(pretrained_spec).expanduser()
+    model_kwargs: Dict[str, Any] = {}
+    if pretrained_path.exists():
+        # Locally managed OpenAI checkpoints on the canonical runner may be TorchScript
+        # archives; PyTorch 2.6 requires weights_only=False for that trusted local case.
+        model_kwargs["weights_only"] = False
     model = open_clip.create_model(
         config.text_model_name,
-        pretrained=config.text_model_pretrained,
+        pretrained=pretrained_spec,
         device=device,
         cache_dir=config.cache_dir,
+        **model_kwargs,
     )
     tokenizer = open_clip.get_tokenizer(config.text_model_name)
     model.eval()
