@@ -1,0 +1,87 @@
+WSOVVIS terminal mainline summary
+Timestamp (UTC): 2026-03-08T16:04:38Z
+
+1. Terminal status
+- active gate: `G6 — Single-round bounded refinement`
+- current gate judgment: `PASS`
+- terminal gate token: `G6`
+- terminal detection explicit in STATUS.md: `yes`
+- terminal detection result: `active`
+- terminal detection reason: `explicit_terminal_status`
+- acceptance_latest reports no further gate: `yes`
+
+2. Terminal automation behavior
+- default supervisor behavior at terminal mainline:
+  stop automatically
+  do not generate a new coding step
+  write/update `docs/mainline/reports/mainline_terminal_summary.txt`
+- allowed bounded follow-up mode:
+  `python tools/run_mainline_loop.py --terminal-revalidate --dry-run`
+
+3. Authoritative bounded terminal regression suite
+- G4 bounded attribution regression anchors:
+- tests/test_stagec2_labelset_proto_baseline_v1.py::test_decoder_independent_matches_scorer_predictions
+- tests/test_stagec4_sinkhorn_scorer_v1.py::test_sinkhorn_c43_unk_fg_gating_schema_and_behavior
+- tests/test_ws_metrics_reporting_v1.py::test_ws_metrics_summary_v1_exposes_hpr_and_uar_when_hidden_positive_inputs_exist
+- G5 bounded linking / quality-weighted classification regression anchors:
+- tests/test_g5_bounded_policy_v1.py
+- G6 single-round bounded refinement regression anchors:
+- tests/test_stage_d0_self_training_loop_v1.py::test_d0_round0_round1_with_minimal_refine_and_stagec_seed
+- tests/test_stage_d0_self_training_loop_v1.py::test_d0_emit_ws_metrics_preserves_hidden_positive_fields_for_hpr_uar
+- tests/test_stage_d_reporting_snapshot_v1.py::test_stage_d_snapshot_happy_path_detects_round_paths
+- tests/test_stage_d_ws_metrics_adapter_v1.py::test_stage_d_ws_metrics_adapter_exposes_hpr_and_uar_when_optional_fields_exist
+
+4. Canonical validation semantics for terminal revalidation
+- canonical host alias: `gpu4090d`
+- canonical repo dir: `/home/zyy/code/wsovvis_runner`
+- canonical wrapper: `tools/remote_verify_wsovvis.sh`
+- bootstrap preflight:
+  `python tools/check_canonical_runner_bootstrap_links.py --check`
+- remote PASS counts only if `remote HEAD == intended local commit`
+
+5. Scope guardrails
+- no new gate activation under the current documented mainline
+- no algorithm development after terminal acceptance
+- no label-set expansion
+- no second-round refinement
+- no enhanced memory aggregation
+- no broader Stage D continuation
+
+6. Current canonical terminal validation record
+- local branch: `codex/p3-stagec-c0-c4-semantic-slice`
+- intended local commit: `23748b3c348f0745bdee82df43096be95c6b4dc7`
+- remote host: `gpu4090d`
+- remote repo dir: `/home/zyy/code/wsovvis_runner`
+- remote HEAD: `23748b3c348f0745bdee82df43096be95c6b4dc7`
+- remote HEAD == intended local commit: `yes`
+- canonical bootstrap preflight: `PASS`
+- canonical remote terminal automation pytest: `PASS` with `3 passed in 0.18s`
+- canonical default terminal stop behavior: `PASS`
+- canonical bounded terminal revalidation prompt generation: `PASS`
+- canonical validation task root: `codex/terminal_mainline_automation_20260308T123500Z`
+
+7. Latest bounded worked-example revalidation
+- canonical task root: `codex/worked_example_verification_20260308T155833Z`
+- worked example:
+  `video_id=1`
+  `video_name=video_worked_example_hp`
+  `Y*={10,20}`
+  `Y'={10}`
+  hidden positive `{20}`
+- canonical bootstrap preflight: `PASS`
+- remote HEAD == intended local commit: `yes`
+- measured G4 evidence:
+  closed-world `HPR=0.0`, `UAR=0.0`, `SCR=0.5`, `AURC=0.5`
+  open-world `HPR=1.0`, `UAR=1.0`, `SCR=0.5`, `AURC=0.5`
+- measured G5 bounded-policy replay:
+  `linking_policy_observed=geometry_gate_plus_query_similarity`
+  `classification_closure_observed=quality_weighted_logit_averaging`
+- measured G6 bounded loop:
+  single-round refinement confirmed
+  round0 `HPR=1.0`, `UAR=1.0`
+  round1 `HPR=1.0`, `UAR=1.0`
+  no second-round refinement
+  no label-set expansion
+- local worked-example report bundle:
+  `docs/mainline/reports/worked_example_verification_latest.md`
+  `docs/mainline/reports/worked_example_verification_latest.json`

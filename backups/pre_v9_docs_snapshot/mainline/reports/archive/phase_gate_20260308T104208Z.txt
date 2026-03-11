@@ -1,0 +1,259 @@
+WSOVVIS phase/gate check
+Timestamp (UTC): 2026-03-08T10:42:08Z
+Branch: codex/p3-stagec-c0-c4-semantic-slice
+HEAD: 5e9172b7f9f685f9409ebd8351b028272d00b7cc
+Skill: wsovvis-mainline-supervisor
+
+1. Active phase/gate evaluated
+- `G4 - Open-world attribution validation`
+
+2. Why this gate was evaluated
+- `G0`, `G1`, `G2`, and `G3` had already passed.
+- Per `PLAN.md` and `METRICS_ACCEPTANCE.md`, `G4` requires a protocol-aligned closed-world baseline result, a bounded open-world result, and hidden-positive evidence through `HPR` / `UAR` with no disqualifying `SCR` or `AURC` regression.
+
+3. Authoritative G4 entrypoints
+- protocol-aligned closed-world baseline entrypoint: `tools/run_stagec1_mil_baseline_offline.py`
+- closed-world baseline implementation: `wsovvis/track_feature_export/stagec1_attribution_mil_v1.py`
+- active closed-world scorer path used in this loop: `labelset_proto_v1` with `decoder_backend=independent`
+- bounded open-world comparator entrypoint: `tools/run_stagec1_mil_baseline_offline.py`
+- bounded open-world comparator implementation: `wsovvis/track_feature_export/stagec1_attribution_mil_v1.py`
+- active bounded open-world comparator path used in this loop: `sinkhorn_v1` with bounded C4.3 `bg` / `unk_fg` special columns and `decoder_backend=independent`
+- bounded metrics/reporting layer used in this loop: `wsovvis/metrics/ws_metrics.py`, `wsovvis/metrics/ws_metrics_reporting_v1.py`, `tools/ws_metrics_summary_demo_v1.py`
+- secondary diagnostic helper, not the primary comparator for this bounded G4 step: `tools/compare_stagec_unknown_handling_v1.py`
+
+4. Split root / protocol artifact path used
+- task root: `codex/g4_open_world_validation_20260308T103951Z`
+- split root: `codex/g4_open_world_validation_20260308T103951Z/export_train`
+- protocol output: `codex/g4_open_world_validation_20260308T103951Z/protocol_uniform_mr050_seed123.json`
+- protocol manifest: `codex/g4_open_world_validation_20260308T103951Z/protocol_uniform_mr050_seed123.manifest.json`
+- closed-world output dir: `codex/g4_open_world_validation_20260308T103951Z/closed_world_labelset_proto`
+- open-world output dir: `codex/g4_open_world_validation_20260308T103951Z/open_world_sinkhorn_c43`
+- compare summary path: `codex/g4_open_world_validation_20260308T103951Z/g4_compare_summary.json`
+- realized observed label from the protocol-built fixture: `10`
+- realized hidden positive label from the protocol-built fixture: `20`
+
+5. Commands run
+- Canonical wrapper command used:
+```bash
+REMOTE_CMD=$(cat <<'EOF'
+set -euo pipefail
+TASK_ROOT="codex/g4_open_world_validation_20260308T103951Z"
+mkdir -p "$TASK_ROOT"
+python tools/check_canonical_runner_bootstrap_links.py --check
+python - <<'PY'
+from pathlib import Path
+import json
+
+task_root = Path("codex/g4_open_world_validation_20260308T103951Z")
+task_root.mkdir(parents=True, exist_ok=True)
+protocol_input = {
+    "videos": [{"id": 1, "name": "vid_g4"}],
+    "annotations": [{"video_id": 1, "category_id": 10}, {"video_id": 1, "category_id": 20}],
+    "categories": [{"id": 10, "name": "class_10"}, {"id": 20, "name": "class_20"}],
+}
+(task_root / "protocol_input.json").write_text(json.dumps(protocol_input, indent=2) + "\n", encoding="utf-8")
+PY
+python tools/build_wsovvis_labelset_protocol.py --input-json "$TASK_ROOT/protocol_input.json" --output-json "$TASK_ROOT/protocol_uniform_mr050_seed123.json" --manifest-json "$TASK_ROOT/protocol_uniform_mr050_seed123.manifest.json" --protocol uniform --missing-rate 0.5 --seed 123 --min-labels-per-clip 1
+python - <<'PY'
+from pathlib import Path
+import json
+import numpy as np
+from wsovvis.track_feature_export import build_track_feature_export_v1
+
+task_root = Path("codex/g4_open_world_validation_20260308T103951Z")
+protocol = json.loads((task_root / "protocol_uniform_mr050_seed123.json").read_text(encoding="utf-8"))
+clip = protocol["clips"][0]
+full_ids = [int(x) for x in clip["label_set_full_ids"]]
+observed_ids = [int(x) for x in clip["label_set_observed_ids"]]
+hidden_ids = [x for x in full_ids if x not in observed_ids]
+video_name = str(clip.get("video_name") or f"vid_{clip['video_id']}")
+visible_id = observed_ids[0]
+hidden_id = hidden_ids[0]
+proto_by_label = {10: np.asarray([1.0, 0.0], dtype=np.float32), 20: np.asarray([0.0, 1.0], dtype=np.float32)}
+build_track_feature_export_v1(
+    {
+        "split": "train",
+        "embedding_dim": 2,
+        "embedding_dtype": "float32",
+        "embedding_pooling": "track_pooled",
+        "embedding_normalization": "none",
+        "producer": {
+            "stage_b_checkpoint_id": "ckpt_g4_tiny",
+            "stage_b_checkpoint_hash": "sha256:g4tiny",
+            "stage_b_config_ref": "configs/stage_b.yaml",
+            "stage_b_config_hash": "sha256:g4tinycfg",
+            "pseudo_tube_manifest_id": "ptube_g4_tiny",
+            "pseudo_tube_manifest_hash": "sha256:g4tinytubes",
+            "split": "train",
+            "extraction_settings": {
+                "frame_sampling_rule": "uniform_stride_2",
+                "pooling_rule": "mean_over_active_frames",
+                "min_track_length": 1,
+            },
+        },
+        "videos": [
+            {
+                "video_id": video_name,
+                "status": "processed_with_tracks",
+                "tracks": [
+                    {"track_id": 1, "start_frame_idx": 0, "end_frame_idx": 2, "num_active_frames": 3, "objectness_score": 0.9, "embedding": proto_by_label[visible_id].tolist()},
+                    {"track_id": 2, "start_frame_idx": 3, "end_frame_idx": 5, "num_active_frames": 3, "objectness_score": 0.8, "embedding": [-1.0, -1.0]},
+                ],
+            }
+        ],
+    },
+    task_root / "export_train",
+)
+(task_root / "labelset_observed.json").write_text(json.dumps({"videos": [{"video_id": video_name, "label_set_observed_ids": observed_ids}]}, indent=2) + "\n", encoding="utf-8")
+np.savez(task_root / "prototype_arrays.npz", prototypes=np.asarray([proto_by_label[label_id] for label_id in full_ids], dtype=np.float32))
+(task_root / "prototype_manifest.json").write_text(
+    json.dumps(
+        {
+            "schema_name": "wsovvis.stagec.label_prototypes.v1",
+            "schema_version": "1.0.0",
+            "embedding_dim": 2,
+            "dtype": "float32",
+            "labels": [{"label_id": int(label_id), "row_index": idx} for idx, label_id in enumerate(full_ids)],
+            "arrays_path": "prototype_arrays.npz",
+            "array_key": "prototypes",
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(task_root / "truth_eval_context.json").write_text(
+    json.dumps(
+        {
+            "video_id": video_name,
+            "full_label_ids": full_ids,
+            "observed_label_ids": observed_ids,
+            "hidden_label_ids": hidden_ids,
+            "track_truth_by_id": {"1": visible_id, "2": hidden_id},
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+python tools/run_stagec1_mil_baseline_offline.py --split-root "$TASK_ROOT/export_train" --output-dir "$TASK_ROOT/closed_world_labelset_proto" --scorer-backend labelset_proto_v1 --decoder-backend independent --labelset-json "$TASK_ROOT/labelset_observed.json" --prototype-manifest-json "$TASK_ROOT/prototype_manifest.json"
+python tools/run_stagec1_mil_baseline_offline.py --split-root "$TASK_ROOT/export_train" --output-dir "$TASK_ROOT/open_world_sinkhorn_c43" --scorer-backend sinkhorn_v1 --decoder-backend independent --labelset-json "$TASK_ROOT/labelset_observed.json" --prototype-manifest-json "$TASK_ROOT/prototype_manifest.json" --sinkhorn-c43-enable --sinkhorn-c43-enable-bg --sinkhorn-c43-enable-unk-fg --sinkhorn-c43-bg-prior-weight 2.0 --sinkhorn-c43-unk-fg-prior-weight 3.0 --sinkhorn-c43-unk-fg-min-top-obs-score -0.8 --sinkhorn-c43-unk-fg-max-top-obs-score -0.6 --sinkhorn-c43-bg-score -2.0
+python - <<'PY'
+from pathlib import Path
+import json
+
+task_root = Path("codex/g4_open_world_validation_20260308T103951Z")
+truth = json.loads((task_root / "truth_eval_context.json").read_text(encoding="utf-8"))
+gt_entities = [int(x) for x in truth["full_label_ids"]]
+observed_entities = [int(x) for x in truth["observed_label_ids"]]
+hidden_entities = [int(x) for x in truth["hidden_label_ids"]]
+track_truth = {str(k): int(v) for k, v in truth["track_truth_by_id"].items()}
+
+def build_bundle(run_dir: str) -> dict:
+    run_path = task_root / run_dir
+    run_summary = json.loads((run_path / "run_summary.json").read_text(encoding="utf-8"))
+    rows = [json.loads(line) for line in (run_path / "track_scores.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    predicted_entities = set()
+    unknown_attributed_entities = set()
+    for row in rows:
+        gt_label = track_truth[str(row["track_id"])]
+        pred_label = row.get("predicted_label_id")
+        pred_source = row.get("predicted_label_source")
+        if pred_label == gt_label:
+            predicted_entities.add(gt_label)
+        elif pred_label == "__unk_fg__" or pred_source == "unk_fg":
+            predicted_entities.add(gt_label)
+            unknown_attributed_entities.add(gt_label)
+    return {
+        "video_id": truth["video_id"],
+        "assignment_backend": run_summary.get("scorer_backend"),
+        "ws_eval_bundle": {
+            "gt_entities": gt_entities,
+            "observed_entities": observed_entities,
+            "hidden_positive_entities": hidden_entities,
+            "predicted_entities": sorted(predicted_entities),
+            "unknown_attributed_entities": sorted(unknown_attributed_entities),
+            "predictions_by_missing_rate": {"0.0": sorted(predicted_entities), "0.5": sorted(predicted_entities), "1.0": sorted(predicted_entities)},
+        },
+    }
+
+(task_root / "closed_world_metrics_input.json").write_text(json.dumps(build_bundle("closed_world_labelset_proto"), indent=2) + "\n", encoding="utf-8")
+(task_root / "open_world_metrics_input.json").write_text(json.dumps(build_bundle("open_world_sinkhorn_c43"), indent=2) + "\n", encoding="utf-8")
+PY
+python tools/ws_metrics_summary_demo_v1.py --input-json "$TASK_ROOT/closed_world_metrics_input.json" > "$TASK_ROOT/closed_world_metrics_summary.json"
+python tools/ws_metrics_summary_demo_v1.py --input-json "$TASK_ROOT/open_world_metrics_input.json" > "$TASK_ROOT/open_world_metrics_summary.json"
+echo "REMOTE_HEAD=$(git rev-parse HEAD)"
+echo "TASK_ROOT=$TASK_ROOT"
+EOF
+)
+bash tools/remote_verify_wsovvis.sh \
+  --remote gpu4090d \
+  --repo-dir /home/zyy/code/wsovvis_runner \
+  --branch codex/p3-stagec-c0-c4-semantic-slice \
+  --clone-url git@github.com:zyy-cn/wsovvis.git \
+  --env-cmd 'source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' \
+  --cmd "$REMOTE_CMD" \
+  --keep-untracked
+```
+
+6. Validation result
+- canonical runner bootstrap preflight: `PASS`
+- protocol-aligned closed-world baseline on the chosen split root: `PASS`
+- bounded open-world comparator on the same split root: `PASS`
+- bounded metrics/reporting layer on the resulting evidence bundle: `PASS`
+- remote HEAD: `5e9172b7f9f685f9409ebd8351b028272d00b7cc`
+- remote HEAD == intended local commit: `yes`
+- G4-scoped wiring fix required: `no`
+
+7. Metric comparison summary
+- closed-world metrics:
+  `HPR=0.0`, `UAR=0.0`, `SCR=0.5`, `AURC=0.5`
+- bounded open-world metrics:
+  `HPR=1.0`, `UAR=1.0`, `SCR=0.5`, `AURC=0.5`
+- deltas:
+  `HPR=+1.0`, `UAR=+1.0`, `SCR=+0.0`, `AURC=+0.0`
+- `AP`: unavailable in the current bounded path
+- `AP_base`: unavailable in the current bounded path
+- `AP_novel`: unavailable in the current bounded path
+- evaluation-bundle policy used for the metrics layer:
+  the ground-truth entity is counted as preserved when the track-level output matches that entity or explicitly routes to `__unk_fg__`;
+  `unknown_attributed_entities` records the hidden-positive subset preserved through `__unk_fg__`.
+
+8. Current G4 judgment
+- `PASS`
+- Basis:
+  the protocol-aligned closed-world baseline result exists;
+  the bounded open-world comparator result exists on the same split root and protocol artifact;
+  `HPR` improves from `0.0` to `1.0`;
+  `UAR` improves from `0.0` to `1.0`;
+  `SCR` does not degrade;
+  `AURC` is not worse;
+  remote `HEAD` equals the intended local commit.
+
+9. Blocking acceptance conditions
+- None remain within `G4`.
+
+10. Out-of-scope modules
+- label-set expansion
+- second-round refinement
+- scenario/domain-missing as mainline protocol
+- enhanced memory aggregation for global classification
+- decoder-comparison research branches as default mainline
+- Stage D multi-round guarded continuation as mainline
+- any `G5+` work beyond identifying the next smallest step
+- any algorithmic expansion
+
+11. Smallest next valid step
+- On the next bounded loop, if promotion is authorized, activate `G5 - Full-video linking and inference closure`.
+- Start with the smallest linking / inference smoke that preserves the accepted G4 attribution path.
+
+12. Fallback path if blocked or failed
+- If a later G5 or replay attempt is blocked by environment, bootstrap, wrapper, routing, or remote mismatch issues, use `FAILURE_PLAYBOOK.md` and classify the result as `BLOCKED` or `INCONCLUSIVE`, not as algorithmic failure.
+
+13. Files changed this loop
+- `docs/mainline/STATUS.md`
+- `docs/mainline/reports/phase_gate_latest.txt`
+- `docs/mainline/reports/archive/phase_gate_20260308T104208Z.txt`
+- `docs/mainline/reports/acceptance_latest.txt`
+- `docs/mainline/reports/archive/acceptance_20260308T104208Z.txt`

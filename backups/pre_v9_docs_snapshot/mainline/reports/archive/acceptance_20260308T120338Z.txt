@@ -1,0 +1,73 @@
+WSOVVIS acceptance evaluation
+Timestamp (UTC): 2026-03-08T12:03:38Z
+Active gate evaluated: `G6 - Single-round bounded refinement`
+Branch: `codex/p3-stagec-c0-c4-semantic-slice`
+Intended local commit: `520077937ba43583d055cbf1c85e01a4b2283a8f`
+
+1. Evidence reviewed
+- `PLAN.md`
+- `METRICS_ACCEPTANCE.md`
+- `FAILURE_PLAYBOOK.md`
+- current `STATUS.md`
+- current `CODEBASE_MAP.md`
+- authoritative G6 files:
+  `tools/run_stage_d0_self_training_loop.py`
+  `wsovvis/metrics/ws_metrics_stage_d_adapter_v1.py`
+  `tools/stage_d_reporting_snapshot.py`
+- authoritative G6 tests:
+  `tests/test_stage_d0_self_training_loop_v1.py`
+  `tests/test_stage_d_reporting_snapshot_v1.py`
+  `tests/test_stage_d_ws_metrics_adapter_v1.py`
+- preserved G5 regression check:
+  `tests/test_g5_bounded_policy_v1.py`
+- canonical runtime smoke artifacts:
+  `codex/g6_single_round_refinement_20260308T123824Z/d0_loop_summary.json`
+  `codex/g6_single_round_refinement_20260308T123824Z/d0_snapshot.json`
+  `codex/g6_single_round_refinement_20260308T123824Z/g6_refinement_summary.json`
+- canonical remote wrapper validation on `gpu4090d`
+- remote HEAD consistency evidence
+
+2. Judgment
+- `PASS`
+
+3. Acceptance conditions satisfied
+- the active refinement path is bounded to a single refinement round only (`rounds_executed=2`, `round1_refine_applied=true`)
+- hidden-positive evidence now survives the Stage C summary handoff into Stage D round summaries and emitted `ws_metrics_summary_v1` sidecars
+- the canonical refinement smoke shows non-negative value on the exposed acceptance metrics:
+  round0 `HPR=1.0`, `UAR=1.0`, `SCR=1.0`, `AURC=0.75`
+  round1 `HPR=1.0`, `UAR=1.0`, `SCR=1.0`, `AURC=0.75`
+- hidden-positive handling does not regress across the bounded refinement step
+- default-off branches remain off: no second-round refinement, no label-set expansion, no broader Stage D continuation
+- the accepted G4 bounded open-world path and the accepted G5 bounded linking / quality-weighted classification defaults remain unchanged in the validated commit
+- the preserved G5 bounded-policy regression check passed in the same canonical run
+
+4. Acceptance conditions satisfied by scoped inference
+- the accepted G4 bounded attribution path remains unchanged
+- basis for this inference:
+  the G6 commit does not touch `tools/run_stagec1_mil_baseline_offline.py` or `wsovvis/track_feature_export/stagec1_attribution_mil_v1.py`
+  the canonical run verified the G6 commit also did not touch `third_party/VNext/projects/SeqFormer/seqformer/models/clip_output.py` or `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py`
+  the preserved G5 regression check passed canonically on the same commit
+
+5. Acceptance conditions still missing
+- none within `G6`
+
+6. Acceptance conditions failed
+- none
+
+7. May the next gate activate?
+- `no further gate`
+- `G6` is the terminal accepted gate in the current documented mainline
+
+8. Fallback path
+- no fallback is active because `G6` passed
+- if a later G6 rerun regresses, use the documented bounded fallback from `FAILURE_PLAYBOOK.md`:
+  keep only single-round refinement, drop semantic-heavy gating, retain mask/temporal denoising only, and keep broader Stage D behavior out of mainline
+
+9. What should be written back to `STATUS.md`
+- `Active gate: G6 - Single-round bounded refinement`
+- `Current G6 judgment: PASS`
+- exact bounded G6 handoff/reporting files and tests
+- canonical G6 task root and smoke summary paths
+- the hidden-positive metrics handoff change in `tools/run_stage_d0_self_training_loop.py`
+- `Current blockers: none within G6`
+- terminal next step guidance: keep `G6` as the accepted mainline endpoint unless the authoritative docs change scope

@@ -1,0 +1,17 @@
+{
+  "project_name": "WS-OVVIS",
+  "project_slug": "wsovvis",
+  "design_source": "docs/outline/WS_OVVIS_outline_v9.tex",
+  "execution_source": "docs/mainline/*",
+  "initial_active_gate": "G0",
+  "terminal_gate": "G7",
+  "remote_alias": "gpu4090d",
+  "remote_repo_dir": "/home/zyy/code/wsovvis_runner",
+  "remote_wrapper": "tools/remote_verify_wsovvis.sh",
+  "bootstrap_checker": "tools/check_canonical_runner_bootstrap_links.py --check",
+  "conda_env": "wsovvis",
+  "pythonpath_entry": "/home/zyy/code/wsovvis_runner/third_party/VNext",
+  "origin_url": "git@github.com:zyy-cn/wsovvis.git",
+  "push_route_alias": "github-via-gpu",
+  "push_route_url": "git@github-via-gpu:zyy-cn/wsovvis.git"
+}

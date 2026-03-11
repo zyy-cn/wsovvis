@@ -95,6 +95,7 @@ def _default_cfg():
     output_root = "runs/wsovvis_seqformer"
     seed = 42
     resume = False
+    resume_output_dir = ""
     eval_only = False
     feature_export = {
         "enabled": False,
@@ -382,6 +383,7 @@ def run(
     output_root,
     seed,
     resume,
+    resume_output_dir,
     eval_only,
     feature_export,
     stage_d_attribution,
@@ -395,8 +397,21 @@ def run(
     run_dir = _get_run_dir(_run, fs_root)
     os.makedirs(run_dir, exist_ok=True)
 
-    output_dir = os.path.join(run_dir, "d2")
-    os.makedirs(output_dir, exist_ok=True)
+    resolved_resume_output_dir = ""
+    if isinstance(resume_output_dir, str):
+        resolved_resume_output_dir = resume_output_dir.strip()
+    if resolved_resume_output_dir:
+        output_dir = os.path.abspath(os.path.expanduser(resolved_resume_output_dir))
+        os.makedirs(output_dir, exist_ok=True)
+        if resume:
+            last_checkpoint = os.path.join(output_dir, "last_checkpoint")
+            if not os.path.isfile(last_checkpoint):
+                raise FileNotFoundError(
+                    f"resume=True requires existing last_checkpoint at: {last_checkpoint}"
+                )
+    else:
+        output_dir = os.path.join(run_dir, "d2")
+        os.makedirs(output_dir, exist_ok=True)
 
     resolved_stage_d_attribution = resolve_stage_d_attribution_plumbing(
         stage_d_attribution,
@@ -464,6 +479,7 @@ def run(
         "output_dir": output_dir,
         "seed": seed,
         "resume": resume,
+        "resume_output_dir": resolved_resume_output_dir,
         "eval_only": eval_only,
         "feature_export": feature_export,
         "stage_d_attribution": resolved_stage_d_attribution,

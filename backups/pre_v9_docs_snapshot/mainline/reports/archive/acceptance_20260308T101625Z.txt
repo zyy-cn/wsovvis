@@ -1,0 +1,56 @@
+WSOVVIS acceptance evaluation
+Timestamp (UTC): 2026-03-08T10:16:25Z
+Active gate evaluated: `G2 - Stage B export / bridge / consumer integrity`
+Branch: `codex/p3-stagec-c0-c4-semantic-slice`
+Intended local commit: `5e9172b7f9f685f9409ebd8351b028272d00b7cc`
+
+1. Evidence reviewed
+- `STAGEB_INTERFACE_CONTRACT.md`
+- `CODEBASE_MAP.md`
+- authoritative Stage B files:
+  `wsovvis/track_feature_export/v1_core.py`
+  `wsovvis/track_feature_export/bridge_from_stageb_v1.py`
+  `wsovvis/track_feature_export/stagec_loader_v1.py`
+- authoritative Stage B tests:
+  `tests/test_stageb_track_feature_export_v1.py`
+  `tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py`
+  `tests/test_stagec_loader_v1.py`
+- canonical runner bootstrap preflight on `gpu4090d`
+- canonical wrapper validation using `tools/remote_verify_wsovvis.sh`
+- remote HEAD consistency evidence
+- current `STATUS.md`
+- current `PLAN.md`
+- current `METRICS_ACCEPTANCE.md`
+- current `ENVIRONMENT_AND_VALIDATION.md`
+
+2. Judgment
+- `PASS`
+
+3. Acceptance conditions satisfied
+- Stage B schema requirements match the code
+- Stage B bridge requirements match the code
+- Stage B consumer / loader requirements match the code
+- authoritative Stage B validation tests pass canonically
+- remote HEAD equals the intended local commit
+
+4. Acceptance conditions still missing
+- none within `G2`
+
+5. Acceptance conditions failed
+- none
+
+6. May the next gate activate?
+- `yes`
+- If promotion is authorized on the next bounded loop, the next gate is `G3 - Mixed representation and Stage C semantic plumbing`.
+
+7. Fallback path
+- No fallback is active because `G2` passed.
+
+8. What should be written back to `STATUS.md`
+- `Active gate: G2 - Stage B export / bridge / consumer integrity`
+- `Current G2 judgment: PASS`
+- authoritative Stage B files
+- authoritative Stage B tests
+- `Current blockers: none within G2`
+- canonical G2 validation evidence and remote HEAD consistency
+- `Next smallest valid step`: activate `G3` on the next bounded loop if promotion is authorized

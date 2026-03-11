@@ -1,0 +1,93 @@
+WSOVVIS phase/gate check
+Timestamp (UTC): 2026-03-08T10:26:27Z
+Branch: codex/p3-stagec-c0-c4-semantic-slice
+HEAD: 5e9172b7f9f685f9409ebd8351b028272d00b7cc
+Skill: wsovvis-mainline-supervisor
+
+1. Active phase/gate evaluated
+- `G3 - Mixed representation and Stage C semantic plumbing`
+
+2. Why this gate was evaluated
+- `G0`, `G1`, and `G2` had already passed.
+- Per `PLAN.md` and `METRICS_ACCEPTANCE.md`, `G3` requires the Stage C representation bridge to be coherent, representation-critical tests to pass, and no regression that breaks loader / prototype / semantic-slice coherence.
+
+3. Authoritative G3 files
+- representation loading / ingestion: `wsovvis/track_feature_export/stagec_loader_v1.py`
+- text prototype cache: `wsovvis/track_feature_export/stagec_clip_text_prototype_cache_v1.py`
+- semantic slice construction: `wsovvis/track_feature_export/stagec_semantic_slice_v1.py`
+- Stage C semantic plumbing: `wsovvis/training/stagec_semantic_plumbing_v1.py`
+- staged attribution plumbing: `wsovvis/training/staged_attribution_plumbing_v1.py`
+
+4. Authoritative G3 tests
+- `tests/test_stagec_semantic_slice_v1.py`
+- `tests/test_staged_attribution_plumbing_v1.py`
+
+5. CODEBASE_MAP consistency result
+- `CODEBASE_MAP.md` is consistent enough to proceed for the bounded G3 path used in this loop.
+- Coherence basis:
+  `stagec_loader_v1.py` remains the representation-loading / ingestion path inherited from Stage B;
+  `stagec_clip_text_prototype_cache_v1.py` remains the deterministic text-prototype cache path;
+  `stagec_semantic_slice_v1.py` remains the semantic batch / candidate / assignment interface path;
+  `stagec_semantic_plumbing_v1.py` remains the Stage C training-side semantic plumbing path;
+  `staged_attribution_plumbing_v1.py` remains the training-side staged attribution plumbing boundary currently expressed as default-off attribution-consumption / coupling helpers.
+- Nuance, not a blocker:
+  `tests/test_staged_attribution_plumbing_v1.py` validates the current staged-attribution-plumbing file through its default-off boundary/coupling behavior rather than semantic assignment math directly, but it is the current authoritative test for the file named in `CODEBASE_MAP.md`.
+- No doc/code conflict was found, so no code-map patch was needed.
+
+6. Commands run
+- Canonical wrapper command used:
+  `REMOTE_CMD=$(cat <<'EOF'
+  set -euo pipefail
+  TASK_ROOT="codex/g3_semantic_plumbing_20260308T102553Z"
+  PYTEST_BASE="$TASK_ROOT/pytest_stagec"
+  mkdir -p "$TASK_ROOT"
+  python tools/check_canonical_runner_bootstrap_links.py --check
+  pytest -q tests/test_stagec_semantic_slice_v1.py tests/test_staged_attribution_plumbing_v1.py --basetemp "$PYTEST_BASE"
+  echo "REMOTE_HEAD=$(git rev-parse HEAD)"
+  echo "TASK_ROOT=$TASK_ROOT"
+  EOF
+  ); bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch codex/p3-stagec-c0-c4-semantic-slice --clone-url git@github.com:zyy-cn/wsovvis.git --env-cmd 'source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd "$REMOTE_CMD" --keep-untracked`
+
+7. Validation result
+- Canonical runner bootstrap preflight: `PASS`
+- G3 authoritative validation subset: `PASS`
+  `41 passed in 1.95s`
+- Remote HEAD: `5e9172b7f9f685f9409ebd8351b028272d00b7cc`
+- Remote HEAD == intended local commit: `yes`
+- G3-scoped wiring fix required: `no`
+- Task root used for remote artifacts: `codex/g3_semantic_plumbing_20260308T102553Z`
+
+8. Current G3 judgment
+- `PASS`
+- Basis:
+  the authoritative loader / prototype-cache / semantic-slice / plumbing files are confirmed;
+  the bounded G3 path named in `CODEBASE_MAP.md` is coherent with the current code and tests;
+  the authoritative G3 validation subset passes canonically on the matching remote commit.
+
+9. Blocking acceptance conditions
+- None remain within `G3`.
+
+10. Out-of-scope modules
+- label-set expansion
+- second-round refinement
+- scenario/domain-missing as mainline protocol
+- enhanced memory aggregation for global classification
+- decoder-comparison research branches as default mainline
+- Stage D multi-round guarded continuation as mainline
+- any `G4+` work beyond identifying the next smallest step
+- any algorithmic expansion
+
+11. Smallest next valid step
+- On the next bounded loop, if promotion is authorized, activate `G4 - Open-world attribution validation`.
+- Start with the smallest protocol-aligned comparator/evidence step from the `PLAN.md` evidence hierarchy.
+
+12. Fallback path if blocked or failed
+- Not active for this loop because `G3` passed.
+- If a later canonical validation fails for infra reasons, use `FAILURE_PLAYBOOK.md` and classify the result as `BLOCKED` or `INCONCLUSIVE`, not algorithmic failure.
+
+13. Files changed this loop
+- `docs/mainline/STATUS.md`
+- `docs/mainline/reports/phase_gate_latest.txt`
+- `docs/mainline/reports/archive/phase_gate_20260308T102627Z.txt`
+- `docs/mainline/reports/acceptance_latest.txt`
+- `docs/mainline/reports/archive/acceptance_20260308T102627Z.txt`

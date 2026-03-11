@@ -1,0 +1,64 @@
+WSOVVIS Phase/Gate Check
+Generated: 2026-03-08 14:55:25
+
+1. Active phase/gate
+- G0 — Repository bootstrap and environment verification
+- Gate judgment: INCONCLUSIVE
+
+2. Why that gate is active
+- STATUS.md explicitly keeps the repository at G0 under the new automation layer.
+- G0 remains active because environment facts, Stage B contract confirmation, codebase-map confirmation, and canonical validation semantics still need evidence-backed verification under the current control plane.
+
+3. Blocking acceptance conditions
+- G0 PASS requires all of the following:
+  - environment facts are confirmed
+  - code entrypoint map is confirmed
+  - Stage B interface contract matches code
+  - canonical remote validation semantics are executable
+- Current missing evidence:
+  - no canonical remote validation record yet on gpu4090d
+  - no remote HEAD == intended local commit record yet
+  - bootstrap protocol + Stage B test evidence has not yet been recorded in STATUS.md
+
+4. Explicitly out-of-scope modules
+- label-set expansion
+- second-round refinement
+- scenario/domain-missing mainline protocol
+- enhanced / stronger memory aggregation
+- decoder-comparison branches as mainline
+- Stage D multi-round continuation
+- speculative new losses or auxiliary heads outside the mainline contracts
+
+5. Smallest next valid coding task
+- No algorithmic coding task is valid yet.
+- Smallest valid repo-change step: perform G0 bootstrap verification first, and only patch a minimal bootstrap-surface mismatch if verification exposes one.
+- Immediate next step:
+  1. run protocol bootstrap checks locally
+  2. run Stage B / Stage C-loader bootstrap checks locally
+  3. run the same canonical check set via tools/remote_verify_wsovvis.sh with commit-consistency recording
+  4. update STATUS.md with PASS / INCONCLUSIVE / BLOCKED evidence
+
+6. Fallback path if that task does not pass
+- Follow the environment / validation fallback order:
+  1. verify remote runner path and wrapper command
+  2. verify push succeeded
+  3. verify remote HEAD == intended local commit
+  4. treat mismatch or infra errors as BLOCKED, not as algorithmic failure
+
+7. Exact files likely to be touched
+- docs/mainline/STATUS.md
+- docs/mainline/CODEBASE_MAP.md
+- docs/mainline/ENVIRONMENT_AND_VALIDATION.md
+- docs/mainline/STAGEB_INTERFACE_CONTRACT.md
+- tools/remote_verify_wsovvis.sh
+
+8. Exact commands likely to be run
+- python -m pytest tests/test_build_wsovvis_labelset_protocol.py
+- python -m pytest tests/test_stageb_track_feature_export_v1.py tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py tests/test_stageb_feature_export_enablement_v1.py tests/test_stageb_feature_export_real_run_integration_v1.py tests/test_real_stageb_sidecar_bridge_input_builder_v1.py tests/test_stagec_loader_v1.py
+- bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch <branch> --env-cmd 'export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd 'python -m pytest tests/test_build_wsovvis_labelset_protocol.py tests/test_stageb_track_feature_export_v1.py tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py tests/test_stageb_feature_export_enablement_v1.py tests/test_stageb_feature_export_real_run_integration_v1.py tests/test_real_stageb_sidecar_bridge_input_builder_v1.py tests/test_stagec_loader_v1.py' --keep-untracked
+
+Evidence used for this check
+- Local existence probe found all files named in docs/mainline/CODEBASE_MAP.md present in the checkout.
+- tools/remote_verify_wsovvis.sh --help succeeds locally.
+- Stage B contract artifact names and required fields are present in the Stage B export / loader code and tests.
+- No canonical remote validation result has yet been recorded under the new automation layer.

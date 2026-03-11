@@ -247,6 +247,11 @@ class SeqFormer(nn.Module):
         """
 
         if self.training:
+            if batched_inputs and "instances" in batched_inputs[0]:
+                train_num_frames = len(batched_inputs[0]["instances"])
+                if train_num_frames > 0:
+                    # Eval mutates this value for variable-length videos; restore it for training batches.
+                    self.detr.detr.num_frames = train_num_frames
             images = self.preprocess_image(batched_inputs)
             clip_targets = self.prepare_targets(batched_inputs)
             output, loss_dict = self.detr(images, clip_targets, self.criterion, train=True)

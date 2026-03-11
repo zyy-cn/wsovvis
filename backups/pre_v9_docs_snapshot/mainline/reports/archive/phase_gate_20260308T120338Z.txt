@@ -1,0 +1,109 @@
+WSOVVIS phase/gate check
+Timestamp (UTC): 2026-03-08T12:03:38Z
+Branch: codex/p3-stagec-c0-c4-semantic-slice
+HEAD: 520077937ba43583d055cbf1c85e01a4b2283a8f
+Skill: wsovvis-mainline-supervisor
+
+1. Active phase/gate evaluated
+- `G6 - Single-round bounded refinement`
+
+2. Blocking acceptance condition entering this loop
+- prove the bounded single-round refinement path is live under canonical validation
+- show non-negative value on the exposed acceptance metrics for one bounded refinement round
+- show no regression in hidden-positive handling
+- preserve the accepted G4 bounded open-world attribution path and the accepted G5 bounded linking / quality-weighted classification defaults
+- close the reporting gap where the Stage D loop did not previously preserve optional hidden-positive evidence fields into emitted `ws_metrics_summary_v1` sidecars
+
+3. Document/path consistency result
+- `PLAN.md`, `FAILURE_PLAYBOOK.md`, and `CODEBASE_MAP.md` are consistent enough for bounded `G6`
+- authoritative bounded G6 path is now explicit in `CODEBASE_MAP.md`:
+  `tools/run_stage_d0_self_training_loop.py`
+  `wsovvis/metrics/ws_metrics_stage_d_adapter_v1.py`
+  `tools/stage_d_reporting_snapshot.py`
+- bounded implementation note:
+  the current G6 runtime is a scaffolded single-round refinement path (`refine_mode=minimal` plus `round_policy=minimal_curriculum_v1`), not a broader Stage D expansion; default-off branches remain off
+
+4. Authoritative G6 implementation points
+- refinement loop: `tools/run_stage_d0_self_training_loop.py`
+- refinement input/output handoff: `tools/run_stage_d0_self_training_loop.py`
+- refinement ws-metrics adapter: `wsovvis/metrics/ws_metrics_stage_d_adapter_v1.py`
+- refinement acceptance/reporting snapshot: `tools/stage_d_reporting_snapshot.py`
+
+5. Bounded G6 change made
+- `tools/run_stage_d0_self_training_loop.py` now preserves optional `observed_label_ids`, `hidden_positive_label_ids`, and `unknown_attributed_label_ids` from the Stage C summary handoff into:
+  `round_input_summary`
+  `round_output_summary`
+  emitted `ws_metrics_summary_v1` sidecars
+- dedicated repo-level coverage was added in `tests/test_stage_d0_self_training_loop_v1.py` to pin this hidden-positive metrics handoff
+
+6. Authoritative G6 tests
+- `tests/test_stage_d0_self_training_loop_v1.py`
+- `tests/test_stage_d_reporting_snapshot_v1.py`
+- `tests/test_stage_d_ws_metrics_adapter_v1.py`
+- preserved G5 regression check used in this loop: `tests/test_g5_bounded_policy_v1.py`
+
+7. Commands run
+- local syntax check:
+  `python3 -m py_compile tools/run_stage_d0_self_training_loop.py tests/test_stage_d0_self_training_loop_v1.py tools/stage_d_reporting_snapshot.py wsovvis/metrics/ws_metrics_stage_d_adapter_v1.py`
+- scoped push for canonical validation:
+  `git push origin codex/p3-stagec-c0-c4-semantic-slice`
+- canonical wrapper command used:
+```bash
+bash tools/remote_verify_wsovvis.sh \
+  --remote gpu4090d \
+  --repo-dir /home/zyy/code/wsovvis_runner \
+  --branch codex/p3-stagec-c0-c4-semantic-slice \
+  --clone-url git@github.com:zyy-cn/wsovvis.git \
+  --env-cmd 'source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' \
+  --cmd "$REMOTE_CMD" \
+  --keep-untracked
+```
+- canonical remote payload summary:
+  `python tools/check_canonical_runner_bootstrap_links.py --check`
+  `pytest -q tests/test_stage_d0_self_training_loop_v1.py::test_d0_round0_round1_with_minimal_refine_and_stagec_seed tests/test_stage_d0_self_training_loop_v1.py::test_d0_emit_ws_metrics_preserves_hidden_positive_fields_for_hpr_uar tests/test_stage_d_reporting_snapshot_v1.py::test_stage_d_snapshot_happy_path_detects_round_paths tests/test_stage_d_ws_metrics_adapter_v1.py::test_stage_d_ws_metrics_adapter_exposes_hpr_and_uar_when_optional_fields_exist tests/test_g5_bounded_policy_v1.py --basetemp codex/g6_single_round_refinement_20260308T123824Z/pytest_g6`
+  `python tools/run_stage_d0_self_training_loop.py --stagec-summary-json codex/g6_single_round_refinement_20260308T123824Z/stagec_hidden_positive_summary.json --round-index 0 --max-rounds 2 --refine-mode minimal --round-policy minimal_curriculum_v1 --emit-ws-metrics --round-summary-root codex/g6_single_round_refinement_20260308T123824Z/rounds --out-json codex/g6_single_round_refinement_20260308T123824Z/d0_loop_summary.json`
+  `python tools/stage_d_reporting_snapshot.py --loop codex/g6_single_round_refinement_20260308T123824Z/d0_loop_summary.json --round-summary-root codex/g6_single_round_refinement_20260308T123824Z/rounds --out-json codex/g6_single_round_refinement_20260308T123824Z/d0_snapshot.json --out-text codex/g6_single_round_refinement_20260308T123824Z/d0_snapshot.txt`
+
+8. Validation result
+- local `py_compile`: `PASS`
+- canonical bootstrap preflight: `PASS`
+- canonical targeted pytest subset: `PASS` with `7 passed in 3.07s`
+- canonical direct G6 smoke: `PASS`
+- remote HEAD: `520077937ba43583d055cbf1c85e01a4b2283a8f`
+- remote HEAD == intended local commit: `yes`
+- single-round refinement live: `yes`
+  `rounds_executed=2`
+  `round1_refine_applied=true`
+  `round1_candidate_delta=1`
+- hidden-positive metrics propagation live: `yes`
+  round0 metrics: `HPR=1.0`, `UAR=1.0`, `SCR=1.0`, `AURC=0.75`
+  round1 metrics: `HPR=1.0`, `UAR=1.0`, `SCR=1.0`, `AURC=0.75`
+- reporting snapshot live: `yes`
+  snapshot path: `codex/g6_single_round_refinement_20260308T123824Z/d0_snapshot.json`
+- preserved G4 bounded attribution path: `yes`
+  evidence: `git diff --name-only HEAD^ HEAD -- tools/run_stagec1_mil_baseline_offline.py wsovvis/track_feature_export/stagec1_attribution_mil_v1.py third_party/VNext/projects/SeqFormer/seqformer/models/clip_output.py third_party/VNext/projects/SeqFormer/seqformer/seqformer.py` returned no paths for the G6 commit
+- preserved G5 bounded linking / quality-weighted classification defaults: `yes`
+  evidence: `tests/test_g5_bounded_policy_v1.py` passed in the same canonical run
+
+9. Files changed in this loop
+- tracked code/test changes:
+  `tools/run_stage_d0_self_training_loop.py`
+  `tests/test_stage_d0_self_training_loop_v1.py`
+- documentation/reporting changes:
+  `docs/mainline/CODEBASE_MAP.md`
+  `docs/mainline/STATUS.md`
+  `docs/mainline/reports/phase_gate_latest.txt`
+  `docs/mainline/reports/acceptance_latest.txt`
+
+10. Judgment
+- `PASS`
+- reason:
+  one bounded refinement round is live under canonical validation, hidden-positive metrics now flow into the existing reporting path, exposed acceptance metrics are non-regressing (`HPR/UAR/SCR/AURC` flat from round0 to round1), and default-off branches remain off
+
+11. Remaining blockers
+- none within `G6`
+
+12. Recommended next smallest step
+- keep `G6` as the terminal accepted gate for the current mainline
+- if a later loop changes refinement/reporting again, rerun the same canonical single-round bounded refinement smoke before claiming stability
+- do not open second-round refinement, label-set expansion, or broader Stage D branches unless the authoritative docs explicitly change scope

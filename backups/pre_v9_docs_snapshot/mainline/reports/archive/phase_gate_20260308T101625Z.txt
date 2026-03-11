@@ -1,0 +1,92 @@
+WSOVVIS phase/gate check
+Timestamp (UTC): 2026-03-08T10:16:25Z
+Branch: codex/p3-stagec-c0-c4-semantic-slice
+HEAD: 5e9172b7f9f685f9409ebd8351b028272d00b7cc
+Skill: wsovvis-mainline-supervisor
+
+1. Active phase/gate evaluated
+- `G2 - Stage B export / bridge / consumer integrity`
+
+2. Why this gate was evaluated
+- `G0` and `G1` had already passed.
+- Per `PLAN.md` and `METRICS_ACCEPTANCE.md`, `G2` requires the Stage B schema, bridge, and consumer requirements to match the code, plus the related validation tests to pass.
+
+3. Authoritative Stage B files
+- export core: `wsovvis/track_feature_export/v1_core.py`
+- bridge: `wsovvis/track_feature_export/bridge_from_stageb_v1.py`
+- consumer / loader-facing interface: `wsovvis/track_feature_export/stagec_loader_v1.py`
+
+4. Authoritative Stage B tests
+- `tests/test_stageb_track_feature_export_v1.py`
+- `tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py`
+- `tests/test_stagec_loader_v1.py`
+
+5. Stage B contract alignment result
+- `STAGEB_INTERFACE_CONTRACT.md` is aligned with the current code and tests.
+- Alignment basis:
+  export artifacts remain split-level `manifest.v1.json` plus per-video `track_metadata.v1.json` and `track_arrays.v1.npz`;
+  pooled per-track embeddings remain the required v1 payload;
+  the Stage C identity key remains `(video_id, track_id)`, with `track_id` uniqueness constrained within a video and exact metadata/array alignment via `row_index`;
+  processed zero-track videos remain explicit in the manifest;
+  failed / unprocessed videos still require null shard paths;
+  the bridge keeps the reduced `success` / `failed` runtime-status boundary and performs split-domain reconciliation downstream;
+  producer provenance fields remain required and validated.
+- No doc/code conflict was found, so no contract patch was needed.
+
+6. Commands run
+- Canonical wrapper command used:
+  `REMOTE_CMD=$(cat <<'EOF'
+  set -euo pipefail
+  TASK_ROOT="codex/g2_stageb_integrity_20260308T101557Z"
+  PYTEST_BASE="$TASK_ROOT/pytest_stageb"
+  mkdir -p "$TASK_ROOT"
+  python tools/check_canonical_runner_bootstrap_links.py --check
+  pytest -q tests/test_stageb_track_feature_export_v1.py tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py tests/test_stagec_loader_v1.py --basetemp "$PYTEST_BASE"
+  echo "REMOTE_HEAD=$(git rev-parse HEAD)"
+  echo "TASK_ROOT=$TASK_ROOT"
+  EOF
+  ); bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch codex/p3-stagec-c0-c4-semantic-slice --clone-url git@github.com:zyy-cn/wsovvis.git --env-cmd 'source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd "$REMOTE_CMD" --keep-untracked`
+
+7. Validation result
+- Canonical runner bootstrap preflight: `PASS`
+- Stage B authoritative validation subset: `PASS`
+  `31 passed in 1.61s`
+- Remote HEAD: `5e9172b7f9f685f9409ebd8351b028272d00b7cc`
+- Remote HEAD == intended local commit: `yes`
+- G2-scoped wiring fix required: `no`
+- Task root used for remote artifacts: `codex/g2_stageb_integrity_20260308T101557Z`
+
+8. Current G2 judgment
+- `PASS`
+- Basis:
+  the authoritative Stage B export / bridge / loader files are confirmed;
+  the Stage B interface contract matches the current code and tests;
+  the authoritative G2 validation subset passes canonically on the matching remote commit.
+
+9. Blocking acceptance conditions
+- None remain within `G2`.
+
+10. Out-of-scope modules
+- label-set expansion
+- second-round refinement
+- scenario/domain-missing as mainline protocol
+- enhanced memory aggregation for global classification
+- decoder-comparison research branches as default mainline
+- Stage D multi-round guarded continuation as mainline
+- any `G3+` work beyond identifying the next smallest step
+- any algorithmic expansion
+
+11. Smallest next valid step
+- On the next bounded loop, if promotion is authorized, activate `G3 - Mixed representation and Stage C semantic plumbing`.
+- Start with the representation-critical files and tests named in `CODEBASE_MAP.md`.
+
+12. Fallback path if blocked or failed
+- Not active for this loop because `G2` passed.
+- If a later canonical validation fails for infra reasons, use `FAILURE_PLAYBOOK.md` and classify the result as `BLOCKED` or `INCONCLUSIVE`, not algorithmic failure.
+
+13. Files changed this loop
+- `docs/mainline/STATUS.md`
+- `docs/mainline/reports/phase_gate_latest.txt`
+- `docs/mainline/reports/archive/phase_gate_20260308T101625Z.txt`
+- `docs/mainline/reports/acceptance_latest.txt`
+- `docs/mainline/reports/archive/acceptance_20260308T101625Z.txt`

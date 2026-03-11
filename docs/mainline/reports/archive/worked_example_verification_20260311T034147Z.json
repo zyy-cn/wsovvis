@@ -1,0 +1,32 @@
+{
+  "project": "WS-OVVIS",
+  "timestamp": "20260311T034147Z",
+  "gate": "G0",
+  "judgment": "BLOCKED",
+  "example_type": "canonical_connectivity_retry",
+  "inputs": [
+    "docs/mainline/STATUS.md",
+    "docs/mainline/ENVIRONMENT_AND_VALIDATION.md",
+    "docs/mainline/reports/archive/phase_gate_20260311T032428Z.txt",
+    "docs/mainline/reports/archive/acceptance_20260311T032428Z.txt",
+    "docs/mainline/reports/archive/evidence_20260311T032428Z.txt",
+    "docs/mainline/reports/archive/worked_example_verification_20260311T032428Z.md",
+    "tools/remote_verify_wsovvis.sh",
+    "tools/check_canonical_runner_bootstrap_links.py",
+    "git ls-remote origin refs/heads/mainline-v9-g0"
+  ],
+  "intermediate_findings": [
+    "the archived 20260311T032428Z bundle remains the current local authority-switch evidence for G0",
+    "the intended local commit remains 23cb9f2e2b0d1267ff33494c478d3d2a069bc1a3 on branch mainline-v9-g0",
+    "the exact git ls-remote retry on 20260311T034147Z still failed because github.com name resolution failed",
+    "the exact canonical wrapper/bootstrap retry on 20260311T034147Z still failed because gpu4090d was unreachable",
+    "because the wrapper never reached the runner, bootstrap, inherited conda activation, PYTHONPATH, and remote HEAD evidence remain unavailable",
+    "the Stage B contract doc-only reconciliation was intentionally deferred until the canonical replay prerequisite succeeds"
+  ],
+  "result": {
+    "active_gate": "G0",
+    "status": "BLOCKED",
+    "blocking_acceptance_condition": "canonical connectivity still fails, so the approved replay path cannot record bootstrap, environment, or remote HEAD evidence",
+    "next_step": "restore DNS and SSH reachability, rerun the same G0 wrapper/bootstrap path, then perform the minimal doc-only Stage B contract reconciliation"
+  }
+}

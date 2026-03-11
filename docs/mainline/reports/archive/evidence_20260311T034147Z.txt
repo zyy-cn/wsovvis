@@ -1,0 +1,29 @@
+WS-OVVIS evidence review
+Timestamp: 20260311T034147Z
+Gate: G0
+Evidence status: partial locally; blocked canonically
+Result classification: blocked
+
+Commands run:
+- `git rev-parse HEAD`
+- `git branch --show-current`
+- `git remote -v`
+- `git ls-remote origin refs/heads/mainline-v9-g0`
+- `bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch mainline-v9-g0 --env-cmd 'source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd 'printf "REMOTE_HEAD="; git rev-parse HEAD; printf "RUNNER_PWD=%s\\n" "$PWD"; python tools/check_canonical_runner_bootstrap_links.py --check; printf "PYTHONPATH=%s\\n" "$PYTHONPATH"' --clone-url git@github.com:zyy-cn/wsovvis.git --allow-suspicious-repo-dir`
+
+Evidence present:
+- control-plane authority-switch evidence from the previous bounded G0 loop remains current and reviewable in `docs/mainline/reports/archive/phase_gate_20260311T032428Z.txt`, `docs/mainline/reports/archive/acceptance_20260311T032428Z.txt`, `docs/mainline/reports/archive/evidence_20260311T032428Z.txt`, `docs/mainline/reports/archive/worked_example_verification_20260311T032428Z.md`, and `docs/mainline/reports/archive/worked_example_verification_20260311T032428Z.json`
+- intended local commit is still `23cb9f2e2b0d1267ff33494c478d3d2a069bc1a3` on branch `mainline-v9-g0`
+- local git config still matches the documented canonical fetch and push routes: fetch `git@github.com:zyy-cn/wsovvis.git`, push `git@github-via-gpu:zyy-cn/wsovvis.git`
+- the exact canonical wrapper/bootstrap invocation was re-run unchanged on `20260311T034147Z`, preserving the approved G0 replay path
+
+Evidence missing or blocked:
+- canonical runner bootstrap evidence is still missing because the exact wrapper retry failed with `ssh: connect to host 172.29.112.1 port 2222: No route to host`
+- remote branch or commit reachability is still not recorded because the exact `git ls-remote origin refs/heads/mainline-v9-g0` retry failed with `ssh: Could not resolve hostname github.com: Temporary failure in name resolution`
+- inherited conda activation and `PYTHONPATH` are still not recorded because remote execution never reached `/home/zyy/code/wsovvis_runner`
+- `remote HEAD == intended local commit` is still not recorded
+- the planned doc-only reconciliation in `docs/mainline/STAGEB_INTERFACE_CONTRACT.md` remains deferred because the prerequisite canonical replay was not recorded in this loop
+
+Judgment note:
+- G0 remains `BLOCKED`.
+- The current loop preserved strict G0 sequencing: connectivity first, then canonical replay, then doc-only contract reconciliation only if the replay evidence becomes available.

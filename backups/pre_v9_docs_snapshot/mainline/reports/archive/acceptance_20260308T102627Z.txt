@@ -1,0 +1,55 @@
+WSOVVIS acceptance evaluation
+Timestamp (UTC): 2026-03-08T10:26:27Z
+Active gate evaluated: `G3 - Mixed representation and Stage C semantic plumbing`
+Branch: `codex/p3-stagec-c0-c4-semantic-slice`
+Intended local commit: `5e9172b7f9f685f9409ebd8351b028272d00b7cc`
+
+1. Evidence reviewed
+- `CODEBASE_MAP.md`
+- authoritative G3 files:
+  `wsovvis/track_feature_export/stagec_loader_v1.py`
+  `wsovvis/track_feature_export/stagec_clip_text_prototype_cache_v1.py`
+  `wsovvis/track_feature_export/stagec_semantic_slice_v1.py`
+  `wsovvis/training/stagec_semantic_plumbing_v1.py`
+  `wsovvis/training/staged_attribution_plumbing_v1.py`
+- authoritative G3 tests:
+  `tests/test_stagec_semantic_slice_v1.py`
+  `tests/test_staged_attribution_plumbing_v1.py`
+- canonical runner bootstrap preflight on `gpu4090d`
+- canonical wrapper validation using `tools/remote_verify_wsovvis.sh`
+- remote HEAD consistency evidence
+- current `STATUS.md`
+- current `PLAN.md`
+- current `METRICS_ACCEPTANCE.md`
+- current `ENVIRONMENT_AND_VALIDATION.md`
+
+2. Judgment
+- `PASS`
+
+3. Acceptance conditions satisfied
+- the Stage C representation bridge is coherent
+- the authoritative G3 representation-critical test subset passes canonically
+- no regression breaks loader / prototype / semantic-slice / plumbing coherence in the bounded path reviewed
+- remote HEAD equals the intended local commit
+
+4. Acceptance conditions still missing
+- none within `G3`
+
+5. Acceptance conditions failed
+- none
+
+6. May the next gate activate?
+- `yes`
+- If promotion is authorized on the next bounded loop, the next gate is `G4 - Open-world attribution validation`.
+
+7. Fallback path
+- No fallback is active because `G3` passed.
+
+8. What should be written back to `STATUS.md`
+- `Active gate: G3 - Mixed representation and Stage C semantic plumbing`
+- `Current G3 judgment: PASS`
+- authoritative G3 files
+- authoritative G3 tests
+- `Current blockers: none within G3`
+- canonical G3 validation evidence and remote HEAD consistency
+- `Next smallest valid step`: activate `G4` on the next bounded loop if promotion is authorized

@@ -1,0 +1,104 @@
+WSOVVIS supervisor deployment verification
+Timestamp (UTC): 2026-03-08T09:13:18Z
+Branch: codex/p3-stagec-c0-c4-semantic-slice
+HEAD: 5e9172b7f9f685f9409ebd8351b028272d00b7cc
+Mode: deployment verification only
+
+1. Supervisor skill status
+- ACTIVE.
+- Evidence: `.agents/skills/wsovvis-mainline-supervisor/SKILL.md` is present and readable, its required document sequence was executed, and the nested phase/gate-check skill is also present and readable.
+
+2. Document set readability and deployment artifact check
+- Required supervisor/mainline documents were readable:
+  `AGENTS.md`
+  `START_AUTOMATION.md`
+  `docs/mainline/INDEX.md`
+  `docs/mainline/EXECUTION_SOURCE.md`
+  `docs/mainline/PLAN.md`
+  `docs/mainline/IMPLEMENT.md`
+  `docs/mainline/STATUS.md`
+  `docs/mainline/METRICS_ACCEPTANCE.md`
+  `docs/mainline/FAILURE_PLAYBOOK.md`
+  `docs/mainline/ENVIRONMENT_AND_VALIDATION.md`
+  `docs/mainline/CODEBASE_MAP.md`
+  `docs/mainline/STAGEB_INTERFACE_CONTRACT.md`
+  `docs/runbooks/mainline_phase_gate_runbook.md`
+  `docs/mainline/SUPERVISOR_STATE_MACHINE.md`
+  `docs/mainline/SUPERVISOR_DEPLOYMENT.md`
+- Required deployment artifacts exist:
+  `.agents/skills/wsovvis-mainline-supervisor/SKILL.md`
+  `.agents/skills/wsovvis-phase-gate-check/SKILL.md`
+  `.agents/skills/wsovvis-eval-acceptance/SKILL.md`
+  `tools/run_mainline_loop.py`
+  `tools/remote_verify_wsovvis.sh`
+  `docs/mainline/reports/`
+  `docs/mainline/reports/archive/`
+- All paths enumerated in `docs/mainline/CODEBASE_MAP.md` were checked for local existence and none were missing.
+
+3. Internal consistency assessment
+- Overall verdict: readable and consistent enough to proceed with G0 supervision, but not fully clean.
+- Consistency notes:
+  1. `docs/mainline/PLAN.md` and `docs/mainline/METRICS_ACCEPTANCE.md` define separate `G5` and `G6`, while `docs/mainline/SUPERVISOR_STATE_MACHINE.md` collapses them into one `G5` state.
+  2. `docs/mainline/STATUS.md` lists `HPR` / `UAR` and Stage C / Stage D branch-demotion concerns as current blockers even though those are later-gate concerns, not G0 acceptance blockers.
+  3. `docs/mainline/STATUS.md` omits decoder-comparison branches from the default-off list that appears in `AGENTS.md` and `docs/mainline/PLAN.md`.
+- These issues do not prevent a bounded G0 verification loop, but they should be reconciled before later gate promotion or supervisor automation hardening.
+
+4. Current active phase/gate
+- `G0 - Repository bootstrap and environment verification`.
+- Basis:
+  `docs/mainline/STATUS.md` declares G0 active.
+  `docs/runbooks/mainline_phase_gate_runbook.md` says first-run bootstrap starts at G0.
+  No evidence-backed PASS is recorded yet under the new automation layer.
+
+5. Current blocking acceptance conditions
+- Gate-specific blocker set for G0:
+  1. Environment facts have not yet been confirmed against the actual canonical runner described in `docs/mainline/ENVIRONMENT_AND_VALIDATION.md`.
+  2. Canonical remote validation semantics have not yet been shown executable through `tools/remote_verify_wsovvis.sh`.
+  3. The Stage B interface contract has not yet been confirmed against the actual Stage B export/bridge/consumer code paths.
+  4. The codebase map has local path-existence evidence, but it does not yet have evidence that the mapped files are the correct active entrypoints.
+- Important scope note:
+  `HPR` and `UAR` are required for G4 attribution acceptance, but they are not a current G0 blocker.
+
+6. Current out-of-scope modules
+- label-set expansion
+- second-round refinement
+- scenario/domain-missing as mainline protocol
+- enhanced memory aggregation for global classification
+- decoder-comparison research branches as default mainline
+- Stage D multi-round guarded continuation as mainline
+- Also out of scope for this verification run: algorithm code edits, broad experiments, and any activation of default-off branches.
+
+7. Smallest next valid step
+- Perform one scoped G0 evidence step: audit the Stage B contract against the local authoritative files named in `docs/mainline/CODEBASE_MAP.md` and confirm whether the documented export form, identity/alignment invariants, required per-track payload, and bridge-input expectations are actually represented in the current code.
+- Reason this is the smallest valid step:
+  local path existence is already confirmed;
+  the remaining G0 gaps are contract confirmation and canonical-runner confirmation;
+  the contract audit is the narrower next action and does not require algorithm changes or broad execution.
+
+8. Fallback path if blocked or failed
+- If the Stage B contract cannot be matched cleanly to the code, keep G0 active, report the doc/code conflict before patching, and do not promote the gate.
+- If canonical validation later blocks, use `docs/mainline/FAILURE_PLAYBOOK.md` environment fallback order:
+  verify wrapper path;
+  verify push;
+  verify remote `HEAD == intended local commit`;
+  treat infra mismatch as BLOCKED rather than algorithmic failure.
+
+9. Likely next inspection targets
+- `docs/mainline/STAGEB_INTERFACE_CONTRACT.md`
+- `docs/mainline/CODEBASE_MAP.md`
+- `wsovvis/track_feature_export/v1_core.py`
+- `wsovvis/track_feature_export/bridge_from_stageb_v1.py`
+- `wsovvis/track_feature_export/stagec_loader_v1.py`
+- `tools/remote_verify_wsovvis.sh`
+
+10. Commands run for this verification
+- `sed -n` reads for the required documents and skill files
+- local existence checks for required deployment artifacts
+- local existence checks for all paths listed in `docs/mainline/CODEBASE_MAP.md`
+- `git rev-parse --abbrev-ref HEAD`
+- `git rev-parse HEAD`
+- `date -u +%Y%m%dT%H%M%SZ`
+
+11. Status file update
+- `docs/mainline/STATUS.md` was not modified.
+- Reason: this was a document-only deployment verification run and did not produce new canonical validation evidence or a gate transition.

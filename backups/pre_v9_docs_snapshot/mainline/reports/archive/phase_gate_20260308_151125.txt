@@ -1,0 +1,86 @@
+WSOVVIS Phase/Gate Check
+Generated: 2026-03-08 15:11:25 CST
+
+1. Active phase/gate
+- G2 — Stage B export/bridge/consumer integrity
+- Current gate judgment: INCONCLUSIVE
+- Transition note: G1 baseline alignment passed and G2 is now active.
+
+2. Why that gate is active
+- G1 passed on evidence gathered in this run:
+  - the authoritative closed-world baseline entrypoint was fixed to `tools/run_stagec1_mil_baseline_offline.py`
+  - that entrypoint defaults to the plain Stage C1 MIL baseline (`mil_v1` scorer, `independent` decoder)
+  - canonical smoke validation passed for `tests/test_stagec1_attribution_mil_v1.py::test_stagec1_mil_smoke_stagec0_to_artifacts`
+  - remote HEAD matched the intended local commit
+- G2 is active because the next gate now requires an explicit Stage B export / bridge / consumer integrity judgment.
+
+3. Blocking acceptance conditions
+- G2 PASS requires all of the following:
+  - Stage B schema, bridge, and consumer requirements match the code
+  - Stage B validation tests pass
+- Current blockers:
+  - G2 acceptance has not yet been explicitly recorded against `STAGEB_INTERFACE_CONTRACT.md`
+  - a G2-scoped judgment has not yet been written tying the authoritative Stage B files/tests to the active gate
+  - the local workstation lacks `pytest` / `conda`, so local best-effort checks remain blocked even though canonical validation is available
+
+4. Explicitly out-of-scope modules
+- label-set expansion
+- second-round refinement
+- scenario/domain-missing mainline protocol
+- enhanced / stronger memory aggregation
+- decoder-comparison branches as mainline
+- Stage D multi-round continuation
+- speculative new losses or auxiliary heads outside the mainline contracts
+
+5. Smallest next valid coding task
+- No algorithmic change is justified.
+- Smallest valid next step:
+  1. evaluate G2 directly against `STAGEB_INTERFACE_CONTRACT.md` and the authoritative Stage B export / bridge / loader files
+  2. rerun the Stage B validation subset canonically only if the existing bootstrap evidence is not sufficient for a G2 judgment
+  3. if a targeted G2 validation fails, make only the minimal Stage B wiring fix needed to restore contract compliance
+
+6. Fallback path if that task does not pass
+- If execution is blocked by environment issues, use the environment / validation fallback:
+  1. verify remote runner path and wrapper command
+  2. verify push succeeded
+  3. verify remote HEAD == intended local commit
+  4. treat mismatch or infra errors as BLOCKED, not as algorithmic failure
+
+7. Exact files likely to be touched
+- docs/mainline/STATUS.md
+- docs/mainline/STAGEB_INTERFACE_CONTRACT.md
+- docs/mainline/CODEBASE_MAP.md
+- wsovvis/track_feature_export/v1_core.py
+- wsovvis/track_feature_export/bridge_from_stageb_v1.py
+- wsovvis/track_feature_export/stagec_loader_v1.py
+- tests/test_stageb_track_feature_export_v1.py
+- tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py
+- tests/test_stagec_loader_v1.py
+
+8. Exact commands likely to be run
+- python -m pytest tests/test_stageb_track_feature_export_v1.py tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py tests/test_stageb_feature_export_enablement_v1.py tests/test_stageb_feature_export_real_run_integration_v1.py tests/test_real_stageb_sidecar_bridge_input_builder_v1.py tests/test_stagec_loader_v1.py
+- bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch codex/p3-stagec-c0-c4-semantic-slice --clone-url git@github.com:zyy-cn/wsovvis.git --env-cmd 'export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd 'python -m pytest tests/test_stageb_track_feature_export_v1.py tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py tests/test_stageb_feature_export_enablement_v1.py tests/test_stageb_feature_export_real_run_integration_v1.py tests/test_real_stageb_sidecar_bridge_input_builder_v1.py tests/test_stagec_loader_v1.py' --keep-untracked
+
+Performed G1 baseline alignment
+- Selected G1 baseline entrypoint:
+  - file: `tools/run_stagec1_mil_baseline_offline.py`
+  - authoritative path: CLI entrypoint wrapping `wsovvis.track_feature_export.run_stagec1_mil_baseline_offline`
+  - closed-world default preserved by:
+    - `--scorer-backend` default `mil_v1`
+    - `--decoder-backend` default `independent`
+- Commands run:
+  - `rg -n "def run_stagec1_mil_baseline_offline|def compute_stagec1_mil_baseline_scores|class StageC1MilConfig" wsovvis/track_feature_export/stagec1_attribution_mil_v1.py`
+  - `bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch codex/p3-stagec-c0-c4-semantic-slice --clone-url git@github.com:zyy-cn/wsovvis.git --env-cmd 'export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd 'git rev-parse HEAD && python -m pytest -q tests/test_stagec1_attribution_mil_v1.py::test_stagec1_mil_smoke_stagec0_to_artifacts' --keep-untracked`
+- Smoke result:
+  - remote repo dir: `/home/zyy/code/wsovvis_runner`
+  - remote HEAD: `343ac44fcd18145aa95de99685b0b90e655e877e`
+  - remote HEAD == intended local commit: `yes`
+  - pytest result: `1 passed in 0.14s`
+  - judgment: `PASS`
+- Files changed in this run:
+  - `docs/mainline/STATUS.md`
+  - `docs/mainline/reports/phase_gate_latest.txt`
+  - `docs/mainline/reports/archive/phase_gate_20260308_151125.txt`
+- G1 result: `PASS`
+- Recommended next smallest step:
+  - evaluate G2 against `STAGEB_INTERFACE_CONTRACT.md` and the authoritative Stage B validation set without touching algorithm design

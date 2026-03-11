@@ -1,108 +1,132 @@
-# WSOVVIS Mainline Plan
+# WS-OVVIS Mainline Plan
 
 ## 1. Purpose
-This file is the source of truth for the current WSOVVIS automation mainline.
+This file is the source of truth for the current automation mainline.
 
 Main claim to prove:
 
-> In incomplete positive-label supervision, open-world set-to-track attribution reduces hidden-positive-to-background collapse better than closed-world weak supervision.
+> Under clip-level incomplete positive evidence `Y'(v)`, a class-agnostic video instance basis plus clip-level global tracks, DINO-only track semantics, seen visual prototypes, a class-level text map, and core open-world attribution should support bag-free open-vocabulary video instance inference without relying on the observed bag at test time.
 
 The automation system must prioritize proving this claim over expanding the system.
+A gate may only receive `PASS` when its acceptance contract and its required evidence pack are both satisfied.
 
 ## 2. Mainline phases and gates
 
-### G0 — Repository bootstrap and environment verification
+### G0 — v9 control-plane bootstrap and inheritance verification
 Goal:
-- verify the codebase can be interpreted under this new control plane
-- verify canonical environment facts and remote validation wrapper
+- establish `docs/mainline/*` as the repository execution source without changing the interaction model
+- verify that the control docs match the real repository and preserve the inherited canonical environment semantics
 
 Exit criteria:
 - `ENVIRONMENT_AND_VALIDATION.md` matches the real environment
-- `CODEBASE_MAP.md` matches real code entrypoints
-- Stage B interface files referenced in `STAGEB_INTERFACE_CONTRACT.md` exist
+- `CODEBASE_MAP.md` matches the real repository layout, current reusable anchors, and planned v9 entrypoints
+- `STAGEB_INTERFACE_CONTRACT.md` matches the Stage B to v9 artifact transition plan
+- the repository can be interpreted unambiguously under this control plane
+- the minimum G0 evidence pack exists
 
-### G1 — Protocol and baseline alignment
+### G1 — Clip-level protocol and artifact-contract alignment
 Goal:
-- ensure the WS-OVVIS protocol build path is working
-- ensure at least one closed-world baseline path is runnable
+- fix the clip-level weak-supervision protocol `Y'(v)`
+- fix the artifact contracts needed by the v9 mainline
 
 Required focus:
 - `tools/build_wsovvis_labelset_protocol.py`
-- `tests/test_build_wsovvis_labelset_protocol.py`
-- baseline attribution entrypoint(s) in `tools/` / `wsovvis/track_feature_export/`
+- protocol tests and contract documentation
+- v9 artifact contract definitions
 
 Exit criteria:
-- protocol generation checks pass
-- baseline path is identifiable and smoke-runnable
+- clip-level protocol generation checks pass
+- v9 artifact contracts are documented and minimally parseable
+- window-level `Y'(w)` is not the mainline supervision object
+- the minimum G1 evidence pack exists
 
-### G2 — Stage B export/bridge/consumer integrity
+### G2 — Class-agnostic instance basis closure
 Goal:
-- preserve the current Stage B data plane as a stable basis for Stage C
+- keep the structure layer independent from the semantic bridge
+- obtain local tracklets from pseudo tubes and class-agnostic SeqFormer training/inference
 
 Exit criteria:
-- Stage B schema, bridge, and consumer requirements are satisfied
-- related tests pass locally or canonically as appropriate
+- local tracklet export is identifiable, contract-stable, and smoke-runnable
+- structure-side diagnostics exist
+- the minimum G2 evidence pack exists
 
-### G3 — Mixed representation and Stage C semantic plumbing
+### G3 — Clip-level global track bank closure
 Goal:
-- preserve or restore the representation bridge required for open-vocabulary attribution
+- move from local tracklets to a fixed clip-level global track bank
+
+Default policy:
+- linking uses overlap IoU + local-query consistency as primary signals
+- semantics does not dominate track structure
 
 Exit criteria:
-- Stage C loader / semantic slice / prototype cache path is coherent
-- no regression in required representation interfaces
+- global track bank can be built offline and reloaded deterministically
+- stitching diagnostics exist
+- the minimum G3 evidence pack exists
 
-### G4 — Open-world attribution validation (core gate)
+### G4 — DINO-only track semantic carrier closure
 Goal:
-- establish a working mainline for open-world attribution
-- prioritize hidden-positive handling evidence over system breadth
+- establish `z_tau` as the only mainline semantic carrier
+- compute track objectness `o_tau`
+
+Exit criteria:
+- a track semantic cache exists and is stable
+- `z_tau` and `o_tau` are available for downstream consumption
+- mixed Stage-C representation no longer defines the active mainline path
+- the minimum G4 evidence pack exists
+
+### G5 — Seen visual prototypes and class-level text map
+Goal:
+- construct seen visual prototypes in DINO space
+- train the class-level text map `A`
+- produce mapped text prototypes for attribution and inference
+
+Exit criteria:
+- prototype bank exists and is stable
+- mapped text prototype cache exists and is consumable
+- deterministic pseudo text-prototype cache is not the active mainline backend
+- the minimum G5 evidence pack exists
+
+### G6 — Core open-world attribution
+Goal:
+- train the v9 core attribution path on `Y'(v) + bg + unk`
 
 Required evidence hierarchy:
-1. closed-world baseline
-2. open-world without coverage enhancement
-3. open-world with coverage-aware mainline
-4. retrieved-candidate enhancement only if needed
+1. closed-world comparator on the same protocol
+2. v9 core open-world attribution without optional enhancements
+3. hidden-positive evidence under the core path
+4. optional enhancement only if required by the failure playbook
 
 Exit criteria:
 - acceptance in `METRICS_ACCEPTANCE.md` for the active attribution gate is met
+- the minimum G6 evidence pack exists
 
-### G5 — Full-video linking and inference closure
+### G7 — Bag-free inference and terminal mainline closure
 Goal:
-- move from window-level semantics to full-video output without destabilizing the attribution mainline
-
-Default policy:
-- linking uses geometry + query as primary signals
-- semantics is weak auxiliary only
-- global classification defaults to quality-weighted logit averaging
+- produce full-vocabulary bag-free inference using the accepted v9 core path
+- evaluate AP / HPR / UAR / robustness under canonical validation
 
 Exit criteria:
-- linking/inference gate acceptance is met
-
-### G6 — Single-round bounded refinement
-Goal:
-- keep only a bounded, low-risk refinement step
-
-Default policy:
-- single round only
-- mask/temporal quality dominates
-- semantic score is secondary
-- label-set expansion remains default-off
-
-Exit criteria:
-- refinement yields non-negative value under acceptance contract
+- bag-free inference is functioning
+- canonical evaluation evidence is present
+- terminal acceptance is met
+- the minimum G7 evidence pack exists
 
 Terminal rule:
-- the current documented mainline ends at `G6`
-- when `G6` has an evidence-backed `PASS`, the supervisor must enter terminal-mainline mode
+- the documented mainline ends at `G7`
+- when `G7` has an evidence-backed `PASS`, the supervisor must enter terminal-mainline mode
 - no further gate activates unless the authoritative docs themselves are updated
 
 ## 3. Default-off research branches
 These are not part of the mainline unless `STATUS.md` explicitly activates them:
-- label-set expansion
-- second-round refinement
-- scenario/domain-missing as mainline protocol
-- stronger memory aggregation for global classification
-- decoder-comparison branches as mainline
-- Stage D multi-round guarded continuation as mainline
+- prototype EM / momentum refresh
+- candidate retrieval
+- warm-up BCE
+- temporal consistency
+- unknown fallback
+- one-round quality-aware refinement
+- any multi-round continuation
+- scenario/domain-missing protocol
+- unrestricted or held-out text expansion
 
 ## 4. Exploration policy
 Exploration is allowed only when:

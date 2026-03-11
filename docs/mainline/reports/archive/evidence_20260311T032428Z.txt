@@ -1,0 +1,37 @@
+WS-OVVIS evidence review
+Timestamp: 20260311T032428Z
+Gate: G0
+Evidence status: partial locally; blocked canonically
+Result classification: blocked
+
+Commands run:
+- `python tools/run_mainline_loop.py --dry-run`
+- `rg -n "docs/mainline_v9|PROJECT_PROGRESS|SESSION_HANDOFF|STAGE_D_CLOSURE|docs/mainline/\\*|docs/mainline/" AGENTS.md START_AUTOMATION.md docs/mainline tools/run_mainline_loop.py .agents/skills`
+- `git remote -v`
+- `git config --get remote.origin.url && git config --get remote.origin.pushurl`
+- `git rev-parse HEAD`
+- `git branch --show-current`
+- repo-anchor existence check against `docs/mainline/CODEBASE_MAP.md`
+- `python tools/check_canonical_runner_bootstrap_links.py --check --runner-root .`
+- `git ls-remote origin refs/heads/mainline-v9-g0`
+- `bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch mainline-v9-g0 --env-cmd 'source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd 'printf "REMOTE_HEAD="; git rev-parse HEAD; printf "RUNNER_PWD=%s\\n" "$PWD"; python tools/check_canonical_runner_bootstrap_links.py --check; printf "PYTHONPATH=%s\\n" "$PYTHONPATH"' --clone-url git@github.com:zyy-cn/wsovvis.git --allow-suspicious-repo-dir`
+
+Evidence present:
+- control-plane readout: the dry-run supervisor prompt resolved `authoritative current gate from STATUS.md: \`G0\``
+- authority-chain comparison: active read orders in `AGENTS.md`, `START_AUTOMATION.md`, `tools/run_mainline_loop.py`, and `.agents/skills/mainline-supervisor/SKILL.md` all point to `docs/mainline/*`, while `docs/mainline/EXECUTION_SOURCE.md` explicitly replaces draft `docs/mainline_v9/*`
+- working-tree evidence of the authority switch: `git status --short` shows `docs/mainline_v9/*` deleted and `docs/mainline/*` present
+- `docs/mainline/CODEBASE_MAP.md` matches the real repository layout for all listed current anchors; all listed planned v9 entrypoints remain absent as planned
+- current Stage B export evidence: `wsovvis/track_feature_export/v1_core.py` writes `manifest.v1.json`, per-video `track_metadata.v1.json`, and `track_arrays.v1.npz` with `track_id`, `row_index`, temporal fields, `objectness_score`, embeddings, and video-local sorting/validation
+- provenance evidence: `wsovvis/track_feature_export/real_stageb_sidecar_bridge_input_builder_v1.py` emits producer metadata including Stage B checkpoint/config refs, pseudo-tube manifest refs, and extraction settings
+- environment-tooling evidence: `tools/remote_verify_wsovvis.sh` and `tools/check_canonical_runner_bootstrap_links.py` are present; local git config matches the documented fetch URL and push-route URL
+- bootstrap-checker semantics were verified locally; running it against the current repo root reported the expected managed-link names as missing, which is informative because the current workspace is not the canonical runner root
+
+Evidence missing or blocked:
+- canonical runner bootstrap evidence is missing because the wrapper could not reach `gpu4090d` (`No route to host`)
+- remote branch or commit reachability is not recorded because `git ls-remote origin refs/heads/mainline-v9-g0` failed with a DNS resolution error for `github.com`
+- remote environment activation and `PYTHONPATH` inheritance are not recorded because remote execution never reached the runner
+- `remote HEAD == intended local commit` is not recorded
+
+Judgment note:
+- Local G0 authority-switch evidence is now durable and reviewable.
+- G0 still cannot receive `PASS` because canonical inheritance evidence is blocked and `STAGEB_INTERFACE_CONTRACT.md` still needs a doc-only reconciliation to the current export fields.

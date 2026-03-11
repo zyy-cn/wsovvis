@@ -1,14 +1,18 @@
-# Start WSOVVIS Automation
+# Start WS-OVVIS Automation
 
-Deploy this kit at the **repository root** of a clean WSOVVIS code checkout.
+Deploy this overlay at the **repository root** of a clean `wsovvis` checkout.
 
 Required paths after deployment:
 - `AGENTS.md`
 - `.codex/config.toml`
-- `docs/mainline/*`
-- `.agents/skills/wsovvis-phase-gate-check/SKILL.md`
-- `.agents/skills/wsovvis-eval-acceptance/SKILL.md`
-- optional but recommended: `.agents/skills/wsovvis-mainline-supervisor/SKILL.md`
+- `docs/mainline/*`, including `EVIDENCE_REQUIREMENTS.md` and `STAGEB_INTERFACE_CONTRACT.md`
+- `docs/runbooks/mainline_phase_gate_runbook.md`
+- `.agents/skills/mainline-phase-gate-check/SKILL.md`
+- `.agents/skills/mainline-eval-acceptance/SKILL.md`
+- optional but recommended: `.agents/skills/mainline-supervisor/SKILL.md`
+- `tools/run_mainline_loop.py`
+- existing project wrapper: `tools/remote_verify_wsovvis.sh`
+- existing bootstrap preflight checker: `tools/check_canonical_runner_bootstrap_links.py`
 
 ## First run
 From the repo root:
@@ -17,29 +21,21 @@ From the repo root:
 codex
 ```
 
-Then paste:
+Then paste the project-specific Prompt 2 from:
 
-```text
-Read AGENTS.md first, then read docs/mainline/INDEX.md and all referenced mainline documents.
-Do not code yet. First identify the active phase/gate, blocking acceptance conditions, out-of-scope modules, and the smallest next valid coding step.
-Treat the first run as G0 environment inheritance verification.
-```
+- `prompts/02_project_specific_first_run_prompt.md`
 
-Or explicitly invoke the first skill:
+Or prepare the same bounded prompt from the repo helper:
 
-```text
-$wsovvis-phase-gate-check Determine the active phase/gate, blocking acceptance conditions, and the smallest next valid step.
-```
-
-After a code or experiment step, evaluate:
-
-```text
-$wsovvis-eval-acceptance Evaluate PASS / FAIL / INCONCLUSIVE for the current gate using docs/mainline/METRICS_ACCEPTANCE.md.
+```bash
+python tools/run_mainline_loop.py --dry-run
 ```
 
 ## Important
-Do not assume the environment is inherited correctly until G0 records:
+Do not assume the environment is inherited correctly until `G0` records:
 - canonical runner facts
 - wrapper availability
 - bootstrap preflight evidence
 - remote HEAD consistency evidence
+- v9 authority-switch evidence under `docs/mainline/*`
+- the required G0 evidence bundle and worked example defined in `docs/mainline/EVIDENCE_REQUIREMENTS.md`

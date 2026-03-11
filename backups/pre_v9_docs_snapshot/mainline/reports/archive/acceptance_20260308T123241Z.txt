@@ -1,0 +1,69 @@
+WSOVVIS acceptance evaluation
+Timestamp (UTC): 2026-03-08T12:32:41Z
+Active gate evaluated: `G6 - Single-round bounded refinement`
+Evaluation mode: `terminal mainline automation`
+Branch: `codex/p3-stagec-c0-c4-semantic-slice`
+Intended local commit: `23748b3c348f0745bdee82df43096be95c6b4dc7`
+
+1. Evidence reviewed
+- `PLAN.md`
+- `IMPLEMENT.md`
+- `STATUS.md`
+- `FAILURE_PLAYBOOK.md`
+- `CODEBASE_MAP.md`
+- `SUPERVISOR_STATE_MACHINE.md`
+- `SUPERVISOR_DEPLOYMENT.md`
+- `tools/run_mainline_loop.py`
+- `tests/test_run_mainline_loop_v1.py`
+- `docs/mainline/reports/mainline_terminal_summary.txt`
+- canonical remote wrapper validation on `gpu4090d`
+- remote HEAD consistency evidence
+
+2. Judgment
+- `PASS`
+
+3. Acceptance conditions satisfied
+- terminal detection is explicit in `STATUS.md`
+- the supervisor now stops automatically at the accepted terminal gate in default mode
+- the supervisor no longer generates a new coding step once terminal mainline is detected
+- bounded terminal revalidation mode exists and is constrained to the accepted G4 / G5 / G6 regression surface
+- the authoritative terminal regression suite preserves:
+  G4 bounded attribution acceptance
+  G5 bounded linking / quality-weighted classification policy
+  G6 single-round bounded refinement acceptance
+- canonical `gpu4090d` validation semantics are preserved:
+  `tools/remote_verify_wsovvis.sh`
+  bootstrap preflight
+  remote PASS only when `remote HEAD == intended local commit`
+- canonical remote control-plane validation passed on the matching commit with `3 passed in 0.18s`
+
+4. Acceptance conditions satisfied by scoped inference
+- the accepted algorithm scope remains unchanged
+- basis for this inference:
+  this loop only changed supervisor/control-plane files, terminal documentation, and terminal regression coverage
+  terminal revalidation mode preserves the accepted G4 / G5 / G6 anchors rather than opening any new scope
+
+5. Acceptance conditions still missing
+- none
+
+6. Acceptance conditions failed
+- none
+
+7. May the next gate activate?
+- `no`
+- `G6` remains the terminal accepted gate in the current documented mainline
+
+8. Fallback path
+- if terminal automation regresses, restore:
+  explicit terminal detection
+  default stop at terminal mainline
+  bounded revalidation-only follow-up mode
+- do not reopen algorithm scope while fixing terminal automation behavior
+
+9. What should be written back to `STATUS.md`
+- terminal-mainline automation active
+- terminal detection explicit
+- terminal revalidation mode available
+- canonical terminal automation control-plane validation `PASS`
+- authoritative terminal automation files/tests
+- terminal automation validation artifact paths

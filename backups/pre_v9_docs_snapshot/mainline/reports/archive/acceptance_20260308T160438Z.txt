@@ -1,0 +1,84 @@
+WSOVVIS acceptance evaluation
+Timestamp (UTC): 2026-03-08T16:04:38Z
+Active gate evaluated: `G6 - Single-round bounded refinement`
+Evaluation mode: `terminal worked-example revalidation`
+Branch: `codex/p3-stagec-c0-c4-semantic-slice`
+Intended local commit: `23748b3c348f0745bdee82df43096be95c6b4dc7`
+
+1. Evidence reviewed
+- `AGENTS.md`
+- `docs/mainline/PLAN.md`
+- `docs/mainline/STATUS.md`
+- `docs/mainline/METRICS_ACCEPTANCE.md`
+- `docs/mainline/FAILURE_PLAYBOOK.md`
+- `docs/mainline/ENVIRONMENT_AND_VALIDATION.md`
+- `docs/mainline/CODEBASE_MAP.md`
+- `docs/outline/WS_OVVIS_outline_v3_incremental.tex`
+- canonical worked-example task root:
+  `codex/worked_example_verification_20260308T155833Z`
+- local report bundle:
+  `docs/mainline/reports/worked_example_verification_latest.md`
+  `docs/mainline/reports/worked_example_verification_latest.json`
+- canonical wrapper validation on `gpu4090d`
+- remote HEAD consistency evidence
+
+2. Judgment
+- `PASS`
+
+3. Acceptance conditions satisfied
+- canonical execution used `tools/remote_verify_wsovvis.sh` on `gpu4090d`
+- remote `HEAD` matched the intended local commit
+- a closed-world baseline result exists for the selected case
+- a bounded open-world result exists for the same selected case
+- hidden-positive handling improved:
+  closed-world `HPR=0.0`, open-world `HPR=1.0`
+  closed-world `UAR=0.0`, open-world `UAR=1.0`
+- positive-evidence coverage did not regress in a way that contradicts acceptance:
+  closed-world `SCR=0.5`, open-world `SCR=0.5`
+- standard bounded-path robustness did not catastrophically worsen:
+  closed-world `AURC=0.5`, open-world `AURC=0.5`
+- the accepted G5 bounded policy executed on the same label semantics:
+  `geometry_gate_plus_query_similarity`
+  `quality_weighted_logit_averaging`
+- the accepted G6 bounded loop preserved hidden-positive fields:
+  round0 `HPR=1.0`, `UAR=1.0`
+  round1 `HPR=1.0`, `UAR=1.0`
+- default-off modules remained off:
+  no second-round refinement
+  no label-set expansion
+  no enhanced memory aggregation
+
+4. Acceptance conditions satisfied by scoped inference
+- the worked example is explicitly tied to the outline's mainline claim and bounded policies
+- the G5 trace supports the accepted linking/closure policy on the same label semantics, even though the current executable path does not directly feed Stage C offline artifacts into the G5 runtime
+- the G6 loop confirms bounded reporting/refinement closure without reopening algorithm scope
+
+5. Acceptance conditions still missing
+- `AP`, `AP_base`, and `AP_novel` are not directly available in the current bounded worked-example path
+- the worked example is protocol-aligned synthetic data rather than a raw LV-VIS replay
+- Stage C semantic prototypes are deterministic cache vectors rather than a live CLIP text-encoder path
+
+6. Acceptance conditions failed
+- none that contradict the accepted terminal mainline
+
+7. May the next gate activate?
+- `no`
+- `G6` remains the documented terminal accepted gate
+
+8. Fallback path
+- if future revalidation is blocked by wrapper, preflight, or remote mismatch issues:
+  apply `FAILURE_PLAYBOOK.md` section 4
+  classify the run `BLOCKED` or `INCONCLUSIVE`
+- if hidden-positive evidence regresses under a matching canonical commit:
+  remain in bounded terminal revalidation
+  use the G4 hidden-positive fallback order without widening scope
+
+9. What should be written back to `STATUS.md`
+- worked-example canonical terminal revalidation `PASS`
+- worked-example artifact paths and report paths
+- remote HEAD consistency for the worked example
+- measured hidden-positive rescue evidence:
+  closed-world `HPR/UAR=0.0/0.0`
+  open-world `HPR/UAR=1.0/1.0`
+- measured G5 bounded-policy replay summary
+- measured G6 single-round preservation summary

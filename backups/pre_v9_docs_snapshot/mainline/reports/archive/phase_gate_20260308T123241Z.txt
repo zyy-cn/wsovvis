@@ -1,0 +1,83 @@
+WSOVVIS phase/gate check
+Timestamp (UTC): 2026-03-08T12:32:41Z
+Branch: codex/p3-stagec-c0-c4-semantic-slice
+HEAD: 23748b3c348f0745bdee82df43096be95c6b4dc7
+Skill: wsovvis-mainline-supervisor
+
+1. Active phase/gate evaluated
+- terminal mainline mode at `G6 - Single-round bounded refinement`
+- no further gate should activate under the current documented scope
+
+2. Task result
+- terminal detection is now explicit
+- default supervisor behavior now stops automatically at the accepted terminal gate
+- no new coding step is generated in default mode once terminal mainline is detected
+- bounded terminal revalidation mode exists via `python tools/run_mainline_loop.py --terminal-revalidate --dry-run`
+
+3. Authoritative terminal automation files/tests
+- control-plane helper: `tools/run_mainline_loop.py`
+- control-plane regression test: `tests/test_run_mainline_loop_v1.py`
+- bounded terminal regression anchors preserved by the helper:
+  `tests/test_stagec2_labelset_proto_baseline_v1.py::test_decoder_independent_matches_scorer_predictions`
+  `tests/test_stagec4_sinkhorn_scorer_v1.py::test_sinkhorn_c43_unk_fg_gating_schema_and_behavior`
+  `tests/test_ws_metrics_reporting_v1.py::test_ws_metrics_summary_v1_exposes_hpr_and_uar_when_hidden_positive_inputs_exist`
+  `tests/test_g5_bounded_policy_v1.py`
+  `tests/test_stage_d0_self_training_loop_v1.py::test_d0_round0_round1_with_minimal_refine_and_stagec_seed`
+  `tests/test_stage_d0_self_training_loop_v1.py::test_d0_emit_ws_metrics_preserves_hidden_positive_fields_for_hpr_uar`
+  `tests/test_stage_d_reporting_snapshot_v1.py::test_stage_d_snapshot_happy_path_detects_round_paths`
+  `tests/test_stage_d_ws_metrics_adapter_v1.py::test_stage_d_ws_metrics_adapter_exposes_hpr_and_uar_when_optional_fields_exist`
+
+4. Commands run
+- local control-plane refresh:
+  `python3 tools/run_mainline_loop.py --dry-run`
+  `python3 tools/run_mainline_loop.py --terminal-revalidate --dry-run`
+- canonical wrapper command used:
+  `bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch codex/p3-stagec-c0-c4-semantic-slice --clone-url git@github.com:zyy-cn/wsovvis.git --env-cmd 'source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd "$REMOTE_CMD" --keep-untracked`
+- canonical remote payload summary:
+  `python tools/check_canonical_runner_bootstrap_links.py --check`
+  `pytest -q tests/test_run_mainline_loop_v1.py --basetemp codex/terminal_mainline_automation_20260308T123500Z/pytest_terminal`
+  `python tools/run_mainline_loop.py --dry-run`
+  `python tools/run_mainline_loop.py --terminal-revalidate --dry-run`
+  terminal output assertions written to `codex/terminal_mainline_automation_20260308T123500Z/terminal_automation_summary.json`
+
+5. Validation result
+- local terminal dry-run: `PASS`
+- local terminal revalidation prompt generation: `PASS`
+- canonical bootstrap preflight: `PASS`
+- canonical remote terminal automation pytest: `PASS` with `3 passed in 0.18s`
+- canonical remote default terminal behavior: `PASS`
+  `mainline_terminal_summary.txt` was written
+  no new coding step was generated
+- canonical remote bounded revalidation prompt generation: `PASS`
+- terminal detection explicit in `STATUS.md`: `yes`
+- remote HEAD: `23748b3c348f0745bdee82df43096be95c6b4dc7`
+- remote HEAD == intended local commit: `yes`
+- canonical validation task root: `codex/terminal_mainline_automation_20260308T123500Z`
+
+6. Files changed
+- `tools/run_mainline_loop.py`
+- `tests/test_run_mainline_loop_v1.py`
+- `docs/mainline/PLAN.md`
+- `docs/mainline/IMPLEMENT.md`
+- `docs/mainline/CODEBASE_MAP.md`
+- `docs/mainline/SUPERVISOR_STATE_MACHINE.md`
+- `docs/mainline/SUPERVISOR_DEPLOYMENT.md`
+- `docs/runbooks/mainline_phase_gate_runbook.md`
+- `.agents/skills/wsovvis-mainline-supervisor/SKILL.md`
+- `docs/mainline/STATUS.md`
+- `docs/mainline/reports/phase_gate_latest.txt`
+- `docs/mainline/reports/acceptance_latest.txt`
+- `docs/mainline/reports/mainline_terminal_summary.txt`
+
+7. Judgment
+- `PASS`
+- terminal-mainline automation is active
+- no new gate may activate under the current documented mainline
+
+8. Remaining blockers
+- none within the documented terminal mainline
+
+9. Recommended next smallest step
+- keep terminal-mainline mode active
+- if fresh evidence is needed, run only bounded terminal revalidation and stop
+- do not reopen scope unless the authoritative mainline docs change

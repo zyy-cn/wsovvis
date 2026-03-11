@@ -1,0 +1,94 @@
+WSOVVIS Phase/Gate Check
+Generated: 2026-03-08 15:20:52 CST
+
+1. Active phase/gate
+- G3 — Mixed representation and Stage C semantic plumbing
+- Current gate judgment: INCONCLUSIVE
+- Transition note: G2 Stage B export / bridge / consumer integrity passed and G3 is now active.
+
+2. Why that gate is active
+- G2 passed on evidence gathered in this run:
+  - the Stage B contract in `STAGEB_INTERFACE_CONTRACT.md` was evaluated directly against the authoritative Stage B export / bridge / loader files
+  - `wsovvis/track_feature_export/v1_core.py` satisfies the export artifact form, deterministic ordering, explicit zero-track handling, and `row_index` / NPZ alignment checks
+  - `wsovvis/track_feature_export/bridge_from_stageb_v1.py` satisfies bridge-input normalization and reduced processed status mapping
+  - `wsovvis/track_feature_export/stagec_loader_v1.py` satisfies the Stage C consumer assumptions
+  - canonical Stage B validation passed on `gpu4090d` with remote HEAD matching the intended local commit
+- G3 is active because the next gate now requires an explicit representation-bridge and semantic-plumbing judgment.
+
+3. Blocking acceptance conditions
+- G3 PASS requires all of the following:
+  - the Stage C representation bridge is coherent
+  - representation-critical tests pass
+  - no regression breaks loader / prototype / semantic-slice coherence
+- Current blockers:
+  - the Stage C representation bridge has not yet been explicitly judged against the G3 contract
+  - representation-critical Stage C tests have not yet been recorded under the active gate
+  - the local workstation lacks `pytest` / `conda`, so local best-effort checks remain blocked even though canonical validation is available
+
+4. Explicitly out-of-scope modules
+- label-set expansion
+- second-round refinement
+- scenario/domain-missing mainline protocol
+- enhanced / stronger memory aggregation
+- decoder-comparison branches as mainline
+- Stage D multi-round continuation
+- speculative new losses or auxiliary heads outside the mainline contracts
+
+5. Smallest next valid coding task
+- No algorithmic change is justified.
+- Smallest valid next step:
+  1. evaluate G3 directly against the Stage C representation bridge centered on `stagec_loader_v1.py`, `stagec_clip_text_prototype_cache_v1.py`, `stagec_semantic_slice_v1.py`, `stagec_semantic_plumbing_v1.py`, and `staged_attribution_plumbing_v1.py`
+  2. if existing evidence is insufficient, run the minimal representation-critical test subset canonically
+  3. if a targeted G3 validation fails, make only the minimal Stage C wiring fix needed to restore loader / prototype / semantic-slice coherence
+
+6. Fallback path if that task does not pass
+- If execution is blocked by environment issues, use the environment / validation fallback:
+  1. verify remote runner path and wrapper command
+  2. verify push succeeded
+  3. verify remote HEAD == intended local commit
+  4. treat mismatch or infra errors as BLOCKED, not as algorithmic failure
+
+7. Exact files likely to be touched
+- docs/mainline/STATUS.md
+- wsovvis/track_feature_export/stagec_clip_text_prototype_cache_v1.py
+- wsovvis/track_feature_export/stagec_semantic_slice_v1.py
+- wsovvis/training/stagec_semantic_plumbing_v1.py
+- wsovvis/training/staged_attribution_plumbing_v1.py
+- tests/test_stagec_semantic_slice_v1.py
+- tests/test_staged_attribution_plumbing_v1.py
+
+8. Exact commands likely to be run
+- python -m pytest tests/test_stagec_semantic_slice_v1.py tests/test_staged_attribution_plumbing_v1.py
+- bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch codex/p3-stagec-c0-c4-semantic-slice --clone-url git@github.com:zyy-cn/wsovvis.git --env-cmd 'export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd 'python -m pytest tests/test_stagec_semantic_slice_v1.py tests/test_staged_attribution_plumbing_v1.py' --keep-untracked
+
+Performed G2 contract evaluation
+- Authoritative G2 files:
+  - `wsovvis/track_feature_export/v1_core.py`
+  - `wsovvis/track_feature_export/bridge_from_stageb_v1.py`
+  - `wsovvis/track_feature_export/feature_export_enablement_v1.py`
+  - `wsovvis/track_feature_export/real_run_feature_export.py`
+  - `wsovvis/track_feature_export/real_stageb_sidecar_bridge_input_builder_v1.py`
+  - `wsovvis/track_feature_export/stagec_loader_v1.py`
+- Authoritative G2 tests:
+  - `tests/test_stageb_track_feature_export_v1.py`
+  - `tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py`
+  - `tests/test_stageb_feature_export_enablement_v1.py`
+  - `tests/test_stageb_feature_export_real_run_integration_v1.py`
+  - `tests/test_real_stageb_sidecar_bridge_input_builder_v1.py`
+  - `tests/test_stagec_loader_v1.py`
+- Commands run:
+  - `rg -n "manifest\\.v1\\.json|track_arrays\\.v1\\.npz|row_index|processed_zero_tracks|objectness_score|start_frame_idx|end_frame_idx|num_active_frames|track_row_index|supported_video_statuses|contains unknown statuses" wsovvis/track_feature_export/v1_core.py wsovvis/track_feature_export/bridge_from_stageb_v1.py wsovvis/track_feature_export/stagec_loader_v1.py tests/test_stageb_track_feature_export_v1.py tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py tests/test_stageb_feature_export_enablement_v1.py tests/test_stageb_feature_export_real_run_integration_v1.py tests/test_real_stageb_sidecar_bridge_input_builder_v1.py tests/test_stagec_loader_v1.py`
+  - `bash tools/remote_verify_wsovvis.sh --remote gpu4090d --repo-dir /home/zyy/code/wsovvis_runner --branch codex/p3-stagec-c0-c4-semantic-slice --clone-url git@github.com:zyy-cn/wsovvis.git --env-cmd 'export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}' --cmd 'git rev-parse HEAD && python -m pytest tests/test_stageb_track_feature_export_v1.py tests/test_stageb_track_feature_export_bridge_from_stageb_v1.py tests/test_stageb_feature_export_enablement_v1.py tests/test_stageb_feature_export_real_run_integration_v1.py tests/test_real_stageb_sidecar_bridge_input_builder_v1.py tests/test_stagec_loader_v1.py' --keep-untracked`
+- Validation result:
+  - remote repo dir: `/home/zyy/code/wsovvis_runner`
+  - remote HEAD: `343ac44fcd18145aa95de99685b0b90e655e877e`
+  - remote HEAD == intended local commit: `yes`
+  - pytest result: `47 passed in 2.72s`
+  - judgment: `PASS`
+- Files changed in this run:
+  - `docs/mainline/STATUS.md`
+  - `docs/mainline/reports/phase_gate_latest.txt`
+  - `docs/mainline/reports/archive/phase_gate_20260308_151915.txt`
+- G2 result: `PASS`
+- Recommended next smallest step:
+  - evaluate G3 against the Stage C representation bridge and minimal representation-critical tests without touching algorithm design
