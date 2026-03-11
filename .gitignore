@@ -12,6 +12,7 @@ __pycache__/
 
 weights
 data
+runs
 CutLER
 dinov2
 
