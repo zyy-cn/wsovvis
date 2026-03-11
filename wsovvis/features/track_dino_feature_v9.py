@@ -1093,15 +1093,15 @@ def summarize_track_dino_feature_cache_v9(split_root: Path) -> Dict[str, Any]:
             objectness_values.append(float(record.metadata.o_tau))
             feature_norms.append(float(np.linalg.norm(record.z_tau)))
             member_counts.append(int(record.metadata.member_count))
-                selection_key = (
-                    int(record.metadata.member_count),
-                    float(record.metadata.o_tau),
-                    record.metadata.video_id,
-                    int(record.metadata.global_track_id),
-                )
+            selection_key = (
+                int(record.metadata.member_count),
+                float(record.metadata.o_tau),
+                record.metadata.video_id,
+                int(record.metadata.global_track_id),
+            )
             if best_selection_key is None or selection_key > best_selection_key:
                 best_selection_key = selection_key
-                selected_video_id = record.video_id
+                selected_video_id = record.metadata.video_id
                 selected_global_track_id = int(record.metadata.global_track_id)
 
     objectness_np = np.asarray(objectness_values, dtype=np.float64) if objectness_values else np.zeros((0,), dtype=np.float64)
