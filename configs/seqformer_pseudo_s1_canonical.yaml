@@ -1,0 +1,36 @@
+# Frozen fresh canonical SeqFormer training config for scientific gate S1.
+
+d2_cfg_path: third_party/VNext/projects/SeqFormer/configs/vnext_dinov2_ytvis.yaml
+
+d2_opts:
+  - DATASETS.TRAIN
+  - ("ytvis_wsovvis_lvvis_pseudo_train",)
+  - DATASETS.TEST
+  - ("ytvis_wsovvis_lvvis_val_agnostic",)
+  - MODEL.SeqFormer.NUM_CLASSES
+  - 1
+  - MODEL.SeqFormer.MULTI_CLS_ON
+  - False
+  - MODEL.WEIGHTS
+  - runs/wsovvis_seqformer/15/d2/model_0005999.pth
+
+data:
+  train_name: ytvis_wsovvis_lvvis_pseudo_train
+  train_json: ../wsovvis_live/outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json
+  train_img_root: data/LV-VIS/train/JPEGImages
+
+  val_name: ytvis_wsovvis_lvvis_val_agnostic
+  val_json: data/LV-VIS/annotations/lvvis_val_agnostic.json
+  val_img_root: data/LV-VIS/val/JPEGImages
+
+  num_classes: 1
+
+output_root: runs/wsovvis_seqformer_s1_canonical
+seed: 42
+resume: false
+eval_only: false
+
+num_gpus: 4
+num_machines: 1
+machine_rank: 0
+dist_url: tcp://127.0.0.1:29500
