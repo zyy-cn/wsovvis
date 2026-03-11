@@ -28,7 +28,8 @@ for gpu in 0 1 2 3; do
       python demo_video/demo_masks_only.py \
         --config-file "${CFG}" \
         --input "${DATA_ROOT}/${vid}/*.jpg" \
-        --output "${OUT_ROOT}/${vid}" \
+        --output "${OUT_ROOT}" \
+        --save-frames True \
         --save-masks True \
         --confidence-threshold "${CONF}" \
         --opts MODEL.WEIGHTS "${WEIGHTS}"
