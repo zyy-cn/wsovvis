@@ -75,7 +75,7 @@ def _write_semantic_cache(
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         np.savez_compressed(
             arrays_path,
-            z_tau=np.asarray(z_tau_rows, dtype=np.float32),
+            z_tau=np.asarray(z_tau_rows, dtype=np.float32).reshape(len(z_tau_rows), embedding_dim),
             semantic_track_row_index=np.asarray(row_index, dtype=np.int64),
         )
         metadata_rel = f"videos/{video_id}/semantic_track_metadata.v1.json"

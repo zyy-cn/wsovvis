@@ -15,6 +15,7 @@ from .prototype_bank_v9 import (
     PROTOTYPE_SCHEMA_NAME,
     PrototypeBankError,
     load_prototype_bank_v9,
+    summarize_prototype_bank_v9,
 )
 
 
