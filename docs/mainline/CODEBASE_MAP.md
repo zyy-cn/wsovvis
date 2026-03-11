@@ -84,15 +84,18 @@ Expected evidence role:
 - objectness diagnostics
 
 ### 6. Prototype bank and text map (`G5`)
-Current reusable anchors or scaffolds:
-- `wsovvis/track_feature_export/stagec_clip_text_prototype_cache_v1.py`
-- `tests/test_stagec2_labelset_proto_baseline_v1.py`
-
-Planned mainline entrypoints:
+Current active mainline entrypoints and reusable anchors:
 - `tools/init_prototype_bank_v9.py`
 - `tools/train_text_map_v9.py`
 - `wsovvis/semantics/prototype_bank_v9.py`
 - `wsovvis/semantics/text_map_v9.py`
+- `tests/test_prototype_bank_v9.py`
+- `tests/test_text_map_v9.py`
+- `wsovvis/track_feature_export/stagec1_attribution_mil_v1.py` (downstream prototype-manifest compatibility reference)
+
+Legacy or scaffold references retained for comparison only:
+- `wsovvis/track_feature_export/stagec_clip_text_prototype_cache_v1.py`
+- `tests/test_stagec2_labelset_proto_baseline_v1.py`
 
 Expected evidence role:
 - prototype coverage
