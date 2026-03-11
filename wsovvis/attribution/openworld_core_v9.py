@@ -558,8 +558,10 @@ def build_openworld_core_v9(
             open_rows.append(open_row)
             score_matrix_rows.append([float(score) for score in scores.tolist()])
 
-        closed_predicted_entities = _sorted_unique_ints(closed_predicted_entities)
-        open_predicted_entities = _sorted_unique_ints(open_predicted_entities)
+        # Preserve the observed bag as protected clip-level evidence for both the aligned
+        # closed-world comparator and the bounded open-world path.
+        closed_predicted_entities = _sorted_unique_ints(list(closed_predicted_entities) + list(aligned_observed))
+        open_predicted_entities = _sorted_unique_ints(list(open_predicted_entities) + list(aligned_observed))
         unknown_attributed_entities = _sorted_unique_ints(unknown_attributed_entities)
 
         closed_bundle = _build_eval_bundle(
