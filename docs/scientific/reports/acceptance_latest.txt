@@ -1,0 +1,12 @@
+WS-OVVIS scientific acceptance evaluation
+Timestamp: 20260311T164159Z
+Active scientific gate: P0
+Acceptance judgment: not yet satisfied
+Evidence judgment: incomplete for stable in-repo authority verification
+Final status: INCONCLUSIVE
+
+Later scientific gate activation allowed: no
+Reason:
+- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` is present and readable, and its charter fields are frozen at the document level
+- however, `git status --short docs/scientific` reports `?? docs/scientific/`, so the scientific authority bundle is not yet evidenced as a stable tracked in-repo artifact
+- do not activate `S1` until `P0` is evidence-backed `PASS`

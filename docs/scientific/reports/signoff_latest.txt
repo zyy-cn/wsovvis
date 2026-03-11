@@ -1,0 +1,10 @@
+WS-OVVIS scientific sign-off status
+Timestamp: 20260311T164159Z
+Active scientific gate: P0
+Status: pending
+
+Recorded sign-off rules:
+- Codex may implement, run, evaluate, and report under the frozen scientific charter
+- final Scientific PASS remains human-signed per `docs/scientific/P0_EXPERIMENTAL_CHARTER.md`
+- this bounded `P0` loop prepared the scientific reporting packet but did not produce an evidence-backed `P0 PASS`
+- `S1` remains inactive until `P0` is evidence-backed `PASS`

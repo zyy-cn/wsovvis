@@ -1,0 +1,26 @@
+WS-OVVIS scientific evidence review
+Timestamp: 20260311T164159Z
+Active scientific gate: P0
+Evidence status: partial
+
+Evidence present:
+- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` exists at the authoritative scientific path and is readable in-repo
+- `docs/scientific/INDEX.md` records `P0_EXPERIMENTAL_CHARTER.md` as the first scientific gate and blocks `S1` until `P0 PASS`
+- `docs/scientific/STATUS.md` records `P0` as active
+- `docs/scientific/reports/README.md` defines the required durable scientific report set separately from engineering reports
+- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` contains the frozen charter content required for:
+  - comparator inventory and fairness policy
+  - metric and evidence policy
+  - pass / inconclusive / fail / blocked semantics
+  - split / protocol restrictions
+  - forbidden shortcuts
+  - budget rules
+  - canonical validation rules
+  - human sign-off rules
+- the scientific comparator and sign-off report artifacts for this loop are now written:
+  - `docs/scientific/reports/comparator_latest.txt`
+  - `docs/scientific/reports/signoff_latest.txt`
+
+Evidence missing:
+- stability evidence for the scientific authority bundle as a tracked in-repo artifact is not yet complete because `git status --short docs/scientific` reports `?? docs/scientific/`
+- `P0` therefore does not yet have an evidence-backed PASS bundle
