@@ -56,15 +56,15 @@ Primary tests:
 - `tests/test_stagec_loader_v1.py`
 
 ### 4. Clip-level global track bank (`G3`)
-Current reusable structural references:
-- `wsovvis/track_feature_export/bridge_from_stageb_v1.py`
-- `wsovvis/track_feature_export/stagec_loader_v1.py`
-- `tests/test_g5_bounded_policy_v1.py` (legacy reference only for bounded linking policy)
-- `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py` (legacy/reference only; not the active v9 mainline by default)
-
-Planned mainline entrypoints:
+Current active mainline entrypoints and reusable structural references:
 - `tools/build_global_track_bank_v9.py`
 - `wsovvis/tracking/global_track_bank_v9.py`
+- `tests/test_global_track_bank_v9.py`
+- `wsovvis/track_feature_export/bridge_from_stageb_v1.py`
+- `wsovvis/track_feature_export/stagec_loader_v1.py`
+- `tests/test_stagec_loader_v1.py`
+- `tests/test_g5_bounded_policy_v1.py` (legacy reference only for bounded linking policy)
+- `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py` (legacy/reference only; not the active v9 mainline by default)
 
 Expected evidence role:
 - score matrices
@@ -72,12 +72,11 @@ Expected evidence role:
 - clip-level global-track coverage figures
 
 ### 5. DINO-only semantic carrier (`G4`)
-Current reusable anchors:
-- `wsovvis/modeling/backbone/dinov2_backbone.py`
-
-Planned mainline entrypoints:
+Current active mainline entrypoints and reusable anchors:
 - `tools/extract_track_dino_features_v9.py`
 - `wsovvis/features/track_dino_feature_v9.py`
+- `tests/test_track_dino_feature_v9.py`
+- `wsovvis/modeling/backbone/dinov2_backbone.py`
 
 Expected evidence role:
 - crop and pooling provenance
