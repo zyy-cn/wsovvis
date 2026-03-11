@@ -320,13 +320,24 @@ def _resolve_split_paths(run_root: Path, split: str) -> Tuple[Path, Path]:
         if (repo_root / "tools").exists() and (repo_root / "wsovvis").exists():
             break
         repo_root = repo_root.parent
-    annotation_path = Path(data[json_key])
-    if not annotation_path.is_absolute():
-        annotation_path = repo_root / annotation_path
-    image_root = Path(data[img_key])
-    if not image_root.is_absolute():
-        image_root = repo_root / image_root
-    return annotation_path.resolve(), image_root.resolve()
+    def _resolve_relative(raw_path: str, field_path: str) -> Path:
+        path = Path(raw_path)
+        if path.is_absolute():
+            return path.resolve()
+        candidates: List[Path] = [repo_root / path]
+        probe = run_root
+        while probe != probe.parent:
+            candidates.append(probe / path)
+            probe = probe.parent
+        candidates.append(Path.cwd() / path)
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate.resolve()
+        return candidates[0].resolve()
+
+    annotation_path = _resolve_relative(data[json_key], f"config.json.data.{json_key}")
+    image_root = _resolve_relative(data[img_key], f"config.json.data.{img_key}")
+    return annotation_path, image_root
 
 
 def _load_video_index(run_root: Path, split: str) -> Tuple[Dict[str, _VideoContext], Path]:
