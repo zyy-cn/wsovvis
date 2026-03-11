@@ -78,13 +78,15 @@ def _write_semantic_cache(
             z_tau=np.asarray(z_tau_rows, dtype=np.float32),
             semantic_track_row_index=np.asarray(row_index, dtype=np.int64),
         )
+        metadata_rel = f"videos/{video_id}/semantic_track_metadata.v1.json"
+        arrays_rel = f"videos/{video_id}/semantic_track_arrays.v1.npz"
         manifest_videos.append(
             {
                 "video_id": video_id,
                 "status": "processed_with_tracks" if tracks else "processed_zero_tracks",
                 "num_global_tracks": len(metadata_tracks),
-                "semantic_track_metadata_path": f"videos/{video_id}/semantic_track_metadata.v1.json" if tracks else None,
-                "semantic_track_arrays_path": f"videos/{video_id}/semantic_track_arrays.v1.npz" if tracks else None,
+                "semantic_track_metadata_path": metadata_rel,
+                "semantic_track_arrays_path": arrays_rel,
             }
         )
     manifest = {

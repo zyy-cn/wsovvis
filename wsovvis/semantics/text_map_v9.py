@@ -145,6 +145,13 @@ def _require_relative_path(path_value: Any, field_path: str) -> str:
     return str(rel)
 
 
+def _require_relative_reference_path(path_value: Any, field_path: str) -> str:
+    _require(isinstance(path_value, str) and bool(path_value), field_path, "must be a non-empty relative path")
+    rel = PurePosixPath(path_value)
+    _require(not rel.is_absolute(), field_path, "absolute path is forbidden")
+    return str(rel)
+
+
 def _discover_manifest_path(root: Path) -> Path:
     manifest_v1 = root / "text_map_manifest.v1.json"
     manifest_compat = root / "text_map_manifest.json"
@@ -410,7 +417,7 @@ def _load_text_map_state(output_root: Path) -> Dict[str, Any]:
     _require(mapped_text.ndim == 2, "text_map_state.v1.npz.mapped_text_prototypes", "must be rank-2")
     _require(text_features.shape[0] == len(labels), "text_map_state.v1.npz.text_features", "row count must match labels")
     _require(mapped_text.shape[0] == len(labels), "text_map_state.v1.npz.mapped_text_prototypes", "row count must match labels")
-    prototype_bank_root_rel = _require_relative_path(
+    prototype_bank_root_rel = _require_relative_reference_path(
         manifest.get("prototype_bank_root_rel"), "text_map_manifest.prototype_bank_root_rel"
     )
     prototype_bank_root = (Path(output_root) / Path(prototype_bank_root_rel)).resolve()
