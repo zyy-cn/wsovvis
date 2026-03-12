@@ -12,19 +12,26 @@ This contract covers the minimum transition from the current Stage B ecosystem t
 - evidence and provenance hooks needed for worked examples
 
 ## 2. Local tracklet artifact form
-Required v9-oriented form:
-- split-level manifest plus per-video payload files
+Current repo-exported form required for `G0` alignment:
+- split-level `manifest.v1.json` plus per-video `track_metadata.v1.json` and `track_arrays.v1.npz`
 - JSON metadata plus NPZ arrays or equivalent structured caches
-- identity preserved at least by `(video_id, local_track_id)`
+- identity preserved at least by `(video_id, track_id)` in the current exporter, with `row_index` as the stable per-video array index
 
-Required per-tracklet payload at minimum:
-- `local_track_id`
+Current minimum per-tracklet payload actually present in the repository:
+- `track_id`
 - `row_index`
-- window or clip provenance
-- temporal support fields
+- `start_frame_idx`
+- `end_frame_idx`
+- `num_active_frames`
+- `objectness_score`
+- pooled track `embedding` stored in `track_arrays.v1.npz`
+
+Planned v9 additions, not required for `G0` minima:
+- alias or promotion from `track_id` to `local_track_id`
+- window or clip provenance beyond the current split and video scope when required downstream
 - masks or mask references sufficient for downstream stitching
 - local query feature or equivalent linking-side representation
-- local mask quality or objectness-related fields when available
+- local mask quality fields when promoted beyond the current `objectness_score`
 
 Evidence and provenance additions strongly preferred:
 - stable identifiers for worked-example selection
@@ -54,12 +61,15 @@ Evidence and provenance additions strongly preferred:
 - worked-example fields or sidecars for crop boxes, visible-frame indices, and aggregation weights
 
 ## 5. Provenance requirements
-Run-level metadata should preserve at least:
+Current repo-exported run-level metadata should preserve at least:
 - Stage B checkpoint reference or hash
 - Stage B config reference or hash
 - pseudo-tube manifest reference or hash
+- split identity
+- feature extraction settings
+
+Planned v9 provenance additions, not required for `G0` minima:
 - stitching policy reference or hash
-- DINO feature extraction settings
 - protocol reference or hash
 
 ## 6. Change policy

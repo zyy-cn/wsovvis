@@ -23,12 +23,17 @@ Before canonical remote validation when live links or artifacts matter:
 - run `python tools/check_canonical_runner_bootstrap_links.py --check` when required
 - confirm intended local commit is reachable remotely
 
-The current bootstrap-link checker expects these managed links under the runner:
+The current bootstrap-link checker expects these managed links under the runner. These are project-managed live links inherited from the sibling `wsovvis_live` checkout:
 - `third_party/CutLER -> ../../wsovvis_live/third_party/CutLER`
 - `third_party/dinov2 -> ../../wsovvis_live/third_party/dinov2`
 - `runs -> ../wsovvis_live/runs`
 - `weights -> ../wsovvis_live/weights`
 - `data -> ../wsovvis_live/data`
+
+Branch policy:
+- any newly created branch that is intended to run on the canonical remote runner must execute `python tools/check_canonical_runner_bootstrap_links.py --check` on the remote runner before its first bounded loop, before any canonical replay claim, and before any PASS claim that depends on remote evidence
+- if the checker reports `MISSING`, `BROKEN`, `WRONG_TARGET`, or `SKIPPED`, classify the loop as `BLOCKED` and repair the managed links before continuing
+- do not assume links created on one branch remain valid for another fresh or reset runner checkout; recheck on the remote runner whenever a new branch is first deployed there
 
 ## 4. Environment activation
 The canonical remote environment should use the project-approved recipe:

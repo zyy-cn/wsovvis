@@ -112,7 +112,12 @@ Current baseline or scaffold anchors:
 - `tools/compare_stagec_unknown_handling_v1.py`
 - `tools/run_stagec_c5_micro_training.py`
 
+Active mainline entrypoints:
+- `tools/train_openworld_core_v9.py`
+- `wsovvis/attribution/openworld_core_v9.py`
+
 Primary tests:
+- `tests/test_openworld_core_v9.py`
 - `tests/test_stagec1_attribution_mil_v1.py`
 - `tests/test_stagec_semantic_c1_v1.py`
 - `tests/test_stagec_semantic_c2_sinkhorn_v1.py`
@@ -127,10 +132,6 @@ Primary tests:
 - `tests/test_staged_attribution_plumbing_v1.py`
 - `tests/test_stagec_c5_micro_training_real_data_v1.py`
 
-Planned mainline entrypoints:
-- `tools/train_openworld_core_v9.py`
-- `wsovvis/attribution/openworld_core_v9.py`
-
 ### 8. Bag-free inference and terminal evaluation (`G7`)
 Current reusable reporting anchors:
 - `wsovvis/metrics/ws_metrics.py`
@@ -138,9 +139,10 @@ Current reusable reporting anchors:
 - `tests/test_ws_metrics_reporting_v1.py`
 - `tests/test_ws_metrics_tooling.py`
 
-Planned mainline entrypoints:
+Active mainline entrypoints:
 - `tools/run_bagfree_eval_v9.py`
 - `wsovvis/inference/bagfree_inference_v9.py`
+- `tests/test_bagfree_inference_v9.py`
 
 Expected evidence role:
 - full-vocabulary prediction dumps
