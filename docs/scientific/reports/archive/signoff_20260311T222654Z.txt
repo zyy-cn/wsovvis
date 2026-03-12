@@ -1,0 +1,12 @@
+WS-OVVIS scientific sign-off status
+Timestamp: 20260311T222654Z
+Active scientific gate: S1
+Status: pending
+
+Recorded sign-off rules:
+- Codex activated `S1`, implemented the bounded evaluator fix, ran canonical pilot checks, and prepared the fresh canonical SeqFormer retraining package
+- this loop did not and may not auto-declare Scientific `PASS` for `S1`
+- formal `S1 PASS` still requires:
+  - a fair canonical raw-vs-refined comparator surface on val
+  - at least one fresh canonical SeqFormer training-based comparator result
+  - human scientific sign-off after those requirements are met

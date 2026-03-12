@@ -1,6 +1,9 @@
-# S6 BAGFREE OVVIS FINAL
+# S6 — Bag-free OVVIS Final Gate
 
-Status: draft placeholder
+## Scientific question
+Under the refined overlay, can the system perform benchmark-scoped bag-free open-vocabulary VIS without relying on observed-label bags at inference time?
 
-This scientific gate is reserved in the `P0` scientific gate inventory but is not yet fully frozen in this incremental overlay.
-Do not activate this gate until its dedicated charter is finalized and explicitly approved.
+## Required emphasis
+- held-out / pseudo-novel diagnostics are supplementary only
+- final formal PASS requires benchmark-scoped final evaluation
+- bag-free is the final scientific conclusion gate, not an exploratory placeholder

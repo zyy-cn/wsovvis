@@ -1,0 +1,34 @@
+WS-OVVIS scientific evidence review
+Timestamp: 20260311T220926Z
+Active scientific gate: P0
+Evidence status: complete
+
+Evidence present:
+- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` exists at the authoritative scientific path and is readable in-repo
+- `docs/scientific/INDEX.md` records `P0_EXPERIMENTAL_CHARTER.md` as the first scientific gate and blocks `S1` until `P0 PASS`
+- `docs/scientific/STATUS.md` records `P0` as active and keeps the next scientific gate at `S1`
+- `docs/scientific/reports/README.md` defines the required durable scientific report set separately from engineering reports
+- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` contains the frozen charter content required for:
+  - comparator inventory and fairness policy
+  - metric and evidence policy
+  - pass / inconclusive / fail / blocked semantics
+  - dataset / split and protocol restrictions
+  - forbidden shortcuts
+  - training-budget rules
+  - canonical-validation rules
+  - human sign-off rules
+  - change-control rules
+- the scientific authority bundle remains tracked in-repo:
+  - `git ls-files docs/scientific` lists the overlay files and scientific report files
+  - `git log -1 --format='%H %cI %s' -- docs/scientific/P0_EXPERIMENTAL_CHARTER.md` records `dbe90abf9b23a50385bc5b9110dfcc2a75851afd 2026-03-12T00:52:42+08:00 Anchor scientific control plane`
+- the frozen charter remains stable and readable:
+  - `rg -n "TODO|TBD|PLACEHOLDER|FIXME|<fill|<todo" docs/scientific/P0_EXPERIMENTAL_CHARTER.md docs/scientific/INDEX.md docs/scientific/STATUS.md docs/scientific/reports/README.md` returned no matches
+- the full required scientific report set for this loop is present:
+  - `docs/scientific/reports/phase_gate_latest.txt`
+  - `docs/scientific/reports/evidence_latest.txt`
+  - `docs/scientific/reports/acceptance_latest.txt`
+  - `docs/scientific/reports/comparator_latest.txt`
+  - `docs/scientific/reports/signoff_latest.txt`
+
+Evidence missing:
+- no blocking evidence gap remains for `P0`

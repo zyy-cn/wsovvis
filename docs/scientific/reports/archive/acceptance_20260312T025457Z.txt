@@ -1,0 +1,20 @@
+WS-OVVIS scientific acceptance evaluation
+Timestamp: 20260312T025457Z
+Active scientific gate: S1
+Acceptance judgment: not satisfied
+Evidence judgment: interim_checkpoint_recorded_but_final_full_run_result_pending
+Final status: INCONCLUSIVE
+
+Later scientific gate activation allowed: no
+Reason:
+- the fair canonical comparator exists on the frozen val split and remains unchanged
+- the first fresh canonical training-based evidence now exists as an interim checkpoint comparator
+- the interim fresh checkpoint does not satisfy the `S1` superiority rule against raw:
+  - raw exceeds interim refined on `mean_best_iou`
+  - raw exceeds interim refined on `recall_at_0.5`
+  - interim refined clearly worsens `fragmentation_per_gt_instance`
+- the interim qualitative evidence is mixed and does not overturn the negative table:
+  - the paired example on video `00434`, GT tube `1995` strongly favors refined
+  - the failure case on video `00818`, GT tube `3636` strongly favors raw
+- under `docs/scientific/S1_BASIS_SUPERIORITY.md` and the current loop instruction, checkpoint evidence alone may not declare `PASS` or `FAIL`
+- formal `S1` resolution still depends on the final completed fresh canonical training-based comparator result from the running frozen full run

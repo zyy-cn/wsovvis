@@ -1,6 +1,6 @@
 # WS-OVVIS Mainline Automation Index
 
-This directory is the **authoritative execution source** for document-driven automation.
+This directory is the **authoritative execution source** for document-driven automation at the engineering layer.
 
 Read order:
 1. `EXECUTION_SOURCE.md`
@@ -18,6 +18,11 @@ Read order:
 13. `../runbooks/mainline_phase_gate_runbook.md`
 
 Design source reference:
-- `docs/outline/WS_OVVIS_outline_v9.tex`
+- `docs/outline/WS_OVVIS_outline_v10_gate_refined_for_codex.tex`
 
-These files replace old workflow control docs, draft v9 side trees, historical handoffs, and legacy control memos as the authority for active development decisions.
+Scientific validation overlay:
+- scientific validation lives under `docs/scientific/*`
+- `docs/mainline/*` governs engineering readiness, bounded execution, and canonical validation
+- `docs/scientific/*` governs scientific validity, comparator fairness, metric hierarchies, evidence packs, formal-vs-diagnostic mode semantics, recovery subgates, and human scientific sign-off
+
+These files replace old workflow control docs, draft side trees, historical handoffs, and legacy control memos as the authority for active engineering development decisions.

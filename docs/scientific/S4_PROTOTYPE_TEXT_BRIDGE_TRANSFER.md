@@ -1,6 +1,12 @@
-# S4 PROTOTYPE TEXT BRIDGE TRANSFER
+# S4 — Prototype/Text Bridge Transfer Gate
 
-Status: draft placeholder
+## Scientific question
+Does the prototype bank + text map learn a real semantic bridge, rather than only memorizing seen-class prototypes?
 
-This scientific gate is reserved in the `P0` scientific gate inventory but is not yet fully frozen in this incremental overlay.
-Do not activate this gate until its dedicated charter is finalized and explicitly approved.
+## Required emphasis
+- held-out-seen / pseudo-novel transfer evidence is mandatory
+- seen alignment evidence is supporting, not sufficient by itself
+- PASS may not be granted from seen-class alignment alone
+
+## Activation note
+Do not activate `S4` until `S3a` and `S3b` have both passed under the refined overlay.

@@ -1,0 +1,93 @@
+WS-OVVIS scientific comparator summary
+Timestamp: 20260312T025457Z
+Active scientific gate: S1
+Status: fair comparator exists; interim checkpoint-based fresh comparator recorded; final full-run fresh comparator pending
+
+Frozen S1 comparator/evaluator specification:
+- scope: structure-only
+- split: `val`
+- GT: `data/LV-VIS/annotations/lvvis_val_agnostic.json`
+- `C1` raw pseudo tube:
+  - canonical source: [raw_val_videocutler_ytvis.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_videocutler_ytvis.json)
+  - conversion summary: [raw_val_summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_summary.json)
+- `C2` refined basis, evidence tiers:
+  - historical pilot source summary:
+    - [historical_run19_config.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/historical_run19_config.json)
+    - [summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/summary.json)
+  - interim fresh-checkpoint source summary:
+    - checkpoint config [seqformer_pseudo_s1_interim_ckpt0499.yaml](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/seqformer_pseudo_s1_interim_ckpt0499.yaml)
+    - comparator manifest [s1_eval_manifest.json](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/s1_eval_manifest.json)
+  - final full-run fresh comparator:
+    - pending from the approved running frozen training job
+
+Primary metrics:
+- `mean_best_iou`
+- `recall_at_0.5`
+- `fragmentation_per_gt_instance`
+
+Diagnostics:
+- `short_track_ratio`
+- `broken_track_ratio`
+- `average_track_duration`
+- `temporal_inconsistency`
+- `unmatched_gt_ratio`
+- `over_segmentation_tendency`
+- `under_coverage_tendency`
+
+Shared raw baseline `C1`:
+- `predicted_tracks_total=2679`
+- `mean_best_iou=0.380341`
+- `recall_at_0.5=0.387739`
+- `fragmentation_per_gt_instance=0.031998`
+
+Historical refined pilot `C2`:
+- comparator table:
+  - [comparator_table.md](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/comparator_table.md)
+- key metrics:
+  - `predicted_tracks_total=8370`
+  - `mean_best_iou=0.339383`
+  - `recall_at_0.5=0.353052`
+  - `fragmentation_per_gt_instance=0.852111`
+- deltas vs raw:
+  - `mean_best_iou=-0.040958`
+  - `recall_at_0.5=-0.034687`
+  - `fragmentation_per_gt_instance=+0.820113`
+
+Interim fresh-checkpoint refined `C2`:
+- canonical validation:
+  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/remote_validation_record.md)
+- comparator table:
+  - [comparator_table.md](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/comparator_table.md)
+- key metrics:
+  - `predicted_tracks_total=8370`
+  - `mean_best_iou=0.342388`
+  - `recall_at_0.5=0.358699`
+  - `fragmentation_per_gt_instance=0.913955`
+- deltas vs raw:
+  - `mean_best_iou=-0.037953`
+  - `recall_at_0.5=-0.029040`
+  - `fragmentation_per_gt_instance=+0.881957`
+- deltas vs historical refined pilot:
+  - `mean_best_iou=+0.003005`
+  - `recall_at_0.5=+0.005647`
+  - `fragmentation_per_gt_instance=+0.061844`
+
+Qualitative evidence:
+- historical paired example:
+  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/paired_worked_example.json)
+  - video `00636`, GT tube `2884`: refined improved IoU but added fragmentation
+- historical failure case:
+  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/failure_case_example.json)
+  - video `00822`, GT tube `3647`: raw best IoU `0.955158`; refined best IoU `0.0`
+- interim checkpoint paired example:
+  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/paired_worked_example.json)
+  - video `00434`, GT tube `1995`: raw best IoU `0.0`; interim refined best IoU `0.8967097658168711`; fragmentation remained `0.0`
+- interim checkpoint failure case:
+  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/failure_case_example.json)
+  - video `00818`, GT tube `3636`: raw best IoU `0.9480394036277549`; interim refined best IoU `0.01942900747312244`
+
+Current interpretation:
+- the fair pilot comparator exists and remains preserved
+- the interim fresh-checkpoint comparator now exists and is training-based, but it is explicitly interim evidence only
+- neither the historical pilot nor the interim fresh checkpoint currently supports the `S1` basis-superiority claim over raw pseudo tubes
+- the final completed fresh canonical comparator remains required before `S1` may resolve to `PASS` or `FAIL`

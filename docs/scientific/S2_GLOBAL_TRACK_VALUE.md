@@ -1,6 +1,9 @@
-# S2 GLOBAL TRACK VALUE
+# S2 — Global Track Value Gate
 
-Status: draft placeholder
+Status: refined overlay draft gate
 
-This scientific gate is reserved in the `P0` scientific gate inventory but is not yet fully frozen in this incremental overlay.
-Do not activate this gate until its dedicated charter is finalized and explicitly approved.
+## Scientific question
+Do clip-level global tracks provide real scientific value over local tracklets by reducing fragmentation and improving instance continuity without unacceptable wrong-merge inflation?
+
+## Activation note
+Do not activate `S2` until refined `S1` has passed under the refined overlay.

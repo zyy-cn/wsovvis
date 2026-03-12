@@ -1,0 +1,71 @@
+WS-OVVIS scientific comparator summary
+Timestamp: 20260311T235429Z
+Active scientific gate: S1
+Status: fair pilot comparator exists; historical refined pilot does not support the superiority claim
+
+Frozen S1 comparator/evaluator specification:
+- scope: structure-only
+- split: `val`
+- GT: `data/LV-VIS/annotations/lvvis_val_agnostic.json`
+- `C1` raw pseudo tube:
+  - canonical source: [raw_val_videocutler_ytvis.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_videocutler_ytvis.json)
+  - conversion summary: [raw_val_summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_summary.json)
+- `C2` refined basis:
+  - historical pilot source: `../wsovvis_live/runs/wsovvis_seqformer/19/d2/inference/results.json`
+  - historical config copy: [historical_run19_config.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/historical_run19_config.json)
+
+Primary metrics:
+- `mean_best_iou`
+- `recall_at_0.5`
+- `fragmentation_per_gt_instance`
+
+Diagnostics:
+- `short_track_ratio`
+- `broken_track_ratio`
+- `average_track_duration`
+- `temporal_inconsistency`
+- `unmatched_gt_ratio`
+- `over_segmentation_tendency`
+- `under_coverage_tendency`
+
+Pilot execution facts:
+- canonical remote validation passed:
+  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/remote_validation_record.md)
+  - [pytest_s1_surface.txt](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/pytest_s1_surface.txt)
+- raw `C1` comparator is now fair and non-empty:
+  - `predicted_tracks_total=2679`
+  - `mean_best_iou=0.380341`
+  - `recall_at_0.5=0.387739`
+  - `fragmentation_per_gt_instance=0.031998`
+- historical refined `C2` comparator:
+  - `predicted_tracks_total=8370`
+  - `mean_best_iou=0.339383`
+  - `recall_at_0.5=0.353052`
+  - `fragmentation_per_gt_instance=0.852111`
+
+Fair pilot metric deltas (`refined_minus_raw`):
+- `mean_best_iou=-0.040958`
+- `recall_at_0.5=-0.034687`
+- `fragmentation_per_gt_instance=+0.820113`
+- `short_track_ratio=-0.020082`
+- `broken_track_ratio=-0.090705`
+- `average_track_duration=+1.076715`
+- `temporal_inconsistency=-0.011883`
+
+Qualitative evidence:
+- paired worked example:
+  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/paired_worked_example.json)
+  - [paired_worked_example.svg](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/paired_worked_example.svg)
+  - video `00636`, GT tube `2884`: raw best IoU `0.000401`; refined best IoU `0.886336`, but refined uses three matched fragments instead of one
+- failure-case example:
+  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/failure_case_example.json)
+  - [failure_case_example.svg](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/failure_case_example.svg)
+  - video `00822`, GT tube `3647`: raw best IoU `0.955158`; refined best IoU `0.0`
+
+Current interpretation:
+- the fair pilot comparator now exists
+- the historical refined run does not currently support the `S1` basis-superiority claim
+- the next required step is not `S2`; it is explicit human approval to launch the prepared fresh canonical SeqFormer retraining package so `S1` can be resolved formally
+
+Fresh comparator preparation package:
+- [fresh_canonical_training_package.md](/mnt/e/Code/wsovvis/codex/s1_pilot_20260311T220926Z/fresh_canonical_training_package.md)

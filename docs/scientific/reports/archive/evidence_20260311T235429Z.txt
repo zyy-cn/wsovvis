@@ -1,0 +1,45 @@
+WS-OVVIS scientific evidence review
+Timestamp: 20260311T235429Z
+Active scientific gate: S1
+Evidence status: fair_pilot_complete_but_formal_training_evidence_missing
+
+Evidence present:
+- frozen evaluator plane and metric contract:
+  - [evaluator_spec.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/evaluator_spec.json)
+- canonical testability, remote `HEAD`, and environment inheritance:
+  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/remote_validation_record.md)
+  - [remote_context.txt](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/remote_context.txt)
+  - [pytest_s1_surface.txt](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/pytest_s1_surface.txt)
+- restored canonical raw comparator `C1`:
+  - [raw_mask_inventory_summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_mask_inventory_summary.json)
+  - [raw_val_summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_summary.json)
+  - [raw_val_videocutler_ytvis.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_videocutler_ytvis.json)
+- fair raw-vs-refined pilot artifacts:
+  - [historical_run19_config.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/historical_run19_config.json)
+  - [summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/summary.json)
+  - [comparator_table.md](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/comparator_table.md)
+- required qualitative artifacts for the fair pilot:
+  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/paired_worked_example.json)
+  - [paired_worked_example.svg](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/paired_worked_example.svg)
+  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/failure_case_example.json)
+  - [failure_case_example.svg](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/failure_case_example.svg)
+- fresh canonical SeqFormer retraining was prepared but not launched:
+  - [fresh_canonical_training_package.md](/mnt/e/Code/wsovvis/codex/s1_pilot_20260311T220926Z/fresh_canonical_training_package.md)
+  - [fresh_canonical_training_package.json](/mnt/e/Code/wsovvis/codex/s1_pilot_20260311T220926Z/fresh_canonical_training_package.json)
+
+Evidence established by the fair pilot:
+- `C1` is now real and non-empty on val:
+  - `videos_total=837`
+  - `annotations_total=2679`
+  - `num_skipped=0`
+- the historical fair pilot does not support the `S1` superiority claim:
+  - raw `mean_best_iou=0.380341` vs refined `0.339383`
+  - raw `recall_at_0.5=0.387739` vs refined `0.353052`
+  - raw `fragmentation_per_gt_instance=0.031998` vs refined `0.852111`
+- the paired worked example is mixed rather than uniformly favorable:
+  - refined greatly improves IoU on video `00636`, GT tube `2884`
+  - the same example introduces two extra refined fragments
+- the failure-case example directly contradicts superiority on video `00822`, GT tube `3647`
+
+Evidence missing:
+- a fresh canonical SeqFormer training-based comparator result required for formal `S1 PASS`

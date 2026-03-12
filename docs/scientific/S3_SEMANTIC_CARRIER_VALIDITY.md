@@ -1,6 +1,8 @@
-# S3 SEMANTIC CARRIER VALIDITY
+# Legacy S3 Wrapper — Split into S3a / S3b
 
-Status: draft placeholder
+The prior single-gate `S3` has been superseded by:
+- `S3A_SEMANTIC_CARRIER_VALIDITY.md`
+- `S3B_OBJECTNESS_VALIDITY.md`
 
-This scientific gate is reserved in the `P0` scientific gate inventory but is not yet fully frozen in this incremental overlay.
-Do not activate this gate until its dedicated charter is finalized and explicitly approved.
+Do not activate this legacy wrapper directly.
+Use `S3a` and `S3b` under the refined overlay.

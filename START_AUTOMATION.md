@@ -5,7 +5,8 @@ Deploy this overlay at the **repository root** of a clean `wsovvis` checkout.
 Required paths after deployment:
 - `AGENTS.md`
 - `.codex/config.toml`
-- `docs/mainline/*`, including `EVIDENCE_REQUIREMENTS.md` and `STAGEB_INTERFACE_CONTRACT.md`
+- `docs/mainline/*`
+- `docs/scientific/*`
 - `docs/runbooks/mainline_phase_gate_runbook.md`
 - `.agents/skills/mainline-phase-gate-check/SKILL.md`
 - `.agents/skills/mainline-eval-acceptance/SKILL.md`
@@ -14,28 +15,21 @@ Required paths after deployment:
 - existing project wrapper: `tools/remote_verify_wsovvis.sh`
 - existing bootstrap preflight checker: `tools/check_canonical_runner_bootstrap_links.py`
 
-## First run
-From the repo root:
+## Scientific overlay v2 activation
+When the engineering control plane is already deployed and a scientific gate or scientific migration task is active, Codex must also read:
+- `docs/scientific/INDEX.md`
+- `docs/scientific/V10_RECONCILIATION_MEMO.md`
+- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md`
+- `docs/scientific/STATUS.md`
+- the active scientific gate spec
 
-```bash
-codex
-```
-
-Then paste the project-specific Prompt 2 from:
-
-- `prompts/02_project_specific_first_run_prompt.md`
-
-Or prepare the same bounded prompt from the repo helper:
-
-```bash
-python tools/run_mainline_loop.py --dry-run
-```
+Scientific gates do not replace engineering gates. They sit on top of them.
+Engineering PASS and Scientific PASS must be tracked separately.
+Formal scientific progression and diagnostic-only probing must also be tracked separately.
 
 ## Important
-Do not assume the environment is inherited correctly until `G0` records:
-- canonical runner facts
-- wrapper availability
-- bootstrap preflight evidence
-- remote HEAD consistency evidence
-- v9 authority-switch evidence under `docs/mainline/*`
-- the required G0 evidence bundle and worked example defined in `docs/mainline/EVIDENCE_REQUIREMENTS.md`
+Do not assume a scientific claim is proven merely because the engineering path is runnable.
+Scientific PASS requires the comparator, metric, evidence, and sign-off rules frozen by `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` and the active scientific gate spec.
+
+## Migration note
+The prior strict `S1` / `S1R` path is superseded by the refined v10 scientific overlay. Do not continue `S1R` unless an explicit legacy replay is requested. Use the new scientific overlay activation prompt instead.

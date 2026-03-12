@@ -1,6 +1,9 @@
-# S5 HIDDEN POSITIVE RECOVERY
+# Legacy S5 Wrapper — Split into S5a / S5b / S5c
 
-Status: draft placeholder
+The prior single-gate `S5` has been superseded by:
+- `S5A_ATTRIBUTION_DECOMPOSITION.md`
+- `S5B_HIDDEN_POSITIVE_RECOVERY.md`
+- `S5C_MISSINGNESS_ROBUSTNESS.md`
 
-This scientific gate is reserved in the `P0` scientific gate inventory but is not yet fully frozen in this incremental overlay.
-Do not activate this gate until its dedicated charter is finalized and explicitly approved.
+Do not activate this legacy wrapper directly.
+Use `S5a`, `S5b`, and `S5c` under the refined overlay.

@@ -1,0 +1,115 @@
+WS-OVVIS post-S1 diagnosis and recovery plan
+Timestamp: 20260312T073731Z
+Scope: bounded post-S1-fail diagnosis loop only
+
+Fixed scientific state preserved:
+- `S1` remains the authoritative scientific gate result and remains `FAIL`.
+- `S2` remains inactive.
+- no frozen `S1` comparator, metric, or sign-off report was rewritten in this loop.
+
+Inputs used for diagnosis:
+- completed fresh canonical comparator:
+  - `codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/summary.json`
+  - `codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/comparator_table.md`
+  - `codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/paired_worked_example.json`
+  - `codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/failure_case_example.json`
+- historical and interim refined tiers for trend comparison:
+  - `codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/summary.json`
+  - `codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/summary.json`
+- completed fresh training log:
+  - `codex/s1_final_fresh_eval_20260312T051557Z/seqformer_eval/1/log.txt`
+- active SeqFormer training/inference code:
+  - `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py`
+  - `third_party/VNext/projects/SeqFormer/seqformer/models/matcher.py`
+  - `third_party/VNext/projects/SeqFormer/seqformer/models/deformable_detr.py`
+- informative diagnosis-only target-distribution checks from the canonical host against:
+  - `../wsovvis_live/outputs/videocutler_lvvis_png/train/pseudo_tube_ytvis.json`
+  - `data/LV-VIS/annotations/lvvis_val_agnostic.json`
+
+Diagnosis summary:
+1. Optimization failure is not the dominant issue.
+   - the completed fresh run reached `iter: 11999` with finite, evolving losses and scheduled LR decay still active in the final phase (`lr: 2e-05`); see `codex/s1_final_fresh_eval_20260312T051557Z/seqformer_eval/1/log.txt`.
+   - the final refined basis is slightly better than both earlier refined tiers on `mean_best_iou` and `recall_at_0.5`, so the model did learn something:
+     - historical refined `mean_best_iou=0.339383`, interim `0.342388`, final `0.344887`
+     - historical refined `recall_at_0.5=0.353052`, interim `0.358699`, final `0.360850`
+   - this is inconsistent with pure optimization collapse or flatlined non-learning.
+
+2. Target conversion quality is imperfect, but it does not look catastrophic enough to explain the full failure by itself.
+   - training pseudo targets are structurally similar to val GT in duration and temporal continuity:
+     - train pseudo: `3067` videos, `10323` annotations, mean tracks/video `3.365830`, mean duration `21.661436`, multi-segment ratio `0.083212`
+     - val GT: `837` videos, `3719` annotations, mean tracks/video `4.443250`, mean duration `21.404679`, multi-segment ratio `0.065340`
+   - raw VideoCutLER on val also remains compact:
+     - `2679` tracks total across `837` videos
+     - max raw tracks/video `9`
+     - mean raw tracks/video `3.200717`
+   - because raw `C1` comes from the same pseudo-mask source family yet still outperforms refined `C2`, pure pseudo-label noise is not the best explanation for the recorded `S1 FAIL`.
+
+3. Matcher / target construction likely contributes to the failure.
+   - the Hungarian matcher uses class cost, box L1 cost, and GIoU cost, but no mask-overlap cost in matching:
+     - `third_party/VNext/projects/SeqFormer/seqformer/models/matcher.py:67-90`
+   - the active loss set is `['labels', 'boxes', 'masks']`; the available `loss_cardinality` exists in code but is not active:
+     - `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py:205-219`
+     - `third_party/VNext/projects/SeqFormer/seqformer/models/deformable_detr.py:281-293`
+   - in target preparation, per-frame `valid_id` is computed from `gt_ids != -1`, but only used to gate `clip_classes`; `valid` is not propagated into the matcher/loss path:
+     - `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py:321-337`
+   - under class-agnostic single-class training, class labels do not separate one object from another, so matching is effectively box-trajectory-dominant. If pseudo boxes are noisy, duplicate or unstable assignments are plausible.
+
+4. The dominant issue appears to be objective mismatch, specifically count/selection mismatch between training and inference that aligns directly with the `S1` fragmentation failure.
+   - active inference always selects the top `10` queries per video:
+     - `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py:351-356`
+     - `third_party/VNext/projects/SeqFormer/seqformer/seqformer.py:431-450`
+   - the final refined basis therefore emitted exactly `8370 = 837 x 10` tracks, with every val video receiving exactly `10` predictions.
+   - this does not reflect the training target distribution:
+     - train pseudo mean targets/video: `3.365830`
+     - only `3` training videos have exactly `10` targets
+     - `2817` training videos have only `1-5` targets
+   - the positive supervision density is very low relative to the `300` query bank:
+     - mean matched positives/video `= 3.365830`
+     - matched positive fraction of query slots `= 0.011219`
+   - yet no active cardinality loss corrects output count, and no confidence threshold prunes low-score predictions before the fixed top-10 export.
+   - the selected refined scores confirm that many emitted tracks are weak hypotheses:
+     - `36.8578%` of selected tracks score below `0.2`
+     - `70.4540%` score below `0.3`
+     - `86.1768%` score below `0.5`
+     - in `567 / 837` videos, the minimum selected score is below `0.2`
+   - the failure-case video `00818` is consistent with this mechanism:
+     - raw side has `5` candidate tracks and best IoU `0.948039`
+     - refined side exports `10` full-length tracks, all spanning frames `0-23`
+     - best refined IoU collapses to `0.014174`
+   - this pattern matches the recorded gate metrics:
+     - refined `fragmentation_per_gt_instance=0.892444` vs raw `0.031998`
+     - refined `over_segmentation_tendency=0.323474` vs raw `0.029847`
+     - refined `unmatched_gt_ratio=0.639150` vs raw `0.612261`
+
+Dominant-issue classification:
+- primary: objective mismatch
+- secondary: matcher / target-construction weakness
+- tertiary: supervision noise
+- not supported as primary: optimization failure
+
+Recovery planning recommendation:
+- Reopening `S1` directly under the existing record: no.
+  - the recorded `S1 FAIL` should remain fixed historical fact.
+- Introduce an explicit `S1` recovery subgate before any scientific progression restarts: yes.
+  - recommended label: `S1R` or equivalent explicitly documented recovery subgate
+  - purpose: diagnose and test the structure-side recovery hypothesis without rewriting the completed `S1` record
+
+Minimum next experiment before any new expensive training is approved:
+- run one bounded, no-training, instrumentation-only recovery diagnosis on the completed final checkpoint.
+- scope:
+  - keep the frozen `S1` comparator/evaluator plane unchanged for official judgment
+  - do not activate `S2`
+  - do not introduce semantics, attribution, or bag-free modules
+- required outputs from that diagnosis:
+  1. per-video all-query score rank curves before the fixed top-10 selection
+  2. matched-positive counts per sample / per decoder layer from the Hungarian assignment on the frozen pseudo-target training surface
+  3. duplicate-overlap diagnostics showing how many top-ranked queries attach to the same GT or pseudo target
+  4. appendix-only score-threshold sensitivity diagnostics on the existing final checkpoint to quantify how much fragmentation is caused by unconditional top-10 export
+- approval rule after this bounded diagnosis:
+  - only if the diagnosis confirms count/selection mismatch as the dominant cause should one new single-seed recovery training be considered
+  - the first approved recovery training should change only the bounded structure-side count/selection objective, not semantics or broader pipeline scope
+
+Bottom line:
+- the recorded `S1 FAIL` is best explained by a structural objective mismatch, not by obvious optimization collapse.
+- the strongest evidence is that the model learns enough to slightly improve over earlier refined tiers, but the active export path still emits `10` tracks for every val video despite training targets averaging only `3.37` tracks/video and despite `S1` rewarding low fragmentation.
+- the next step should therefore be a no-training recovery diagnosis subgate, not immediate retraining.

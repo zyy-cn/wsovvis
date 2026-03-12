@@ -1,0 +1,17 @@
+WS-OVVIS scientific comparator summary
+Timestamp: 20260311T220926Z
+Active scientific gate: P0
+Status: charter-frozen comparator matrix remains unchanged
+
+Comparator matrix frozen by `docs/scientific/P0_EXPERIMENTAL_CHARTER.md`:
+- `S1`: raw pseudo tube vs refined basis
+- `S2`: local tracklets vs global tracks
+- `S3`: semantic-carrier necessity comparator
+- `S4`: seen alignment vs held-out transfer
+- `S5`: aligned closed-world comparator vs bounded core open-world attribution
+- `S6`: bag-constrained vs bag-free full-vocabulary inference
+
+Comparator rule:
+- Codex may not silently replace comparators
+- comparator fairness remains governed by the scientific charter and the active scientific gate spec
+- `P0` requires the comparator matrix to be frozen, not experimentally executed

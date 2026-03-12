@@ -1,0 +1,45 @@
+WS-OVVIS scientific phase/gate check
+Timestamp: 20260311T235429Z
+Active scientific gate: S1 — Basis Superiority
+Status: INCONCLUSIVE
+
+Gate basis from authoritative docs:
+- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` freezes `S1` as the next scientific gate after `P0 PASS`
+- `docs/scientific/S1_BASIS_SUPERIORITY.md` defines `S1` as a structure-only raw-pseudo-tube vs refined-basis comparator gate
+- `docs/scientific/STATUS.md` now records `S1` as active
+
+Bounded S1 work completed in this loop:
+- restored the canonical raw VideoCutLER comparator `C1` on the frozen val split:
+  - [raw_mask_inventory_summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_mask_inventory_summary.json)
+  - [raw_val_summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_summary.json)
+- reran the exact same frozen evaluator plane unchanged against raw `C1` and historical refined `C2`:
+  - [evaluator_spec.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/evaluator_spec.json)
+  - [summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/summary.json)
+  - [comparator_table.md](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/comparator_table.md)
+  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/paired_worked_example.json)
+  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/failure_case_example.json)
+- recorded canonical remote validation at the intended commit:
+  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/remote_validation_record.md)
+
+Current fair pilot finding:
+- raw `C1` is stronger than historical refined `C2` on the structure primaries:
+  - `mean_best_iou`: `0.380341` vs `0.339383`
+  - `recall_at_0.5`: `0.387739` vs `0.353052`
+- historical refined `C2` also worsens `fragmentation_per_gt_instance`:
+  - `0.852111` vs raw `0.031998`
+- the paired worked example shows a case where refined sharply improves IoU but fragments one GT tube into three predicted fragments
+- the failure case shows a short GT where raw attains `0.955158` IoU and refined attains `0.0`
+
+Why S1 is now INCONCLUSIVE instead of BLOCKED:
+- comparator fairness is resolved because `C1` now exists and is non-empty on val
+- formal `S1 PASS` still cannot be claimed from this loop because the refined side is only historical pilot evidence
+- `docs/scientific/S1_BASIS_SUPERIORITY.md` requires at least one fresh canonical training-based comparator result for formal `S1 PASS`
+
+Smallest next valid step:
+- request explicit human approval to launch the already prepared fresh canonical SeqFormer retraining package
+- do not activate `S2`
+
+Out-of-scope in this loop:
+- `S2` activation
+- global-track, semantic, prototype/text-map, attribution, or bag-free modules
+- silently launching fresh SeqFormer training

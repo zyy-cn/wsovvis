@@ -1,0 +1,21 @@
+WS-OVVIS scientific sign-off status
+Timestamp: 20260311T235429Z
+Active scientific gate: S1
+Status: approval requested for first fresh canonical SeqFormer retraining run
+
+Recorded sign-off rules:
+- Codex restored the fair raw comparator `C1`, reran the unchanged frozen `S1` evaluator, and prepared the fresh canonical SeqFormer retraining package without launching it
+- this loop did not and may not auto-declare Scientific `PASS` for `S1`
+- formal `S1 PASS` still requires:
+  - the already restored fair canonical raw-vs-refined comparator surface on val
+  - at least one fresh canonical SeqFormer training-based comparator result
+  - human scientific sign-off after those requirements are met
+
+Current sign-off request:
+- the fair pilot comparator now exists and is evidence-backed:
+  - [summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/summary.json)
+  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/remote_validation_record.md)
+- the historical pilot does not support basis superiority, but it is not the formal frozen fresh-training result required by `S1`
+- explicit human approval should now be requested to launch the prepared fresh canonical training package:
+  - [fresh_canonical_training_package.md](/mnt/e/Code/wsovvis/codex/s1_pilot_20260311T220926Z/fresh_canonical_training_package.md)
+  - [fresh_canonical_training_package.json](/mnt/e/Code/wsovvis/codex/s1_pilot_20260311T220926Z/fresh_canonical_training_package.json)
