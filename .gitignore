@@ -9,6 +9,7 @@ data/
 runs/
 codex/
 __pycache__/
+docs/mainline/reports/
 
 weights
 data
