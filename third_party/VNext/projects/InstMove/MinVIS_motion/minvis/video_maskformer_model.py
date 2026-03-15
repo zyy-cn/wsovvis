@@ -147,15 +147,18 @@ class VideoMaskFormer_frame(nn.Module):
         self.window_inference = window_inference
         self.use_motion = use_motion
 
-        from motion_models.model_withImgR6 import Predictor
-        self.motion_pred_model = Predictor(100).to(self.device)
-        ckpt = torch.load('motion_model.pth')
-        new_ckpt = {}
-        for k,v in ckpt.items():
-            newk = k.replace('module.','')
-            new_ckpt[newk]=ckpt[k]
-        self.motion_pred_model.load_state_dict(new_ckpt)
-        self.motion_pred_model.eval()
+        self.motion_pred_model = None
+        if self.use_motion:
+            from motion_models.model_withImgR6 import Predictor
+
+            self.motion_pred_model = Predictor(100).to(self.device)
+            ckpt = torch.load('motion_model.pth', map_location=self.device)
+            new_ckpt = {}
+            for k, v in ckpt.items():
+                newk = k.replace('module.', '')
+                new_ckpt[newk] = ckpt[k]
+            self.motion_pred_model.load_state_dict(new_ckpt)
+            self.motion_pred_model.eval()
 
 
     @classmethod
