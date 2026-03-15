@@ -1,0 +1,15 @@
+{
+  "project_name": "WS-OVVIS",
+  "project_slug": "wsovvis",
+  "design_source": "docs/outline/WS_OVVIS_outline_v13_with_gates.tex",
+  "execution_source": "AGENTS.md + docs/mainline/*",
+  "initial_active_gate": "G0 - Authority switch and canonical environment inheritance",
+  "terminal_gate": "G7 - Canonical replay, evidence freeze, and terminal closure",
+  "remote_alias": "gpu4090d",
+  "remote_repo_dir": "/home/zyy/code/wsovvis_runner",
+  "remote_wrapper": "tools/remote_verify_wsovvis.sh",
+  "bootstrap_checker": "tools/check_canonical_runner_bootstrap_links.py --check",
+  "conda_env": "wsovvis",
+  "pythonpath_entry": "/home/zyy/code/wsovvis_runner/third_party/VNext",
+  "confirmation_round_required": false
+}

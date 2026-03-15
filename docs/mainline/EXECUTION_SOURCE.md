@@ -1,19 +1,18 @@
 # WS-OVVIS Execution Source
 
-This file is the compact execution-source summary for the repository.
+This file is a compact execution-source summary for the repository.
 
 ## What this replaces
-It replaces old workflow control documents, draft `docs/mainline_v9/*` packs, handoff notes, and historical task packs as the authority for active development decisions.
+It replaces old workflow control documents, handoff notes, and historical task packs as the authority for active development decisions.
 
 ## What this does not replace
-It does not replace the project's research/design source.
-The design source remains the v9 outline under `docs/outline/WS_OVVIS_outline_v9.tex`.
+It does not replace the project's design source (outline/spec/proposal). The design source remains the high-level research or product document.
 
 ## Current execution model
-- Design source: `docs/outline/WS_OVVIS_outline_v9.tex`
+- Design source: `docs/outline/WS_OVVIS_outline_v13_with_gates.tex` (authoritative design source for the privatized gate model)
 - Execution source: `docs/mainline/*`
 - Repo rules: `AGENTS.md`
 - Repeatable workflows: `.agents/skills/*`
 
 ## Mainline objective
-Under clip-level incomplete positive evidence `Y'(v)`, a class-agnostic video instance basis plus clip-level global tracks, DINO-only track semantics, seen visual prototypes, a class-level text map, and core open-world attribution should support bag-free open-vocabulary video instance inference without relying on the observed bag at test time.
+Under clip-level incomplete positive evidence Y'(v), prove that a frozen video-native class-agnostic basis, materialized query-trajectory and semantic-carrier banks, seen visual prototypes, a class-level text map, and coverage-aware open-world attribution are sufficient for bag-free text-conditioned open-vocabulary video instance inference without using the observed label bag at test time.

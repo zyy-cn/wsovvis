@@ -1,11 +1,11 @@
 ---
 name: mainline-supervisor
-description: Supervises one bounded WS-OVVIS mainline loop. Determines the active gate, proposes or executes the smallest next valid step, triggers acceptance evaluation, and writes results back to reports and status files.
+description: Supervises one bounded mainline loop for a project using this kit. Determines the active gate, proposes or executes the smallest next valid step, triggers acceptance evaluation, and writes results back to reports and status files.
 ---
 
-# WS-OVVIS Mainline Supervisor
+# Mainline Supervisor
 
-Use this skill when the repository is operating in document-driven automation mode and you need to advance the mainline by one controlled step.
+Use this skill when a repository is operating in document-driven automation mode and you need to advance the mainline by one controlled step.
 
 ## Required reading order
 1. `AGENTS.md`
@@ -20,10 +20,9 @@ Use this skill when the repository is operating in document-driven automation mo
 10. `docs/mainline/FAILURE_PLAYBOOK.md`
 11. `docs/mainline/ENVIRONMENT_AND_VALIDATION.md`
 12. `docs/mainline/CODEBASE_MAP.md`
-13. `docs/mainline/STAGEB_INTERFACE_CONTRACT.md`
-14. `docs/mainline/SUPERVISOR_STATE_MACHINE.md`
-15. `docs/mainline/SUPERVISOR_DEPLOYMENT.md`
-16. `docs/runbooks/mainline_phase_gate_runbook.md`
+13. `docs/mainline/SUPERVISOR_STATE_MACHINE.md`
+14. `docs/mainline/SUPERVISOR_DEPLOYMENT.md`
+15. `docs/runbooks/mainline_phase_gate_runbook.md`
 
 ## Purpose
 This skill is a **bounded supervisor**, not an unrestricted autonomous researcher.
@@ -41,9 +40,8 @@ Its job is to:
 - Never enable default-off modules unless the documents explicitly promote them.
 - Never introduce new algorithmic mechanisms during gate plumbing unless a targeted validation failure proves a minimal scoped fix is required.
 - Prefer canonical remote validation when local execution is blocked or non-canonical.
-- During `G0`, prioritize authority-switch and environment inheritance verification over algorithmic coding.
+- During G0, prioritize environment inheritance verification over any algorithm coding.
 - When terminal mode is active, stop by default and allow only bounded terminal revalidation.
-- `G7` is the terminal gate for this control plane.
 
 ## Output requirements
 For each invocation, produce:

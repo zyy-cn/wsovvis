@@ -26,6 +26,7 @@ def add_seqformer_config(cfg):
     cfg.MODEL.SeqFormer.GIOU_WEIGHT = 2.0
     cfg.MODEL.SeqFormer.L1_WEIGHT = 5.0
     cfg.MODEL.SeqFormer.CLASS_WEIGHT = 2.0
+    cfg.MODEL.SeqFormer.CARDINALITY_WEIGHT = 0.0
     cfg.MODEL.SeqFormer.DEEP_SUPERVISION = True
     cfg.MODEL.SeqFormer.MASK_STRIDE = 4
     cfg.MODEL.SeqFormer.MATCH_STRIDE = 4

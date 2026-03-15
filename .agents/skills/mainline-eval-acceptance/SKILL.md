@@ -1,9 +1,9 @@
 ---
 name: mainline-eval-acceptance
-description: Evaluate the latest WS-OVVIS implementation or experiment result against the project-private acceptance contract and decide PASS, FAIL, INCONCLUSIVE, or BLOCKED.
+description: Evaluate the latest implementation or experiment result against the project-private acceptance contract and decide PASS, FAIL, INCONCLUSIVE, or BLOCKED.
 ---
 
-# WS-OVVIS Evaluate Acceptance
+# Mainline Evaluate Acceptance
 
 Use this skill after a coding or experiment step.
 
@@ -14,8 +14,7 @@ Use this skill after a coding or experiment step.
 4. `docs/mainline/METRICS_ACCEPTANCE.md`
 5. `docs/mainline/EVIDENCE_REQUIREMENTS.md`
 6. `docs/mainline/FAILURE_PLAYBOOK.md`
-7. `docs/mainline/ENVIRONMENT_AND_VALIDATION.md`
-8. any files, logs, test results, metrics, worked examples, or evidence reports produced by the current step
+7. any files, logs, test results, metrics, worked examples, or evidence reports produced by the current step
 
 ## Your task
 Return a concise structured judgment with:

@@ -15,16 +15,4 @@
 Move to the next gate only after the current gate has an evidence-backed `PASS`.
 
 ## Terminal rule
-If the accepted terminal gate `G7` is reached, stop and enter terminal-mainline mode.
-
-## Failure rule
-If the current gate does not pass:
-- use `FAILURE_PLAYBOOK.md`
-- do not open default-off branches unless the docs explicitly allow it
-
-## First-run bootstrap
-Because the repository has mature code but no active working-tree control plane, the first run starts at `G0`:
-- verify control-plane authority
-- verify environment inheritance
-- verify codebase map and Stage B contract
-- only then promote to the first evidence-backed algorithmic gate
+If the accepted terminal gate is reached, stop and enter terminal-mainline mode.

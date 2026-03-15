@@ -1,132 +1,63 @@
 # WS-OVVIS Mainline Plan
 
 ## 1. Purpose
-This file is the source of truth for the current automation mainline.
+This file is the source of truth for the current project automation mainline.
 
 Main claim to prove:
 
-> Under clip-level incomplete positive evidence `Y'(v)`, a class-agnostic video instance basis plus clip-level global tracks, DINO-only track semantics, seen visual prototypes, a class-level text map, and core open-world attribution should support bag-free open-vocabulary video instance inference without relying on the observed bag at test time.
+> Under clip-level incomplete positive evidence Y'(v), prove that a frozen video-native class-agnostic basis, materialized query-trajectory and semantic-carrier banks, seen visual prototypes, a class-level text map, and coverage-aware open-world attribution are sufficient for bag-free text-conditioned open-vocabulary video instance inference without using the observed label bag at test time.
 
 The automation system must prioritize proving this claim over expanding the system.
-A gate may only receive `PASS` when its acceptance contract and its required evidence pack are both satisfied.
 
 ## 2. Mainline phases and gates
+### G0 — Authority switch and canonical environment inheritance
+Goal: install the privatized control plane against the actual repository, verify the canonical wrapper/bootstrap contract, and record the first evidence-backed repository state.  
+Authoritative code paths: `tools/run_mainline_loop.py`, `tools/check_canonical_runner_bootstrap_links.py`, `tools/remote_verify_wsovvis.sh`, `tests/test_run_mainline_loop_v1.py`.  
+Exit intent: the repo can run one bounded supervisor loop and the canonical environment facts are explicitly recorded.
 
-### G0 — v9 control-plane bootstrap and inheritance verification
-Goal:
-- establish `docs/mainline/*` as the repository execution source without changing the interaction model
-- verify that the control docs match the real repository and preserve the inherited canonical environment semantics
+### G1 — Weak-label protocol contract for `Y'(v)`
+Goal: prove the clip-level incomplete-positive-evidence protocol is deterministic, reviewable, and aligned with the outline’s training assumption.  
+Authoritative code paths: `tools/build_wsovvis_labelset_protocol.py`, `tests/test_build_wsovvis_labelset_protocol.py`.  
+Exit intent: reproducible protocol artifacts exist with a worked example and manifest.
 
-Exit criteria:
-- `ENVIRONMENT_AND_VALIDATION.md` matches the real environment
-- `CODEBASE_MAP.md` matches the real repository layout, current reusable anchors, and planned v9 entrypoints
-- `STAGEB_INTERFACE_CONTRACT.md` matches the Stage B to v9 artifact transition plan
-- the repository can be interpreted unambiguously under this control plane
-- the minimum G0 evidence pack exists
+### G2 — Frozen video-native basis generator integration and raw-structure evidence
+Goal: prove the DINOv2-VideoMask2Former path can train/export stable non-empty query trajectories and collect the structure-only S1 evidence bundle at original thresholds.  
+Authoritative code paths: `train_seqformer_pseudo.py`, `configs/seqformer_pseudo_s1_canonical.yaml`, `tools/run_s1_basis_superiority_eval.py`, `tests/test_s1_basis_superiority_v1.py`.  
+Exit intent: the raw basis path is integrated, exportable, and scientifically reviewable without activating refinement branches.
 
-### G1 — Clip-level protocol and artifact-contract alignment
-Goal:
-- fix the clip-level weak-supervision protocol `Y'(v)`
-- fix the artifact contracts needed by the v9 mainline
+### G3 — Query-Trajectory Bank and Semantic Carrier Bank materialization
+Goal: prove query trajectories and trajectory-level DINO carriers are durable, replayable repository artifacts rather than transient tensors.  
+Authoritative code paths: `tools/build_global_track_bank_v9.py`, `tools/extract_track_dino_features_v9.py`, `tests/test_global_track_bank_v9.py`, `tests/test_track_dino_feature_v9.py`.  
+Exit intent: later semantic steps can be replayed from bank artifacts without rerunning the front-end basis generator.
 
-Required focus:
-- `tools/build_wsovvis_labelset_protocol.py`
-- protocol tests and contract documentation
-- v9 artifact contract definitions
+### G4 — Prototype bank and class-level text map closure
+Goal: prove seen-class visual prototypes and the constrained class-level text map can be initialized, serialized, and reloaded from bank-backed inputs.  
+Authoritative code paths: `tools/init_prototype_bank_v9.py`, `tools/train_text_map_v9.py`, `tests/test_prototype_bank_v9.py`, `tests/test_text_map_v9.py`.  
+Exit intent: prototype and text-map states exist with manifests and minimal retrieval/alignment evidence.
 
-Exit criteria:
-- clip-level protocol generation checks pass
-- v9 artifact contracts are documented and minimally parseable
-- window-level `Y'(w)` is not the mainline supervision object
-- the minimum G1 evidence pack exists
+### G5 — Coverage-aware open-world attribution closure
+Goal: prove the bounded `Y'(v) + bg + unk` attribution policy operates on the bank-backed semantic carriers and emits the hidden-positive diagnostics required by the outline.  
+Authoritative code paths: `tools/train_openworld_core_v9.py`, `tests/test_openworld_core_v9.py`, `tests/test_g5_bounded_policy_v1.py`, `tests/test_ws_metrics_reporting_v1.py`, `tests/test_stage_d_ws_metrics_adapter_v1.py`.  
+Exit intent: attribution is operational, explicit unknown-foreground handling exists, and ws-metric reporting is durable.
 
-### G2 — Class-agnostic instance basis closure
-Goal:
-- keep the structure layer independent from the semantic bridge
-- obtain local tracklets from pseudo tubes and class-agnostic SeqFormer training/inference
+### G6 — Bag-free inference and evaluation closure
+Goal: prove test-time inference runs without the observed label bag and produces the bounded evaluation bundle for the benchmark-scoped open-vocabulary claim.  
+Authoritative code paths: `tools/run_bagfree_eval_v9.py`, `tests/test_bagfree_inference_v9.py`.  
+Exit intent: the bag-free path is explicitly proven in artifacts, not merely assumed.
 
-Exit criteria:
-- local tracklet export is identifiable, contract-stable, and smoke-runnable
-- structure-side diagnostics exist
-- the minimum G2 evidence pack exists
+### G7 — Canonical replay, evidence freeze, and terminal closure
+Goal: perform the canonical replay on the intended commit, freeze the final evidence bundle, and switch the mainline into bounded terminal revalidation mode.  
+Authoritative code paths: `tools/remote_verify_wsovvis.sh`, `tools/run_mainline_loop.py`, `tools/stage_d_reporting_snapshot.py`, `tests/test_stage_d11_canonical_replay_v1.py`, `tests/test_stage_d_reporting_snapshot_v1.py`, `tests/test_stage_d13_ci_quick_pipeline_v1.py`.  
+Exit intent: the accepted mainline is frozen with evidence-backed canonical PASS and no further algorithm development is opened by default.
 
-### G3 — Clip-level global track bank closure
-Goal:
-- move from local tracklets to a fixed clip-level global track bank
-
-Default policy:
-- linking uses overlap IoU + local-query consistency as primary signals
-- semantics does not dominate track structure
-
-Exit criteria:
-- global track bank can be built offline and reloaded deterministically
-- stitching diagnostics exist
-- the minimum G3 evidence pack exists
-
-### G4 — DINO-only track semantic carrier closure
-Goal:
-- establish `z_tau` as the only mainline semantic carrier
-- compute track objectness `o_tau`
-
-Exit criteria:
-- a track semantic cache exists and is stable
-- `z_tau` and `o_tau` are available for downstream consumption
-- mixed Stage-C representation no longer defines the active mainline path
-- the minimum G4 evidence pack exists
-
-### G5 — Seen visual prototypes and class-level text map
-Goal:
-- construct seen visual prototypes in DINO space
-- train the class-level text map `A`
-- produce mapped text prototypes for attribution and inference
-
-Exit criteria:
-- prototype bank exists and is stable
-- mapped text prototype cache exists and is consumable
-- deterministic pseudo text-prototype cache is not the active mainline backend
-- the minimum G5 evidence pack exists
-
-### G6 — Core open-world attribution
-Goal:
-- train the v9 core attribution path on `Y'(v) + bg + unk`
-
-Required evidence hierarchy:
-1. closed-world comparator on the same protocol
-2. v9 core open-world attribution without optional enhancements
-3. hidden-positive evidence under the core path
-4. optional enhancement only if required by the failure playbook
-
-Exit criteria:
-- acceptance in `METRICS_ACCEPTANCE.md` for the active attribution gate is met
-- the minimum G6 evidence pack exists
-
-### G7 — Bag-free inference and terminal mainline closure
-Goal:
-- produce full-vocabulary bag-free inference using the accepted v9 core path
-- evaluate AP / HPR / UAR / robustness under canonical validation
-
-Exit criteria:
-- bag-free inference is functioning
-- canonical evaluation evidence is present
-- terminal acceptance is met
-- the minimum G7 evidence pack exists
-
-Terminal rule:
-- the documented mainline ends at `G7`
-- when `G7` has an evidence-backed `PASS`, the supervisor must enter terminal-mainline mode
-- no further gate activates unless the authoritative docs themselves are updated
+Each gate must define both:
+- its acceptance contract in `METRICS_ACCEPTANCE.md`, and
+- its minimum evidence pack in `EVIDENCE_REQUIREMENTS.md`.
 
 ## 3. Default-off research branches
-These are not part of the mainline unless `STATUS.md` explicitly activates them:
-- prototype EM / momentum refresh
-- candidate retrieval
-- warm-up BCE
-- temporal consistency
-- unknown fallback
-- one-round quality-aware refinement
-- any multi-round continuation
-- scenario/domain-missing protocol
-- unrestricted or held-out text expansion
+- Threshold-scan or low-confidence teacher-surface branches may open only after `G2` documents a raw-threshold failure against the S1 non-inferiority evidence bundle.
+- Stronger semantic defenses such as duplicate-aware prototype refresh or uncertain-foreground filtering may open only after `G5` shows a specific attribution failure they directly target.
+- Any unrestricted text, prompt-ensemble, or cross-dataset expansion branch stays outside the mainline unless the user explicitly opens new scope after `G7`.
 
 ## 4. Exploration policy
 Exploration is allowed only when:

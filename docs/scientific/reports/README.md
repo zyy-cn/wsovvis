@@ -19,6 +19,12 @@ These support the decision of whether a failed formal gate may be reopened under
 - `comparator_latest.txt`
 - `signoff_latest.txt`
 
+## Historical overlay handling
+- Pre-refined strict-overlay `S1 FAIL` and `S1R` materials remain valid only as historical evidence.
+- Historical overlay materials belong under `archive/` or must be explicitly labeled historical.
+- Historical overlay materials must not replace the active refined `*_latest` report surfaces.
+- `*_latest` must always describe the currently authoritative refined-overlay gate only.
+
 ## Policy
 - every scientific loop should also write timestamped copies under `archive/`
 - scientific reports and engineering reports must remain separate

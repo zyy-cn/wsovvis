@@ -1,19 +1,12 @@
 WS-OVVIS scientific acceptance evaluation
-Timestamp: 20260312T054333Z
-Active scientific gate: S1
-Acceptance judgment: FAIL criteria satisfied
-Evidence judgment: complete_final_fresh_result
-Final status: FAIL
+Timestamp: 20260314T003011Z
+Recorded scientific gate: refined S1 — Basis Utility
+Recorded route: Route A — direct superiority strengthening
+Acceptance judgment: formal refined S1 PASS preserved; fresh exclusion-policy A2 relaunch completed; Route A full-scale comparator exists but is aggregate-negative
+Evidence judgment: the completed full-scale Route A comparator does not support direct-superiority strengthening and does not alter the formal Route B PASS
+Final status: PASS preserved; diagnostic exclusion-policy Route A completion recorded as negative strengthening evidence
 
-Later scientific gate activation allowed: no
-Reason:
-- the fair canonical comparator exists on the frozen val split and remains unchanged
-- the required completed fresh canonical training-based comparator now exists
-- the final fresh refined basis does not satisfy the `S1` superiority rule against raw:
-  - raw exceeds final refined on `mean_best_iou`
-  - raw exceeds final refined on `recall_at_0.5`
-  - final refined clearly worsens `fragmentation_per_gt_instance`
-- the final qualitative evidence does not overturn the negative table:
-  - the paired example on video `00411`, GT tube `1887` strongly favors refined
-  - the failure case on video `00818`, GT tube `3636` strongly favors raw
-- under `docs/scientific/S1_BASIS_SUPERIORITY.md`, the completed fresh result therefore supports `FAIL`, not `PASS` or `INCONCLUSIVE`
+Recorded formal scientific state:
+- refined `S1 — Basis Utility` remains formal `PASS` via `Route B — utility without direct dominance`
+- the authoritative formal PASS packet remains unchanged at `codex/s1_routeb_closure_20260312T130255Z/`
+- this loop did not reopen Route B and did not activate `S2`

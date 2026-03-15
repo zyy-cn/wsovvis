@@ -150,6 +150,7 @@ class SeqFormer(nn.Module):
         giou_weight = cfg.MODEL.SeqFormer.GIOU_WEIGHT
         l1_weight = cfg.MODEL.SeqFormer.L1_WEIGHT
         class_weight = cfg.MODEL.SeqFormer.CLASS_WEIGHT
+        cardinality_weight = cfg.MODEL.SeqFormer.CARDINALITY_WEIGHT
         deep_supervision = cfg.MODEL.SeqFormer.DEEP_SUPERVISION
         # no_object_weight = cfg.MODEL.SeqFormer.NO_OBJECT_WEIGHT
 
@@ -205,6 +206,8 @@ class SeqFormer(nn.Module):
         weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou":giou_weight}
         weight_dict["loss_mask"] = mask_weight
         weight_dict["loss_dice"] = dice_weight
+        if float(cardinality_weight) > 0.0:
+            weight_dict["cardinality_error"] = float(cardinality_weight)
 
         if deep_supervision:
             aux_weight_dict = {}
@@ -214,6 +217,8 @@ class SeqFormer(nn.Module):
 
 
         losses = ['labels', 'boxes', 'masks']
+        if float(cardinality_weight) > 0.0:
+            losses.append('cardinality')
         
 
         self.criterion = SetCriterion(self.num_classes, matcher, weight_dict, losses, 

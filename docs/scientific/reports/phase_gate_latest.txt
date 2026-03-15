@@ -1,54 +1,35 @@
 WS-OVVIS scientific phase/gate check
-Timestamp: 20260312T054333Z
-Active scientific gate: S1 — Basis Superiority
-Status: FAIL
+Timestamp: 20260314T003011Z
+Recorded scientific gate: refined S1 — Basis Utility
+Recorded formal state: PASS via Route B preserved
+Recorded diagnostic route: Route A — direct superiority strengthening
+Status: fresh exclusion-policy A2 full-scale relaunch completed; full-scale comparator produced; aggregate outcome negative; S2 inactive
 
-Gate basis from authoritative docs:
-- `docs/scientific/P0_EXPERIMENTAL_CHARTER.md` freezes `S1` as the active post-`P0` scientific gate
-- `docs/scientific/S1_BASIS_SUPERIORITY.md` defines `S1` as a structure-only raw-pseudo-tube vs refined-basis comparator gate
-- `docs/scientific/STATUS.md` records `S1` as active and keeps `S2` inactive unless `S1` becomes evidence-backed `PASS`
+Formal refined S1 authority preserved unchanged:
+- authoritative PASS packet root: `codex/s1_routeb_closure_20260312T130255Z/`
+- refined `S1` remains formal `PASS` via `Route B — utility without direct dominance`
+- Route B remains closed
+- `S2` was not activated in this loop
 
-Bounded S1 work completed in this loop:
-- allowed the approved full fresh canonical SeqFormer training run to complete unchanged:
-  - [launch_context.txt](/mnt/e/Code/wsovvis/codex/s1_fresh_canonical_20260312T013107Z/launch_context.txt)
-  - [train.pid](/mnt/e/Code/wsovvis/codex/s1_fresh_canonical_20260312T013107Z/train.pid)
-- exported the final refined basis from `model_final.pth` under the exact same frozen S1 eval surface:
-  - [seqformer_pseudo_s1_final_model.yaml](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/seqformer_pseudo_s1_final_model.yaml)
-  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/remote_validation_record.md)
-  - [summary.json](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/summary.json)
-  - [comparator_table.md](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/comparator_table.md)
-  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/paired_worked_example.json)
-  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/failure_case_example.json)
+Completed fresh exclusion-policy packet:
+- packet root: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/`
+- policy note: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/policy_note_mixed_resolution_exclusion.md`
+- filtered surface integrity report: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/filtered_surface_integrity_report.json`
+- comparator summary: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/summary.json`
+- comparator table: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/comparator_table.md`
+- worked example: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/paired_worked_example.json`
+- failure example: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/failure_case_example.json`
 
-Final fresh comparator finding:
-- raw `C1` still exceeds final refined `C2` on both structure primaries:
-  - `mean_best_iou`: `0.380341` vs `0.344887`
-  - `recall_at_0.5`: `0.387739` vs `0.360850`
-- final refined `C2` still worsens `fragmentation_per_gt_instance`:
-  - `0.892444` vs raw `0.031998`
-- final refined is slightly better than both earlier refined tiers on the structure primaries:
-  - vs historical: `0.344887` vs `0.339383`
-  - vs interim checkpoint: `0.344887` vs `0.342388`
-- final refined is slightly better than the interim checkpoint on fragmentation:
-  - `0.892444` vs `0.913955`
-- the final paired worked example is favorable:
-  - video `00411`, GT tube `1887`: raw best IoU `0.009661886162709138`; final refined best IoU `0.8813725001100084`
-- the final failure case remains strongly unfavorable:
-  - video `00818`, GT tube `3636`: raw best IoU `0.9480394036277549`; final refined best IoU `0.014173633924235264`
+Filtered-surface integrity:
+- original train video count: `3078`
+- excluded train video count: `5`
+- filtered train video count: `3073`
+- excluded IDs match authorized list: `True`
 
-Why S1 is now FAIL:
-- comparator fairness is resolved
-- the required fresh canonical training-based comparator now exists in completed final form
-- the refined basis does not outperform raw on the primary structure criteria
-- fragmentation clearly worsens
-- the favorable paired example does not overturn the negative full table, and the failure case contradicts the superiority claim
+Primary comparator outcome:
+- `mean_best_iou`: `0.380341 -> 0.348014` (`-0.032327`)
+- `recall_at_0.5`: `0.387739 -> 0.364345` (`-0.023394`)
+- `fragmentation_per_gt_instance`: `0.031998 -> 0.805055` (`+0.773057`)
 
 Smallest next valid step:
-- none inside active scientific progression; `S2` must remain inactive
-- preserve the historical, interim, and final S1 tiers as the complete record for this failed gate
-
-Out-of-scope in this loop:
-- `S2` activation
-- comparator redefinition
-- semantic, prototype/text-map, attribution, or bag-free modules
-- reopening or replacing the completed fresh canonical run
+- record this completed Route A full-scale result as negative strengthening evidence inside refined `S1`, keep Route B formal PASS unchanged, and do not activate `S2` from this outcome

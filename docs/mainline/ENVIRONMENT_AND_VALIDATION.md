@@ -1,79 +1,57 @@
 # WS-OVVIS Environment and Validation
 
-This file defines the canonical validation model for the repository.
+This file is the authoritative environment contract for the project-private adaptation.
 
-## 1. Canonical validation
-- Local checks are informative.
-- Canonical PASS requires the project-approved remote validation model when the gate contract says canonical evidence is required.
-- A remote PASS counts only if remote `HEAD == intended local commit`.
+## 1. Split execution model
+### Local workstation / WSL
+Role:
+- control plane
+- edit code
+- inspect diffs
+- run best-effort local checks
+- prepare commits and prompts
 
-## 2. Canonical remote model
-Use the project-approved canonical path:
+### Canonical remote runner
+Role:
+- canonical validation plane
+- canonical pytest/smoke results
+- canonical replay for environment-sensitive checks
+
+## 2. Canonical remote target
+Defaults for this profile:
 - remote host alias: `gpu4090d`
-- canonical runner repo dir: `/home/zyy/code/wsovvis_runner`
-- wrapper: `bash tools/remote_verify_wsovvis.sh`
-- origin clone URL: `git@github.com:zyy-cn/wsovvis.git`
-- push-route alias: `github-via-gpu`
-- push-route URL (from local git config): `git@github-via-gpu:zyy-cn/wsovvis.git`
+- canonical remote repo dir: `/home/zyy/code/wsovvis_runner`
 
-## 3. Bootstrap preflight
-Before canonical remote validation when live links or artifacts matter:
-- confirm wrapper availability
-- confirm canonical runner repo dir
-- run `python tools/check_canonical_runner_bootstrap_links.py --check` when required
-- confirm intended local commit is reachable remotely
+Hard rules:
+- do not create side runner directories for canonical validation
+- do not use `git worktree` as a canonical runner substitute unless the project-private docs explicitly authorize it
 
-The current bootstrap-link checker expects these managed links under the runner. These are project-managed live links inherited from the sibling `wsovvis_live` checkout:
-- `third_party/CutLER -> ../../wsovvis_live/third_party/CutLER`
-- `third_party/dinov2 -> ../../wsovvis_live/third_party/dinov2`
-- `runs -> ../wsovvis_live/runs`
-- `weights -> ../wsovvis_live/weights`
-- `data -> ../wsovvis_live/data`
+## 3. Canonical validation wrapper
+Preferred canonical wrapper:
+- `tools/remote_verify_wsovvis.sh`
 
-Branch policy:
-- any newly created branch that is intended to run on the canonical remote runner must execute `python tools/check_canonical_runner_bootstrap_links.py --check` on the remote runner before its first bounded loop, before any canonical replay claim, and before any PASS claim that depends on remote evidence
-- if the checker reports `MISSING`, `BROKEN`, `WRONG_TARGET`, or `SKIPPED`, classify the loop as `BLOCKED` and repair the managed links before continuing
-- do not assume links created on one branch remain valid for another fresh or reset runner checkout; recheck on the remote runner whenever a new branch is first deployed there
+This wrapper is the default canonical remote entrypoint.
+Do not silently replace it with ad hoc ssh execution and still call the result canonical.
 
-## 4. Environment activation
-The canonical remote environment should use the project-approved recipe:
+## 4. Commit-consistency rule
+A remote validation PASS counts only if:
+- the local intended commit hash is recorded, and
+- the remote checked-out `HEAD` equals that intended commit.
+
+If remote validation ran on a stale or different commit, the result is informational only.
+
+## 5. Canonical environment activation recipe
+The canonical remote shell should be able to execute the following sequence or an equivalent project-approved form:
+
 ```bash
-source ~/software/miniconda3/etc/profile.d/conda.sh
+source $HOME/software/miniconda3/etc/profile.d/conda.sh
 conda activate wsovvis
 export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}
 ```
 
-## 5. Canonical invocation pattern
-A canonical run should record the exact wrapper invocation, for example:
-```bash
-bash tools/remote_verify_wsovvis.sh \
-  --remote gpu4090d \
-  --repo-dir /home/zyy/code/wsovvis_runner \
-  --branch <current-branch> \
-  --env-cmd "source ~/software/miniconda3/etc/profile.d/conda.sh && conda activate wsovvis && export PYTHONPATH=/home/zyy/code/wsovvis_runner/third_party/VNext:${PYTHONPATH:-}" \
-  --cmd "<gate-specific verification command>" \
-  --clone-url git@github.com:zyy-cn/wsovvis.git \
-  --allow-suspicious-repo-dir
-```
+## 6. Push route constraints
+If direct Git push is unreliable, use the project-approved SSH route, such as:
+- `github-via-gpu`
 
-## 6. Result classification
-Classify results as:
-- `canonical`
-- `informational`
-- `blocked`
-- `inconclusive`
-
-Do not classify wrapper, environment, push-route, bootstrap-link, or remote-HEAD mismatches as algorithmic failure.
-
-## 7. Gate-to-validation expectations
-- `G0` and some `G1` work may rely on local checks plus environment verification.
-- `G2`-`G7` should use canonical validation when a PASS claim depends on repository-integrated evidence.
-- terminal PASS at `G7` requires canonical evidence.
-
-## 8. Evidence-pack interaction
-When canonical evidence is required, the evidence pack must record:
-- intended local commit
-- observed remote `HEAD`
-- exact remote command or wrapper invocation
-- canonical output artifact or report locations
-- whether the quantitative and visual evidence was produced from the canonical run or from an informative local run
+## 7. Bootstrap preflight
+Check the live links or directories listed in the project-private bootstrap manifest before canonical replay when required.

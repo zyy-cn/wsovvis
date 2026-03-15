@@ -10,6 +10,7 @@ runs/
 codex/
 __pycache__/
 docs/mainline/reports/
+docs/scientific/reports/
 
 weights
 data

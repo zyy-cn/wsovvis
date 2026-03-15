@@ -1,150 +1,52 @@
 # WS-OVVIS Metrics and Acceptance
 
-This file defines gate evaluation semantics for the mainline.
-A gate cannot receive `PASS` unless both the acceptance contract and the required evidence pack are complete.
-See `EVIDENCE_REQUIREMENTS.md` for evidence-pack requirements.
+This file defines gate-level acceptance for the mainline.
 
 ## 1. Mainline metric priority
 Primary metrics:
-- LV-VIS `mAP`, `AP_base`, `AP_novel`
-- hidden-positive metrics: `HPR`, `UAR`
-- robustness summary: `AURC`
-- weak-supervision coverage: `SCR`
+- raw-basis structure metrics at original thresholds: `mean_best_iou`, `recall@0.5`, `fragmentation_per_gt_instance`, `predicted_tracks_total`
+- bank durability / replay consistency for query trajectories and semantic carriers
+- prototype/text-map alignment indicators sufficient to show constrained class-level mapping is operational
+- weak-supervision metrics: `SCR`, missing-rate curve, `AURC`, and when applicable `HPR` / `UAR`
+- bag-free evaluation metrics and explicit bag-free path proof for the benchmark-scoped OV inference claim
 
 Secondary / supporting metrics:
-- local-tracklet counts, duration, and filtering-retention stats
-- stitching success and fragmentation diagnostics
-- semantic-cache coverage and objectness distributions
-- prototype-bank coverage and text-map alignment metrics
-- allocation diagnostics across known / background / unknown channels
-- qualitative visualizations and worked-example traces
+- schema completeness and manifest consistency
+- non-empty export counts, deterministic IDs, and qualitative worked-example integrity
+- remote commit-consistency and wrapper/bootstrap health for canonical PASS
 
 ## 2. Gate acceptance policy
-
 ### G0
-Acceptance contract:
-- the control docs are internally consistent,
-- the real repository can be mapped to the control plane,
-- the authority-switch patch scope is identifiable,
-- the active-gate interpretation under the docs is unambiguous.
-
-Evidence minimum:
-- dry-run or equivalent control-plane resolution output,
-- authority-chain comparison,
-- one worked example showing how the gate is resolved from the docs.
+Pass only when the adapted control plane is deployed, `python tools/run_mainline_loop.py --dry-run` succeeds, wrapper/checker presence is recorded, and the canonical environment facts needed for future replay are explicitly captured. Missing remote replay evidence keeps `G0` at `INCONCLUSIVE` unless the gate was scoped as local-only bootstrap documentation.
 
 ### G1
-Acceptance contract:
-- clip-level `Y'(v)` protocol generation is defined and testable,
-- artifact contracts are documented and parseable,
-- the mainline no longer depends on window-level `Y'(w)`.
-
-Evidence minimum:
-- actual `Y'(v)` statistics,
-- full-vs-observed worked example(s),
-- contract readback proof for the declared artifacts.
+Pass only when the weak-label protocol builder produces reproducible output + manifest artifacts with parameters, counts, and one worked example, and `tests/test_build_wsovvis_labelset_protocol.py` is green in the chosen validation mode.
 
 ### G2
-Acceptance contract:
-- the class-agnostic basis path is structurally runnable,
-- local-tracklet artifacts are identifiable and contract-stable,
-- structure-side diagnostics exist.
-
-Evidence minimum:
-- local-tracklet count/duration/filtering statistics,
-- pseudo-tube to local-tracklet worked example,
-- structure visualizations.
+Pass only when the DINOv2 basis path is integrated, non-empty query-trajectory export is demonstrated, and the S1 structure-only comparator bundle exists at original thresholds. A raw path that exports but lacks the comparator evidence is `INCONCLUSIVE`, not `PASS`.
 
 ### G3
-Acceptance contract:
-- clip-level global-track-bank construction is deterministic enough for downstream reuse,
-- linking remains structure-dominant,
-- stitching diagnostics exist.
-
-Evidence minimum:
-- stitching success/fragmentation statistics,
-- score-matrix-to-merge worked example,
-- global-track coverage visualization.
+Pass only when Query-Trajectory Bank and Semantic Carrier Bank artifacts are materialized with stable IDs, manifests, replayable paths, and an explicit demonstration that later semantic steps can consume them without rerunning the basis generator.
 
 ### G4
-Acceptance contract:
-- `z_tau` is available as the mainline semantic carrier,
-- `o_tau` is available or derivable,
-- semantic-cache artifacts are stable enough for downstream use,
-- mixed Stage-C semantics no longer define the active mainline path.
-
-Evidence minimum:
-- semantic-cache coverage statistics,
-- objectness distribution,
-- one per-track DINO extraction and aggregation worked example,
-- crop/pooling provenance visualization.
+Pass only when prototype-bank and text-map states are serialized with manifests, reload cleanly, and the constrained class-level mapping shows reviewable alignment evidence from bank-backed inputs.
 
 ### G5
-Acceptance contract:
-- seen visual prototypes exist,
-- the class-level text map `A` is trainable and consumable,
-- mapped text prototypes are available for downstream attribution and inference,
-- deterministic pseudo text-prototype cache is not the active backend.
-
-Evidence minimum:
-- prototype-bank coverage metrics,
-- text-map alignment metrics,
-- one class-level worked example,
-- prototype/text-map visualization.
+Pass only when coverage-aware attribution runs on the documented input contract, emits bounded unknown-foreground / background behavior, and produces the ws-metric bundle needed to judge hidden-positive handling.
 
 ### G6
-Acceptance contract:
-`PASS` only if all are true:
-- the v9 core open-world variant is functioning,
-- `HPR` improves relative to the closed-world comparator,
-- `UAR` improves relative to the closed-world comparator,
-- positive-evidence coverage is not invalidated,
-- standard metrics (`mAP` or `AURC`) are not catastrophically worse,
-- the active result comes from the bounded core path rather than a default-off enhancement.
-
-Evidence minimum:
-- known/background/unknown allocation statistics,
-- clip-level attribution worked example with cost matrix and assignment summary,
-- aligned closed-world comparison,
-- hidden-positive evidence (`HPR`, `UAR`) or an explicit evidence-gap note.
-
-`INCONCLUSIVE` if:
-- the core logic runs but hidden-positive metrics are missing,
-- hidden-positive metrics are present but evidence is too noisy to decide,
-- the comparison setup is not protocol-aligned,
-- optional enhancements were required before the core path itself was understood,
-- evidence is incomplete even though the contract looks promising.
-
-`FAIL` if:
-- hidden positives still collapse predominantly to background,
-- `HPR` or `UAR` clearly fail to improve,
-- the implementation drifted into a default-off branch before proving the core path,
-- the evidence directly contradicts the PASS claim.
+Pass only when bag-free inference is explicitly proven by artifacts showing the observed label bag is not used at test time, and the evaluation bundle contains the expected main result and weak-supervision diagnostics.
 
 ### G7
-Acceptance contract:
-- bag-free inference works,
-- the canonical evaluation path is runnable,
-- `mAP` / `HPR` / `UAR` / robustness evidence is recorded,
-- the accepted core path does not require observed-label bags at test time.
-
-Evidence minimum:
-- canonical evaluation record,
-- full-vocabulary bag-free worked example,
-- qualitative prediction visualizations,
-- main result table/summary with robustness evidence.
+Pass only when canonical remote replay is executed on the intended commit, final reports are frozen, `STATUS.md` marks terminal mode active, and the terminal summary records the bounded revalidation rule.
 
 ## 3. Relationship to evidence requirements
 A gate may pass only if:
 1. its acceptance contract is satisfied, and
 2. its required evidence pack from `EVIDENCE_REQUIREMENTS.md` is complete and reviewable.
 
-## 4. Missing metric implementation policy
-If `HPR` and `UAR` are not yet implemented or exposed in code for the active comparison, the attribution gate cannot be fully passed.
-In that case, the correct status is `INCONCLUSIVE`, and the smallest valid next step is to implement or expose those metrics without widening scope.
-
-## 5. PASS / FAIL / INCONCLUSIVE / BLOCKED semantics
+## 4. PASS / FAIL / INCONCLUSIVE semantics
 - `PASS`: gate contract is satisfied, evidence is complete, and the next gate may become active.
-- `FAIL`: gate contract is contradicted by the evidence; the fallback path must be used.
-- `INCONCLUSIVE`: evidence or acceptance is insufficient; do not widen scope, first close the contract or evidence gap.
-- `BLOCKED`: environment or validation preconditions prevent trustworthy evaluation.
+- `FAIL`: gate is not satisfied or evidence directly contradicts the gate claim; the fallback path must be used.
+- `INCONCLUSIVE`: evidence is insufficient or incomplete; do not widen scope, first close the evidence gap.
+- `BLOCKED`: environment or validation preconditions prevent canonical evaluation.

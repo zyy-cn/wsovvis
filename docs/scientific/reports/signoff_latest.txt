@@ -1,19 +1,15 @@
 WS-OVVIS scientific sign-off status
-Timestamp: 20260312T054333Z
-Active scientific gate: S1
-Status: final fresh canonical comparator recorded; S1 FAIL recorded; no later scientific gate approval authorized
+Timestamp: 20260314T003011Z
+Recorded scientific gate: refined S1 — Basis Utility
+Status: Route B formal PASS preserved; fresh exclusion-policy A2 full-scale relaunch completed with an aggregate-negative comparator; no S2 activation
 
-Recorded sign-off rules:
-- the fair raw comparator `C1` remained frozen throughout
-- the approved fresh canonical run completed unchanged
-- the frozen evaluator/comparator plane remained unchanged across historical, interim, and final fresh tiers
-- later scientific gate activation is not allowed because `S1` did not become `PASS`
+Recorded sign-off rules carried forward:
+- the formal refined `S1` PASS authority remains the aligned Route B packet at `codex/s1_routeb_closure_20260312T130255Z/`
+- no Route B reopening is authorized here
+- no `S2` approval is requested or granted here
 
-Final sign-off position:
-- the completed fresh canonical comparator is recorded here:
-  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/remote_validation_record.md)
-  - [summary.json](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/summary.json)
-  - [comparator_table.md](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/comparator_table.md)
-- the completed fresh result does not support basis superiority over raw and therefore records `S1 FAIL`
-- no approval is requested for `S2`
-- any attempt to reopen `S1` would require new explicit human scientific direction rather than automatic continuation
+Current sign-off position:
+- completed fresh packet: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/`
+- completed comparator summary: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/summary.json`
+- completed comparator table: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/comparator_table.md`
+- this negative Route A strengthening result does not reopen Route B and does not justify `S2` activation

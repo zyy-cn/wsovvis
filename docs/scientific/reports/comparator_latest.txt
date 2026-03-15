@@ -1,113 +1,26 @@
 WS-OVVIS scientific comparator summary
-Timestamp: 20260312T054333Z
-Active scientific gate: S1
-Status: completed fresh canonical comparator supports FAIL
+Timestamp: 20260314T003011Z
+Recorded scientific gate: refined S1 — Basis Utility
+Recorded route: Route A — direct superiority strengthening
+Status: fresh exclusion-policy A2 full-scale comparator completed; aggregate outcome negative; Route B formal PASS preserved separately
 
-Frozen S1 comparator/evaluator specification:
-- scope: structure-only
-- split: `val`
-- GT: `data/LV-VIS/annotations/lvvis_val_agnostic.json`
-- `C1` raw pseudo tube:
-  - canonical source: [raw_val_videocutler_ytvis.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_videocutler_ytvis.json)
-  - conversion summary: [raw_val_summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/raw_val_summary.json)
-- `C2` refined basis evidence tiers:
-  - historical pilot:
-    - [summary.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/summary.json)
-  - interim fresh checkpoint:
-    - [summary.json](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/summary.json)
-  - final full-run fresh comparator:
-    - [summary.json](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/summary.json)
+Formal authority preserved separately:
+- authoritative refined `S1` PASS packet: `codex/s1_routeb_closure_20260312T130255Z/`
 
-Primary metrics:
-- `mean_best_iou`
-- `recall_at_0.5`
-- `fragmentation_per_gt_instance`
+Completed full-scale Route A comparator:
+- packet root: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/`
+- summary: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/summary.json`
+- table: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/comparator_table.md`
+- worked example: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/paired_worked_example.json`
+- failure example: `codex/s1_routea_a2_fullscale_exclude_mixed_fresh_20260313T110810Z/full_eval/failure_case_example.json`
 
-Diagnostics:
-- `short_track_ratio`
-- `broken_track_ratio`
-- `average_track_duration`
-- `temporal_inconsistency`
-- `unmatched_gt_ratio`
-- `over_segmentation_tendency`
-- `under_coverage_tendency`
+Primary metric deltas:
+- `mean_best_iou`: `-0.032327`
+- `recall_at_0.5`: `-0.023394`
+- `fragmentation_per_gt_instance`: `+0.773057`
 
-Shared raw baseline `C1`:
-- `predicted_tracks_total=2679`
-- `mean_best_iou=0.380341`
-- `recall_at_0.5=0.387739`
-- `fragmentation_per_gt_instance=0.031998`
-
-Historical refined pilot `C2`:
-- `predicted_tracks_total=8370`
-- `mean_best_iou=0.339383`
-- `recall_at_0.5=0.353052`
-- `fragmentation_per_gt_instance=0.852111`
-- deltas vs raw:
-  - `mean_best_iou=-0.040958`
-  - `recall_at_0.5=-0.034687`
-  - `fragmentation_per_gt_instance=+0.820113`
-
-Interim fresh-checkpoint refined `C2`:
-- `predicted_tracks_total=8370`
-- `mean_best_iou=0.342388`
-- `recall_at_0.5=0.358699`
-- `fragmentation_per_gt_instance=0.913955`
-- deltas vs raw:
-  - `mean_best_iou=-0.037953`
-  - `recall_at_0.5=-0.029040`
-  - `fragmentation_per_gt_instance=+0.881957`
-- deltas vs historical refined pilot:
-  - `mean_best_iou=+0.003005`
-  - `recall_at_0.5=+0.005647`
-  - `fragmentation_per_gt_instance=+0.061844`
-
-Final full-run fresh refined `C2`:
-- canonical validation:
-  - [remote_validation_record.md](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/remote_validation_record.md)
-- comparator table:
-  - [comparator_table.md](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/comparator_table.md)
-- key metrics:
-  - `predicted_tracks_total=8370`
-  - `mean_best_iou=0.344887`
-  - `recall_at_0.5=0.360850`
-  - `fragmentation_per_gt_instance=0.892444`
-- deltas vs raw:
-  - `mean_best_iou=-0.035454`
-  - `recall_at_0.5=-0.026889`
-  - `fragmentation_per_gt_instance=+0.860446`
-- deltas vs historical refined pilot:
-  - `mean_best_iou=+0.005504`
-  - `recall_at_0.5=+0.007798`
-  - `fragmentation_per_gt_instance=+0.040333`
-- deltas vs interim checkpoint:
-  - `mean_best_iou=+0.002499`
-  - `recall_at_0.5=+0.002151`
-  - `fragmentation_per_gt_instance=-0.021511`
-
-Qualitative evidence:
-- historical paired example:
-  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/paired_worked_example.json)
-  - video `00636`, GT tube `2884`: refined improved IoU but added fragmentation
-- historical failure case:
-  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_c1_restore_20260311T225557Z/run19_eval_fair/failure_case_example.json)
-  - video `00822`, GT tube `3647`: raw best IoU `0.955158`; refined best IoU `0.0`
-- interim checkpoint paired example:
-  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/paired_worked_example.json)
-  - video `00434`, GT tube `1995`: raw best IoU `0.0`; interim refined best IoU `0.8967097658168711`
-- interim checkpoint failure case:
-  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_interim_ckpt_eval_20260312T021502Z/run_ckpt0499_eval/failure_case_example.json)
-  - video `00818`, GT tube `3636`: raw best IoU `0.9480394036277549`; interim refined best IoU `0.01942900747312244`
-- final paired example:
-  - [paired_worked_example.json](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/paired_worked_example.json)
-  - video `00411`, GT tube `1887`: raw best IoU `0.009661886162709138`; final refined best IoU `0.8813725001100084`
-- final failure case:
-  - [failure_case_example.json](/mnt/e/Code/wsovvis/codex/s1_final_fresh_eval_20260312T051557Z/run_final_eval/failure_case_example.json)
-  - video `00818`, GT tube `3636`: raw best IoU `0.9480394036277549`; final refined best IoU `0.014173633924235264`
-
-Current interpretation:
-- the fair pilot comparator remains preserved
-- the interim checkpoint comparator remains preserved as intermediate fresh evidence
-- the final fresh comparator is the formal gate-closing tier
-- refined improved modestly over the earlier refined variants, but never surpassed raw on the structure primaries and still over-segmented badly relative to raw
-- the completed fresh canonical result therefore supports `S1 FAIL`, and `S2` must remain inactive
+Additional diagnostic deltas:
+- `recall_at_0.7`: `-0.120732`
+- `over_segmentation_tendency`: `+0.292014`
+- `under_coverage_tendency`: `+0.032327`
+- `unmatched_gt_ratio`: `+0.023394`

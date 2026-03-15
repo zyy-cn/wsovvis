@@ -1,14 +1,47 @@
 # WS-OVVIS Mainline Implement Runbook
 
-This file defines how Codex should work inside the repository at the engineering layer.
+This file defines how Codex should work inside the repository.
 
-## Scientific overlay interaction
-When a scientific gate is active:
-- do not treat engineering PASS as scientific PASS
-- read `docs/scientific/INDEX.md`, `docs/scientific/V10_RECONCILIATION_MEMO.md`, `docs/scientific/STATUS.md`, and the active scientific gate spec before doing scientific work
-- distinguish formal scientific progression, diagnostic-only probing, and recovery-mode execution
-- keep engineering reports under `docs/mainline/reports/`
-- keep scientific reports under `docs/scientific/reports/`
-- do not merge engineering and scientific judgments into a single report
+## 1. Before editing code
+Always do these first:
+1. Read `AGENTS.md` and all files in `docs/mainline/` referenced from `INDEX.md`.
+2. Determine the active gate from `STATUS.md`.
+3. Identify the blocking acceptance condition from `METRICS_ACCEPTANCE.md`.
+4. Identify the required evidence pack from `EVIDENCE_REQUIREMENTS.md`.
+5. Identify the smallest valid step toward that gate.
+6. Identify the fallback path if this step fails.
 
-All other engineering-layer rules remain governed by the existing full `docs/mainline/IMPLEMENT.md` already present in the repository.
+Do not code before these are clear.
+
+## 2. Scope control
+- Edit only files needed for the current gate.
+- Do not enable default-off modules.
+- Do not broaden a failing experiment into a larger redesign.
+- Do not reinterpret environment failures as algorithmic failures.
+
+## 3. Command discipline
+- Local checks are informative.
+- Canonical PASS depends on `ENVIRONMENT_AND_VALIDATION.md`.
+- A gate PASS depends on both the acceptance contract and the required evidence pack.
+- Record files changed, commands run, local results, remote results, intended commit, remote HEAD, and whether they match.
+
+## 4. Output discipline
+- Task artifacts belong under `codex/<task_dir>/`.
+- Mainline gate and acceptance artifacts belong under `docs/mainline/reports/`.
+- Do not write loose `*_output.txt` files in the repo root.
+
+## 5. Mandatory report outputs
+- every phase/gate check must write `docs/mainline/reports/phase_gate_latest.txt`
+- every acceptance evaluation must write `docs/mainline/reports/acceptance_latest.txt`
+- every evidence review must write `docs/mainline/reports/evidence_latest.txt`
+- every gate requiring a worked example must write `docs/mainline/reports/worked_example_verification_latest.md` and `.json`
+- all of the above should also write timestamped archival copies under `docs/mainline/reports/archive/`
+- report outputs must be sufficient for a future session to understand why the gate was or was not passed
+- all state-bearing outputs must update `docs/mainline/STATUS.md` if state materially changed
+
+## 6. Terminal accepted gate rule
+When the accepted terminal gate is active and already `PASS`:
+- stop automatically
+- do not propose or execute a new coding step
+- write/update `docs/mainline/reports/mainline_terminal_summary.txt`
+- treat bounded terminal revalidation as the only allowed follow-up mode under the current mainline
