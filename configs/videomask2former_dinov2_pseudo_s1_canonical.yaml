@@ -1,0 +1,48 @@
+_BASE_: "../third_party/VNext/projects/InstMove/MinVIS_motion/configs/youtubevis_2019/video_maskformer2_R50_bs32_8ep_frame.yaml"
+
+MODEL:
+  BACKBONE:
+    NAME: "DINOv2PseudoFPN"
+    FREEZE_AT: 0
+  WEIGHTS: ""
+  RESNETS:
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+  DINOV2:
+    MODEL_NAME: "dinov2_vitb14"
+    DINO_DIM: 768
+    OUT_CHANNELS: 256
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+    FREEZE: True
+    REPO_PATH: "third_party/dinov2"
+    WEIGHTS: "weights/DINOv2/dinov2_vitb14_pretrain.pth"
+  SEM_SEG_HEAD:
+    NUM_CLASSES: 1
+
+DATASETS:
+  TRAIN: ("ytvis_wsovvis_lvvis_pseudo_train_dinov2_vm2f",)
+  TEST: ()
+
+SOLVER:
+  IMS_PER_BATCH: 2
+  BASE_LR: 0.0001
+  STEPS: ()
+  MAX_ITER: 6000
+  CHECKPOINT_PERIOD: 500
+  BACKBONE_MULTIPLIER: 0.0
+
+TEST:
+  EVAL_PERIOD: 0
+
+DATALOADER:
+  NUM_WORKERS: 4
+
+OUTPUT_DIR: "runs/wsovvis_videomask2former_dinov2/mainline"
+
+WSOVVIS:
+  DATA:
+    TRAIN_NAME: "ytvis_wsovvis_lvvis_pseudo_train_dinov2_vm2f"
+    TRAIN_JSON: "outputs/videocutler_lvvis_png_dinov2_vm2f/train/pseudo_tube_ytvis.json"
+    TRAIN_IMG_ROOT: "data/LV-VIS/train/JPEGImages"
+    VAL_NAME: ""
+    VAL_JSON: ""
+    VAL_IMG_ROOT: ""

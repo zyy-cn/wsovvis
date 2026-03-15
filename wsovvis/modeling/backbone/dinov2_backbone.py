@@ -4,14 +4,12 @@ import torch.nn.functional as F
 
 from detectron2.modeling import BACKBONE_REGISTRY, Backbone
 from detectron2.structures import ImageList
-import torch.nn.functional as F
 
 
 @BACKBONE_REGISTRY.register()
 class DINOv2PseudoFPN(Backbone):
     """
-    DINOv2 frozen backbone + simple multi-scale feature adapter (pseudo-FPN).
-    Produces a dict of feature maps with expected keys/strides for SeqFormer.
+    Frozen DINOv2 backbone plus a lightweight multi-scale adapter for VideoMask2Former-family heads.
     """
 
     def __init__(self, cfg, input_shape):
@@ -65,8 +63,9 @@ class DINOv2PseudoFPN(Backbone):
 
         # 2) Freeze
         self.dino.eval()
-        for p in self.dino.parameters():
-            p.requires_grad_(False)
+        if bool(cfg.MODEL.DINOV2.FREEZE):
+            for p in self.dino.parameters():
+                p.requires_grad_(False)
 
         # 3) Patch size (dinov2 vit*14 -> 14)
         # Some dinov2 exposes patch_embed.patch_size; keep robust
