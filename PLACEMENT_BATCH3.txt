@@ -1,5 +1,0 @@
-Extract this package into the repository root. It adds:
-- .agents/skills/wsovvis-mainline-supervisor/
-- tools/run_mainline_loop.py
-- docs/mainline/SUPERVISOR_STATE_MACHINE.md
-- docs/mainline/SUPERVISOR_DEPLOYMENT.md

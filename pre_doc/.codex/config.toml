@@ -1,9 +1,0 @@
-# Project-level Codex configuration for WS-OVVIS
-project_root_markers = [".git"]
-
-[model]
-default = "gpt-5.4"
-
-[context]
-# Keep the new mainline docs high-value and stable.
-prefer_repo_instructions = true

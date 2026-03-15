@@ -1,8 +1,0 @@
-2026-03-04T00:08:12.7270000Z Requested labels: ubuntu-latest
-2026-03-04T00:08:12.7270000Z Job defined at: zyy-cn/wsovvis/.github/workflows/stage_d_quick_pipeline.yml@refs/heads/staged-nonzero-semantics
-2026-03-04T00:08:12.7270000Z Waiting for a runner to pick up this job...
-2026-03-04T00:08:12.7230000Z Evaluating stage-d-quick-pipeline.if
-2026-03-04T00:08:12.7230000Z Evaluating: success()
-2026-03-04T00:08:12.7230000Z Result: true
-2026-03-04T00:08:13.1370000Z Job is about to start running on the hosted runner: GitHub Actions 1000000000
-2026-03-04T00:08:13.1370000Z Job is waiting for a hosted runner to come online.
