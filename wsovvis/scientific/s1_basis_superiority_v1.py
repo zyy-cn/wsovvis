@@ -51,6 +51,16 @@ def _tube_id(row: Mapping[str, Any]) -> str:
     raise ValueError("tube row missing track_id/id")
 
 
+def _candidate_tube_id(row: Mapping[str, Any], *, row_index: int) -> str:
+    if "track_id" in row:
+        return str(row["track_id"])
+    if "id" in row:
+        return str(row["id"])
+    # Some bounded export paths emit prediction rows without an explicit track id.
+    raw_video_id = row.get("video_id", "unknown_video")
+    return f"synthetic_{raw_video_id}_{row_index:08d}"
+
+
 def _to_float(value: Any) -> float:
     if hasattr(value, "tolist"):
         value = value.tolist()
@@ -256,7 +266,7 @@ def _load_candidate_tubes(
         raise ValueError(f"{json_path} must be a list or object")
 
     result: Dict[str, List[TubeRecord]] = {key: [] for key in gt_view.videos_by_name}
-    for row in rows:
+    for row_index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
         raw_video_id = str(row.get("video_id"))
@@ -272,7 +282,7 @@ def _load_candidate_tubes(
             TubeRecord(
                 comparator_label=comparator_label,
                 canonical_video_name=canonical_name,
-                tube_id=_tube_id(row),
+                tube_id=_candidate_tube_id(row, row_index=row_index),
                 raw_video_id=raw_video_id,
                 segmentations=tuple(segmentations),
                 score=float(row.get("score", 1.0)),
