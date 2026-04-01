@@ -10,6 +10,7 @@ dinov2/
 weights/
 runs/
 codex/
+datasets/
 docs/
 zip/
 pre_doc/
@@ -17,6 +18,18 @@ prompts/
 __pycache__/
 docs/mainline/reports/
 docs/scientific/reports/
+
+# datasets
+/datasets/coco
+/datasets/coco/
+/datasets/imagenet
+/datasets/imagenet/
+/datasets/ytvis_2019
+/datasets/ytvis_2019/
+
+# local detectron2 clone
+/detectron2
+/detectron2/
 
 weights
 runs

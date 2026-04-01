@@ -270,9 +270,19 @@ def setup(args):
     # except:
     #     (self.h, self.w) = (self.w, self.h)
     #     assert img.shape[:2] == (self.h, self.w)
-    if args.test_dataset != "": cfg.DATASETS.TEST = ((args.test_dataset),)
-    if args.train_dataset != "": cfg.DATASETS.TRAIN = ((args.train_dataset),)
-    if args.steps != 0: cfg.SOLVER.STEPS = (int(args.steps),)
+    # if args.test_dataset != "": cfg.DATASETS.TEST = ((args.test_dataset),)
+    # if args.train_dataset != "": cfg.DATASETS.TRAIN = ((args.train_dataset),)
+    # if args.steps != 0: cfg.SOLVER.STEPS = (int(args.steps),)
+    test_dataset = getattr(args, "test_dataset", "")
+    train_dataset = getattr(args, "train_dataset", "")
+    steps = int(getattr(args, "steps", 0))
+
+    if test_dataset != "":
+        cfg.DATASETS.TEST = (test_dataset,)
+    if train_dataset != "":
+        cfg.DATASETS.TRAIN = (train_dataset,)
+    if steps != 0:
+        cfg.SOLVER.STEPS = (steps,)
     cfg.freeze()
     default_setup(cfg, args)
     # Setup logger for "mask_former" module
@@ -285,15 +295,17 @@ def main(args):
     cfg = setup(args)
 
     # start a new wandb run to track this script
-    if not args.eval_only or args.wandb_name != "":
-        if comm.is_main_process():  # only on main process
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project="VideoCutLER",
-                sync_tensorboard=True,
-                name=args.wandb_name,
-                entity="xdwang",
-            )
+    wandb_name = getattr(args, "wandb_name", "")
+
+    if (not args.eval_only or wandb_name != "") and comm.is_main_process():
+        if wandb is None:
+            raise ImportError("wandb is required only when wandb logging is enabled.")
+        wandb.init(
+            project="VideoCutLER",
+            sync_tensorboard=True,
+            name=wandb_name,
+            entity="xdwang",
+        )
 
     if args.eval_only:
         model = Trainer.build_model(cfg)
