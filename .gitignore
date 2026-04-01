@@ -8,7 +8,6 @@ backups/
 build/
 dinov2/
 weights/
-data/
 runs/
 codex/
 docs/
@@ -20,7 +19,6 @@ docs/mainline/reports/
 docs/scientific/reports/
 
 weights
-data
 runs
 dinov2
 
