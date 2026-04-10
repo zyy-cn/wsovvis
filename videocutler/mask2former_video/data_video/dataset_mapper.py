@@ -24,6 +24,17 @@ from .augmentation import build_augmentation
 __all__ = ["YTVISDatasetMapper", "CocoClipDatasetMapper"]
 
 
+def _segmentation_size(segmentation):
+    if isinstance(segmentation, dict):
+        size = segmentation.get("size")
+        if isinstance(size, (list, tuple)) and len(size) == 2:
+            return [int(size[0]), int(size[1])]
+        return None
+    if isinstance(segmentation, np.ndarray) and segmentation.ndim >= 2:
+        return [int(segmentation.shape[0]), int(segmentation.shape[1])]
+    return None
+
+
 def filter_empty_instances(instances, by_box=True, by_mask=True, box_threshold=1e-5):
     """
     Filter out empty instances in an `Instances` object.
@@ -248,11 +259,21 @@ class YTVISDatasetMapper:
         dataset_dict["image"] = []
         dataset_dict["instances"] = []
         dataset_dict["file_names"] = []
+        # Sample-local cache for duplicate static-image pseudo videos.
+        # Only deduplicate exact same file_name within the current sample.
+        # Always return a copy to avoid aliasing across frames after augmentation.
+        image_cache = {}
         for frame_idx in selected_idx:
-            dataset_dict["file_names"].append(file_names[frame_idx])
+            file_name = file_names[frame_idx]
+            dataset_dict["file_names"].append(file_name)
 
-            # Read image
-            image = utils.read_image(file_names[frame_idx], format=self.image_format)
+            # Read image (with per-sample duplicate-frame decode de-dup)
+            if file_name in image_cache:
+                image = image_cache[file_name].copy()
+            else:
+                image = utils.read_image(file_name, format=self.image_format)
+                image_cache[file_name] = image
+                image = image.copy()
             check_image_size(dataset_dict, image)
 
             aug_input = T.AugInput(image)
@@ -277,11 +298,27 @@ class YTVISDatasetMapper:
                 _frame_annos.append(_anno)
 
             # USER: Implement additional transformations if you have other types of data
-            annos = [
-                utils.transform_instance_annotations(obj, transforms, image_shape)
-                for obj in _frame_annos
-                if obj.get("iscrowd", 0) == 0
-            ]
+            annos = []
+            for obj in _frame_annos:
+                if obj.get("iscrowd", 0) != 0:
+                    continue
+                try:
+                    annos.append(utils.transform_instance_annotations(obj, transforms, image_shape))
+                except AssertionError as exc:
+                    seg_size = _segmentation_size(obj.get("segmentation"))
+                    if seg_size is None:
+                        raise
+                    logging.getLogger(__name__).warning(
+                        "[DatasetMapper] skip malformed segmentation after transform assertion: "
+                        "record_id=%s video_id=%s frame_idx=%s anno_id=%s file=%s seg_size=%s image_shape=%s",
+                        dataset_dict.get("id"),
+                        dataset_dict.get("video_id"),
+                        frame_idx,
+                        obj.get("id"),
+                        file_names[frame_idx],
+                        seg_size,
+                        image_shape,
+                    )
             sorted_annos = [_get_dummy_anno(self.num_classes) for _ in range(len(ids))]
 
             for _anno in annos:

@@ -1,0 +1,41 @@
+_BASE_: "video_mask2former_R50_cls_agnostic.yaml"
+
+MODEL:
+  BACKBONE:
+    NAME: "D2DinoV2ViTAdapterRegOfficial"
+  WEIGHTS: ""
+  DINO_ADAPTER_REGOFFICIAL:
+    PRETRAINED: "../weights/dinov2/dinov2_vitl14_reg4_pretrain_14to16.pth"
+    IMG_SIZE: 592
+    PATCH_SIZE: 16
+    EMBED_DIM: 1024
+    DEPTH: 24
+    NUM_HEADS: 16
+    MLP_RATIO: 4.0
+    DROP_PATH_RATE: 0.4
+    INIT_VALUES: 1.0
+    NUM_REGISTER_TOKENS: 4
+    INTERPOLATE_ANTIALIAS: True
+    INTERPOLATE_OFFSET: 0.0
+    CONV_INPLANE: 64
+    N_POINTS: 4
+    DEFORM_NUM_HEADS: 16
+    INTERACTION_INDEXES: [[0, 5], [6, 11], [12, 17], [18, 23]]
+    WITH_CFFN: True
+    CFFN_RATIO: 0.25
+    DEFORM_RATIO: 1.0
+    ADD_VIT_FEATURE: True
+    USE_EXTRA_EXTRACTOR: True
+    FREEZE_VIT: True
+    STRICT_PRETRAIN_LOAD: True
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+
+  SEM_SEG_HEAD:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+    DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES: ["res3", "res4", "res5"]
+
+SOLVER:
+  BACKBONE_MULTIPLIER: 1.0
+  IMS_PER_BATCH: 1
+  AMP:
+    ENABLED: True

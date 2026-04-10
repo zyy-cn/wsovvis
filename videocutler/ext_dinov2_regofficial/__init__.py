@@ -1,0 +1,1 @@
+from .config_dinov2_regofficial import add_dinov2_vit_adapter_regofficial_config

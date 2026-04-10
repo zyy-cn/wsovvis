@@ -147,6 +147,13 @@ class CustomSimpleTrainer(SimpleTrainer):
                 choice = np.random.choice(num_source_instances, num_copy, replace=False)
                 # randomly choose instances from the first frame and copy all these selected instances
                 frame_id = np.random.randint(1, max(1, len(source_instances))) - 1
+                frame_instance_count = len(source_instances[frame_id])
+                choice_raw = np.asarray(choice).astype(np.int64)
+                valid_choice = choice_raw[choice_raw < frame_instance_count]
+                if frame_instance_count == 0 or valid_choice.size == 0:
+                    new_targets.append(target_data)
+                    continue
+                choice = torch.as_tensor(valid_choice, dtype=torch.long)
                 copied_instances = source_instances[frame_id][choice].to(device=target_instances_list[frame_id].gt_boxes.device)
 
                 # paste these instances to ALL frames in the same video                
@@ -228,9 +235,15 @@ class CustomSimpleTrainer(SimpleTrainer):
                         # the same amount of instances and gt masks (can be None).
                         if f == 0:
                             keep = iou_matrix.max(1)[0] < 0.5
-                            sum_keep = keep.sum()
+                            sum_keep = int(keep.sum().item())
                         else:
                             keep = iou_matrix.max(1)[0] < 2.0
+                        keep_count = int(keep.sum().item())
+
+                        if keep_count == 0:
+                            target_image_list_new = copy.deepcopy(target_data_copy[0]["image"])
+                            target_instances_list_new = copy.deepcopy(target_data_copy[0]["instances"])
+                            break
 
                         if sum_keep < keep.size()[0]:
                             target_image_list_new.append(target_image)
