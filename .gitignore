@@ -11,7 +11,7 @@ weights/
 runs/
 codex/
 outputs/
-test/
+tests/
 docs/
 zip/
 pre_doc/
