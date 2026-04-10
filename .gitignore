@@ -36,3 +36,14 @@ runs
 dinov2
 
 *.zip
+.private-cache/
+CURRENT_TASK.json
+PATH_POLICY.json
+VALIDATION_PLAN.json
+TAKEOVER_LATEST.md
+
+
+AGENTS.md
+kit-src/
+package/
+schemas/
