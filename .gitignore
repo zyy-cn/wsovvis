@@ -10,7 +10,7 @@ dinov2/
 weights/
 runs/
 codex/
-datasets/
+outputs/
 docs/
 zip/
 pre_doc/
