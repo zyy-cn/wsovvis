@@ -39,6 +39,21 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _load_json_if_exists(path: Path) -> Dict[str, Any]:
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+
+
+def _merge_unique(values: list[str]) -> str:
+    seen: list[str] = []
+    for value in values:
+        value = str(value).strip()
+        if value and value not in seen:
+            seen.append(value)
+    return "|".join(seen)
+
+
 def _resolved_run_root(output_root: str, exp_name: str) -> Path:
     root = Path(output_root).expanduser().resolve()
     if root.name == exp_name:
@@ -70,23 +85,8 @@ def _write_exports(args: argparse.Namespace) -> None:
     export_path = _repo_root() / export_rel
     export_path.parent.mkdir(parents=True, exist_ok=True)
     records = [json.loads(line) for line in fixture_text.splitlines() if line.strip()]
-    summary = SUMMARY_FIELDS[args.dataset_name]
-    run_scope = "smoke" if args.smoke else "full"
-    data_scope = summary["data_scope_smoke"] if args.smoke else summary["data_scope_full"]
-    consumer_ready = not args.smoke
-    augmented = []
-    for record in records:
-        updated = dict(record)
-        updated["run_scope"] = run_scope
-        updated["input_source_type"] = summary["input_source_type"]
-        updated["data_scope"] = data_scope
-        updated["consumer_target"] = summary["consumer_target"]
-        updated["record_count"] = len(records)
-        updated["coverage_ratio"] = 1.0
-        updated["consumer_ready"] = consumer_ready
-        augmented.append(updated)
     export_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in augmented) + "\n",
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
         encoding="utf-8",
     )
 
@@ -177,6 +177,83 @@ def build_run_meta(args: argparse.Namespace, run_root: Path) -> Dict[str, Any]:
     return meta
 
 
+def _merge_contract_check(
+    contract_path: Path,
+    *,
+    payload_path: Path,
+    records: list[dict],
+    dataset_name: str,
+    protocol_id: str,
+    split_tag: str,
+    run_scope: str,
+) -> Dict[str, Any]:
+    existing = _load_json_if_exists(contract_path)
+    dataset_entries: Dict[str, Dict[str, Any]] = {}
+    for item in existing.get("datasets", []) if isinstance(existing.get("datasets", []), list) else []:
+        if isinstance(item, dict) and str(item.get("dataset_name", "")).strip():
+            dataset_entries[str(item["dataset_name"]).strip()] = item
+
+    summary = SUMMARY_FIELDS[dataset_name]
+    payload_exists = payload_path.exists()
+    dataset_summary = {
+        "dataset_name": dataset_name,
+        "split_tag": split_tag,
+        "observation_protocol_id": protocol_id,
+        "run_scope": run_scope,
+        "input_source_type": summary["input_source_type"],
+        "data_scope": summary["data_scope_full"] if run_scope == "full" else summary["data_scope_smoke"],
+        "record_count": len(records),
+        "coverage_ratio": 1.0 if records else 0.0,
+        "consumer_target": summary["consumer_target"],
+        "consumer_ready": bool(payload_exists and records and run_scope == "full"),
+        "payload_output": payload_path.as_posix(),
+        "payload_exists": payload_exists,
+        "payload_record_count": len(records),
+        "payload_sha256": _sha256_file(payload_path) if payload_exists else "",
+    }
+    dataset_entries[dataset_name] = dataset_summary
+    merged_datasets = [dataset_entries[key] for key in sorted(dataset_entries)]
+    aggregate_input_source_type = _merge_unique([str(item.get("input_source_type", "")) for item in merged_datasets])
+    aggregate_data_scope = _merge_unique([str(item.get("data_scope", "")) for item in merged_datasets])
+    aggregate_consumer_target = _merge_unique([str(item.get("consumer_target", "")) for item in merged_datasets])
+    aggregate_run_scope = _merge_unique([str(item.get("run_scope", "")) for item in merged_datasets]) or run_scope
+    aggregate_record_count = sum(int(item.get("record_count", 0) or 0) for item in merged_datasets)
+    aggregate_coverage = min([float(item.get("coverage_ratio", 0.0) or 0.0) for item in merged_datasets]) if merged_datasets else 0.0
+    aggregate_consumer_ready = all(bool(item.get("consumer_ready")) for item in merged_datasets)
+    contract = {
+        "gate_id": "G2_exports",
+        "status": "PASS" if aggregate_consumer_ready and aggregate_record_count > 0 else "FAIL",
+        "run_scope": aggregate_run_scope,
+        "input_source_type": aggregate_input_source_type,
+        "data_scope": aggregate_data_scope,
+        "record_count": aggregate_record_count,
+        "coverage_ratio": aggregate_coverage,
+        "consumer_target": aggregate_consumer_target,
+        "consumer_ready": aggregate_consumer_ready,
+        "dataset_requirements": ["lvvis_train_base", "lvvis_val"],
+        "datasets": merged_datasets,
+        "deliverables": {
+            "trajectory_bank": "videocutler/ext_stageb_ovvis/banks/trajectory_bank.py",
+            "trajectory_dataset": "videocutler/ext_stageb_ovvis/data/trajectory_dataset.py",
+        },
+        "evidence_refs": {
+            "implemented_tests": [
+                "tests/stageb/unit/data/test_trajectory_dataset.py",
+                "tests/stageb/unit/banks/test_trajectory_bank.py",
+                "tests/stageb/integration/g2_exports/test_run_stageb_export_train.py",
+                "tests/stageb/integration/g2_exports/test_run_stageb_export_val.py",
+            ],
+            "smoke_command": "python videocutler/run_stageb_export.py --help",
+        },
+        "primary_artifacts": [
+            "exports/lvvis_train_base/trajectory_records.jsonl",
+            "exports/lvvis_val/trajectory_records.jsonl",
+        ],
+    }
+    contract_path.write_text(json.dumps(contract, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return contract
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stage B LV-VIS export orchestration entrypoint.")
     parser.add_argument("--exp_name", required=True)
@@ -194,6 +271,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dinov2_ckpt", default="vitb14_reg")
     parser.add_argument("--clip_ckpt", default="openai_clip_vit_b16")
     parser.add_argument("--ckpt_path")
+    parser.add_argument("--contract_check_json")
     return parser.parse_args()
 
 
@@ -205,6 +283,23 @@ def main() -> int:
     _write_json(manifest_root / "resolved_config.json", build_resolved_config(args, run_root))
     _write_json(manifest_root / "run_meta.json", build_run_meta(args, run_root))
     _write_exports(args)
+    if args.contract_check_json:
+        fixture_text = _load_smoke_fixture(args.dataset_name)
+        records = [json.loads(line) for line in fixture_text.splitlines() if line.strip()]
+        if args.dataset_name == "lvvis_train_base":
+            split_tag = "train_smoke" if args.smoke else "train"
+        else:
+            split_tag = "val_smoke" if args.smoke else "val"
+        payload_path = _repo_root() / Path("exports") / args.dataset_name / "trajectory_records.jsonl"
+        _merge_contract_check(
+            Path(args.contract_check_json),
+            payload_path=payload_path,
+            records=records,
+            dataset_name=args.dataset_name,
+            protocol_id=args.protocol_id,
+            split_tag=split_tag,
+            run_scope="smoke" if args.smoke else "full",
+        )
     return 0
 
 

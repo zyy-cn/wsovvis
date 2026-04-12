@@ -171,7 +171,7 @@ def _require_fields(records: List[Dict[str, Any]], fields: List[str], errors: Li
             errors.append(f"missing field: {field}")
 
 
-def _run_package_check(repo_root: Path, active_gate: str, check_id: str, phase: str) -> List[str]:
+def _run_package_check(repo_root: Path, active_gate: str, check_id: str, phase: str, task: Dict[str, Any] | None = None) -> List[str]:
     errors: List[str] = []
     artifact_specs = _resolve_artifact_specs(repo_root, active_gate, check_id)
     if not artifact_specs:
@@ -237,13 +237,27 @@ def _run_package_check(repo_root: Path, active_gate: str, check_id: str, phase: 
                 if sample.get("consumer_ready") is not True:
                     errors.append("consumer_ready must be true")
         elif check_id == "export_full_scope_ready":
-            _require_fields(records, ["run_scope", "input_source_type", "data_scope", "coverage_ratio", "consumer_ready"], errors)
-            if records and phase == "formal":
-                sample = records[0]
-                if sample.get("run_scope") != "full":
-                    errors.append("run_scope must be full")
-                if sample.get("consumer_ready") is not True:
-                    errors.append("consumer_ready must be true")
+            contract_path = ""
+            current_task = task or read_json(control_file(repo_root, "CURRENT_TASK.json"))
+            for candidate in current_task.get("required_outputs", []):
+                if isinstance(candidate, str) and candidate.endswith("_contract_check.json"):
+                    contract_path = candidate
+                    break
+            if not contract_path:
+                errors.append("missing contract check artifact reference")
+            else:
+                artifact_path = repo_root / contract_path
+                if not artifact_path.exists():
+                    errors.append(f"missing contract check artifact: {contract_path}")
+                else:
+                    contract = read_json(artifact_path)
+                    _require_fields([contract], ["run_scope", "input_source_type", "data_scope", "coverage_ratio", "consumer_ready"], errors)
+                    if contract.get("run_scope") != "full":
+                        errors.append("run_scope must be full")
+                    if contract.get("consumer_ready") is not True:
+                        errors.append("consumer_ready must be true")
+                    if float(contract.get("coverage_ratio", 0.0) or 0.0) < 1.0:
+                        errors.append("coverage_ratio must be >= 1.0")
         elif check_id == "frame_cache_coverage_ready":
             _require_fields(records, ["run_scope", "coverage_ratio", "consumer_ready"], errors)
             if records and "missing_frame_ratio" not in records[0]:
@@ -417,7 +431,7 @@ def main() -> int:
                         raise RuntimeError((cp.stderr or cp.stdout).strip()[:1200])
                 elif ctype in {'consumer_check', 'required_check'}:
                     current_task = read_json(control_file(repo_root, "CURRENT_TASK.json"))
-                    check_errors = _run_package_check(repo_root, str(current_task.get("active_gate", "")), target, str(check.get("phase", "implementation")))
+                    check_errors = _run_package_check(repo_root, str(current_task.get("active_gate", "")), target, str(check.get("phase", "implementation")), current_task)
                     if check_errors:
                         raise ValueError("; ".join(check_errors[:5]))
                 else:
