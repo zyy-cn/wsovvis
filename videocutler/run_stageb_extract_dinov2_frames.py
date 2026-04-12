@@ -75,13 +75,16 @@ def _sha256_file(path: Path) -> str:
 
 def _resolve_image_path(split_root: Path, lvvis_root: Path, rel_file: str) -> Path:
     rel = Path(rel_file)
-    direct = split_root / rel
-    if direct.exists():
-        return direct
-    fallback = lvvis_root / rel
-    if fallback.exists():
-        return fallback
-    return direct
+    candidates = [
+        split_root / rel,
+        split_root / "JPEGImages" / rel,
+        lvvis_root / rel,
+        lvvis_root / split_root.name / "JPEGImages" / rel,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _collect_samples(dataset_name: str, smoke: bool):
