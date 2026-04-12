@@ -161,7 +161,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    if args.dataset_name in {"lvvis_train_base", "lvvis_val"}:
+    if not args.smoke and args.dataset_name in {"lvvis_train_base", "lvvis_val"}:
         import videocutler.ext_stageb_ovvis.data.datasets.lvvis  # noqa: F401
 
     run_root = _resolved_run_root(args.output_root, args.exp_name)
