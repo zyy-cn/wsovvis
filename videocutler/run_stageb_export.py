@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import zipfile
@@ -52,6 +53,10 @@ def _merge_unique(values: list[str]) -> str:
         if value and value not in seen:
             seen.append(value)
     return "|".join(seen)
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _resolved_run_root(output_root: str, exp_name: str) -> Path:
