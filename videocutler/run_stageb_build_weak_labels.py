@@ -64,12 +64,20 @@ def write_contract_check(
     contract_path.parent.mkdir(parents=True, exist_ok=True)
     payload_rel = payload_path.as_posix()
     payload_exists = payload_path.exists()
+    sample = records[0] if records and isinstance(records[0], dict) else {}
     payload = {
         "gate_id": "G3_weak_labels",
         "status": "PASS" if payload_exists and records else "FAIL",
         "dataset_name": dataset_name,
         "split_tag": split_tag,
         "observation_protocol_id": protocol_id,
+        "run_scope": str(sample.get("run_scope", "")),
+        "input_source_type": str(sample.get("input_source_type", "")),
+        "data_scope": str(sample.get("data_scope", "")),
+        "consumer_target": str(sample.get("consumer_target", "")),
+        "record_count": len(records),
+        "coverage_ratio": sample.get("coverage_ratio", 0.0),
+        "consumer_ready": bool(sample.get("consumer_ready", False)),
         "payload_output": payload_rel,
         "payload_exists": payload_exists,
         "payload_record_count": len(records),
