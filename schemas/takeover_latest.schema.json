@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "takeover_latest.schema.json",
+  "title": "Takeover Latest",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "active_gate": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "task_status": {"type": "string", "minLength": 1},
+    "preflight_status": {"type": "string", "minLength": 1},
+    "implementation_smoke_status": {"type": "string", "minLength": 1},
+    "formal_status": {"type": "string", "minLength": 1},
+    "validation_status": {"type": "string", "minLength": 1},
+    "path_boundary_status": {"type": "string", "minLength": 1},
+    "run_scope": {"type": "string", "minLength": 1},
+    "input_source_type": {"type": "string", "minLength": 1},
+    "primary_artifact_paths": {"type": "array", "items": {"type": "string"}, "default": []},
+    "record_count": {"oneOf": [{"type": "integer"}, {"type": "string", "enum": ["not_applicable", "not_available_yet"]}]},
+    "coverage_ratio": {"oneOf": [{"type": "number"}, {"type": "string", "enum": ["not_applicable", "not_available_yet"]}]},
+    "consumer_ready": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["not_applicable", "not_available_yet"]}]},
+    "blocker_stage": {"type": "string", "minLength": 1},
+    "blocker_reason": {"type": "string", "minLength": 1},
+    "exact_blocker": {"type": "string", "minLength": 1},
+    "authoritative_artifact": {"type": "string", "minLength": 1},
+    "authoritative_blocker_artifact": {"type": "string", "minLength": 1},
+    "contract_check_path": {"type": "string", "minLength": 1},
+    "files_changed_summary": {"type": "array", "items": {"type": "string"}, "default": []},
+    "next_action": {"type": "string"},
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "exact_blocker": {"type": "string", "minLength": 1},
+        "authoritative_artifact": {"type": "string", "minLength": 1}
+      },
+      "required": ["stage", "reason", "exact_blocker", "authoritative_artifact"]
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contract_check": {"type": "string", "minLength": 1},
+        "output_dir": {"type": "string", "minLength": 1}
+      },
+      "required": ["contract_check", "output_dir"]
+    }
+  },
+  "required": ["active_gate", "task_id", "task_status", "preflight_status", "implementation_smoke_status", "formal_status", "validation_status", "path_boundary_status", "run_scope", "input_source_type", "primary_artifact_paths", "record_count", "coverage_ratio", "consumer_ready", "blocker_stage", "blocker_reason", "exact_blocker", "authoritative_artifact", "authoritative_blocker_artifact", "contract_check_path", "files_changed_summary", "next_action", "blocker", "artifacts"]
+}
