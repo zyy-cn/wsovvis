@@ -171,6 +171,40 @@ def _require_fields(records: List[Dict[str, Any]], fields: List[str], errors: Li
             errors.append(f"missing field: {field}")
 
 
+def _validate_weak_labels_records(records: List[Dict[str, Any]], check_id: str, phase: str, errors: List[str]) -> None:
+    if not records:
+        errors.append("no records available")
+        return
+    required_base = ["clip_id", "video_id", "observed_raw_ids", "observation_protocol_id", "completeness_status"]
+    _require_fields(records, required_base, errors)
+    if errors:
+        return
+
+    sample = records[0]
+    if sample.get("completeness_status") != "unknown":
+        errors.append("completeness_status must be unknown")
+    protocol_id = str(sample.get("observation_protocol_id", "")).strip()
+    if protocol_id not in {"keep80_seed42", "keep60_seed42", "keep40_seed42"}:
+        errors.append("unsupported observation_protocol_id")
+    observed_raw_ids = sample.get("observed_raw_ids")
+    if not isinstance(observed_raw_ids, list) or any(not isinstance(item, int) for item in observed_raw_ids):
+        errors.append("observed_raw_ids must be an integer list")
+
+    if check_id in {"clip_level_weak_label_reader_readable", "weak_labels_run_scope_declared", "weak_labels_full_consumer_ready", "artifact_schema_valid"}:
+        _require_fields(records, ["run_scope", "input_source_type", "data_scope", "consumer_target"], errors)
+    if check_id in {"weak_labels_run_scope_declared", "weak_labels_full_consumer_ready", "artifact_schema_valid"}:
+        _require_fields(records, ["record_count", "coverage_ratio", "consumer_ready"], errors)
+    if check_id == "weak_labels_full_consumer_ready" and phase == "formal":
+        if sample.get("run_scope") != "full":
+            errors.append("run_scope must be full")
+        if sample.get("input_source_type") != "official_lvvis_train_annotations":
+            errors.append("input_source_type must be official_lvvis_train_annotations")
+        if sample.get("consumer_ready") is not True:
+            errors.append("consumer_ready must be true")
+        if sample.get("data_scope") != "train":
+            errors.append("data_scope must be train")
+
+
 def _run_package_check(repo_root: Path, active_gate: str, check_id: str, phase: str, task: Dict[str, Any] | None = None) -> List[str]:
     errors: List[str] = []
     artifact_specs = _resolve_artifact_specs(repo_root, active_gate, check_id)
@@ -188,7 +222,13 @@ def _run_package_check(repo_root: Path, active_gate: str, check_id: str, phase: 
         records = _records_for_checks(data)
 
         schema_ref = str(spec["contract"].get("schema_ref", "")).strip()
-        if schema_ref:
+        if str(spec["contract"].get("artifact_id", "")).strip() == "weak_labels_train":
+            semantic_errors: List[str] = []
+            _validate_weak_labels_records(records, check_id, phase, semantic_errors)
+            if semantic_errors:
+                errors.append(f"{path.relative_to(repo_root)} schema invalid: {'; '.join(semantic_errors[:5])}")
+                continue
+        elif schema_ref:
             schema_path = resolve_package_ref(repo_root, schema_ref)
             if isinstance(data, list):
                 schema_errors: List[str] = []
