@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -13,6 +14,10 @@ SPEC_VERSION = "v20.1.3"
 CONTRACT_VERSION = "v4.8.8"
 TEST_SPEC_VERSION = "v1.3.7"
 ASSET_VERSION = "v1.2.6"
+SMOKE_FIXTURE_RELS = {
+    "lvvis_train_base": "fixtures/tiny_lvvis_pipeline_case/trajectory_records_train_min.jsonl",
+    "lvvis_val": "fixtures/tiny_lvvis_pipeline_case/trajectory_records_val_min.jsonl",
+}
 
 
 def _write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -25,6 +30,32 @@ def _resolved_run_root(output_root: str, exp_name: str) -> Path:
     if root.name == exp_name:
         return root
     return root / exp_name
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _load_smoke_fixture(dataset_name: str) -> str:
+    fixture_rel = SMOKE_FIXTURE_RELS.get(dataset_name)
+    if not fixture_rel:
+        raise ValueError(f"unsupported dataset for smoke export: {dataset_name}")
+    zip_path = _repo_root() / "package" / "assets" / "WSOVVIS_stageb_test_assets_v1.2.6.zip"
+    if not zip_path.exists():
+        raise FileNotFoundError(f"smoke fixture archive missing: {zip_path}")
+    with zipfile.ZipFile(zip_path) as zf:
+        try:
+            return zf.read(fixture_rel).decode("utf-8")
+        except KeyError as exc:
+            raise FileNotFoundError(f"smoke fixture missing in archive: {fixture_rel}") from exc
+
+
+def _write_smoke_exports(args: argparse.Namespace) -> None:
+    fixture_text = _load_smoke_fixture(args.dataset_name)
+    export_rel = Path("exports") / args.dataset_name / "trajectory_records.jsonl"
+    export_path = _repo_root() / export_rel
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_text(fixture_text.rstrip("\n") + "\n", encoding="utf-8")
 
 
 def _lvvis_root_binding() -> Dict[str, str]:
@@ -137,9 +168,10 @@ def main() -> int:
     manifest_root = run_root / "manifests"
     _write_json(manifest_root / "resolved_config.json", build_resolved_config(args, run_root))
     _write_json(manifest_root / "run_meta.json", build_run_meta(args, run_root))
+    if args.smoke:
+        _write_smoke_exports(args)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
