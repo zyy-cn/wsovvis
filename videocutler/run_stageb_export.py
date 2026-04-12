@@ -85,7 +85,10 @@ def _write_exports(args: argparse.Namespace) -> None:
         updated["coverage_ratio"] = 1.0
         updated["consumer_ready"] = consumer_ready
         augmented.append(updated)
-    export_path.write_text(json.dumps(augmented, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    export_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in augmented) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _lvvis_root_binding() -> Dict[str, str]:
