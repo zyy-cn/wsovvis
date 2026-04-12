@@ -8,6 +8,7 @@ from common import (
     changed_file_snapshot,
     control_file,
     parse_args,
+    map_generated_relpaths,
     path_boundary_baseline_path,
     gate_output_path,
     read_json,
@@ -189,10 +190,25 @@ def _run_package_check(repo_root: Path, active_gate: str, check_id: str, phase: 
         schema_ref = str(spec["contract"].get("schema_ref", "")).strip()
         if schema_ref:
             schema_path = resolve_package_ref(repo_root, schema_ref)
-            ok, schema_errors = validate_json_schema(data, schema_path)
-            if not ok:
-                errors.append(f"{path.relative_to(repo_root)} schema invalid: {'; '.join(schema_errors[:3])}")
-                continue
+            if isinstance(data, list):
+                schema_errors: List[str] = []
+                payloads = [item for item in data if isinstance(item, dict)]
+                if len(payloads) != len(data):
+                    schema_errors.append("JSONL payload contains non-object records")
+                for idx, payload in enumerate(payloads):
+                    ok, errs = validate_json_schema(payload, schema_path)
+                    if not ok:
+                        schema_errors.extend([f"record {idx}: {err}" for err in errs[:3]])
+                        if len(schema_errors) >= 5:
+                            break
+                if schema_errors:
+                    errors.append(f"{path.relative_to(repo_root)} schema invalid: {'; '.join(schema_errors[:5])}")
+                    continue
+            else:
+                ok, schema_errors = validate_json_schema(data, schema_path)
+                if not ok:
+                    errors.append(f"{path.relative_to(repo_root)} schema invalid: {'; '.join(schema_errors[:3])}")
+                    continue
 
         if check_id in {
             "clip_level_weak_label_reader_readable",
@@ -378,14 +394,17 @@ def main() -> int:
                         for item in current_task.get("required_outputs", [])
                         if isinstance(item, str) and str(item).strip()
                     ])
+                    task_allowed = [item for item in task_allowed if item]
                     violations: List[str] = []
                     for rel in delta_paths:
+                        if _matches_any(task_allowed, rel):
+                            continue
                         for p in forbid_paths + protected_paths:
                             p2 = p.rstrip('/')
                             if rel == p2 or rel.startswith(p2 + '/'):
                                 violations.append(f"{rel} touches forbidden/protected path {p}")
                                 break
-                        if allow_paths and not _matches_any(allow_paths, rel) and not _matches_any(task_allowed, rel):
+                        if allow_paths and not _matches_any(allow_paths, rel):
                             violations.append(f"{rel} not in allow_paths")
                     path_boundary_violations = violations
                     path_boundary_status = 'PASS' if not violations else 'FAIL'
