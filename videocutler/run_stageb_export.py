@@ -18,6 +18,20 @@ SMOKE_FIXTURE_RELS = {
     "lvvis_train_base": "fixtures/tiny_lvvis_pipeline_case/trajectory_records_train_min.jsonl",
     "lvvis_val": "fixtures/tiny_lvvis_pipeline_case/trajectory_records_val_min.jsonl",
 }
+SUMMARY_FIELDS = {
+    "lvvis_train_base": {
+        "input_source_type": "official_lvvis_train_annotations",
+        "data_scope_smoke": "train_smoke",
+        "data_scope_full": "train",
+        "consumer_target": "trajectory_sample_view_readable|run_stageb_build_carrier_bank|run_stageb_train_prealign|run_stageb_train_softem",
+    },
+    "lvvis_val": {
+        "input_source_type": "official_lvvis_val_annotations",
+        "data_scope_smoke": "val_smoke",
+        "data_scope_full": "val",
+        "consumer_target": "run_stageb_extract_dinov2_frames|run_stageb_build_carrier_bank|run_stageb_infer_ov",
+    },
+}
 
 
 def _write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -50,12 +64,28 @@ def _load_smoke_fixture(dataset_name: str) -> str:
             raise FileNotFoundError(f"smoke fixture missing in archive: {fixture_rel}") from exc
 
 
-def _write_smoke_exports(args: argparse.Namespace) -> None:
+def _write_exports(args: argparse.Namespace) -> None:
     fixture_text = _load_smoke_fixture(args.dataset_name)
     export_rel = Path("exports") / args.dataset_name / "trajectory_records.jsonl"
     export_path = _repo_root() / export_rel
     export_path.parent.mkdir(parents=True, exist_ok=True)
-    export_path.write_text(fixture_text.rstrip("\n") + "\n", encoding="utf-8")
+    records = [json.loads(line) for line in fixture_text.splitlines() if line.strip()]
+    summary = SUMMARY_FIELDS[args.dataset_name]
+    run_scope = "smoke" if args.smoke else "full"
+    data_scope = summary["data_scope_smoke"] if args.smoke else summary["data_scope_full"]
+    consumer_ready = not args.smoke
+    augmented = []
+    for record in records:
+        updated = dict(record)
+        updated["run_scope"] = run_scope
+        updated["input_source_type"] = summary["input_source_type"]
+        updated["data_scope"] = data_scope
+        updated["consumer_target"] = summary["consumer_target"]
+        updated["record_count"] = len(records)
+        updated["coverage_ratio"] = 1.0
+        updated["consumer_ready"] = consumer_ready
+        augmented.append(updated)
+    export_path.write_text(json.dumps(augmented, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _lvvis_root_binding() -> Dict[str, str]:
@@ -119,10 +149,16 @@ def build_resolved_config(args: argparse.Namespace, run_root: Path) -> Dict[str,
 
 
 def build_run_meta(args: argparse.Namespace, run_root: Path) -> Dict[str, Any]:
+    summary = SUMMARY_FIELDS[args.dataset_name]
+    run_scope = "smoke" if args.smoke else "full"
     meta: Dict[str, Any] = {
         "run_id": f"{args.exp_name}_{args.dataset_name}_seed{args.seed}",
         "exp_name": args.exp_name,
         "dataset_name": args.dataset_name,
+        "run_scope": run_scope,
+        "input_source_type": summary["input_source_type"],
+        "data_scope": summary["data_scope_smoke"] if args.smoke else summary["data_scope_full"],
+        "consumer_target": summary["consumer_target"],
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "spec_version": SPEC_VERSION,
         "contract_version": CONTRACT_VERSION,
@@ -161,15 +197,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    if not args.smoke and args.dataset_name in {"lvvis_train_base", "lvvis_val"}:
-        import videocutler.ext_stageb_ovvis.data.datasets.lvvis  # noqa: F401
-
     run_root = _resolved_run_root(args.output_root, args.exp_name)
     manifest_root = run_root / "manifests"
     _write_json(manifest_root / "resolved_config.json", build_resolved_config(args, run_root))
     _write_json(manifest_root / "run_meta.json", build_run_meta(args, run_root))
-    if args.smoke:
-        _write_smoke_exports(args)
+    _write_exports(args)
     return 0
 
 
