@@ -11,7 +11,9 @@ weights/
 runs/
 codex/
 outputs/
-tests/
+frame_bank/
+exports/
+weak_labels/
 docs/
 zip/
 pre_doc/

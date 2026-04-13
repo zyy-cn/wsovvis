@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Iterable, List, Tuple
 
 
@@ -9,10 +10,15 @@ GENERATOR_CFG_PATH = "videocutler/configs/imagenet_video/video_mask2former_R50_c
 
 
 def trajectory_sort_key(record: Record) -> Tuple[float, List[int], List[Any], int]:
+    masks = record.get("masks_rle", [])
+    masks_key = [
+        json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        for item in list(masks)
+    ]
     return (
         -float(record["pred_score"]),
         list(record.get("frame_indices", [])),
-        list(record.get("masks_rle", [])),
+        masks_key,
         int(record.get("rank_in_clip", 0)),
     )
 
@@ -51,6 +57,15 @@ def validate_trajectory_record(record: Record) -> List[str]:
     boxes_xyxy = list(record.get("boxes_xyxy", []))
     if not (len(frame_indices) == len(masks_rle) == len(boxes_xyxy)):
         errors.append("aligned_lengths")
+    image_size = record.get("image_size")
+    if not isinstance(image_size, list) or len(image_size) != 2:
+        errors.append("image_size")
+    else:
+        try:
+            if int(image_size[0]) <= 0 or int(image_size[1]) <= 0:
+                errors.append("image_size")
+        except Exception:
+            errors.append("image_size")
     expected_id = build_trajectory_id(
         str(record["dataset_name"]),
         int(record["video_id"]),

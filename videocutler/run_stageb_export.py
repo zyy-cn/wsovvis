@@ -7,17 +7,27 @@ import os
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List, Tuple
 
+from videocutler.ext_stageb_ovvis.banks.trajectory_bank import (
+    GENERATOR_CFG_PATH,
+    GENERATOR_TAG,
+    materialize_trajectory_bank,
+    validate_trajectory_record,
+)
 
 DATASET_CHOICES = ("lvvis_train_base", "lvvis_val", "ytvis_2019_val")
 SPEC_VERSION = "v20.1.3"
-CONTRACT_VERSION = "v4.8.8"
-TEST_SPEC_VERSION = "v1.3.7"
-ASSET_VERSION = "v1.2.6"
+CONTRACT_VERSION = "v4.8.9-cf3"
+TEST_SPEC_VERSION = "v1.4.0-cf3"
+ASSET_VERSION = "v1.2.6-cf2"
 SMOKE_FIXTURE_RELS = {
     "lvvis_train_base": "fixtures/tiny_lvvis_pipeline_case/trajectory_records_train_min.jsonl",
     "lvvis_val": "fixtures/tiny_lvvis_pipeline_case/trajectory_records_val_min.jsonl",
+}
+RAW_RESULTS_DEFAULTS = {
+    "lvvis_train_base": "OUTPUT/lvvis_train_base_videocutler_r50/inference/results.json",
+    "lvvis_val": "OUTPUT/lvvis_val_videocutler_r50/inference/results.json",
 }
 SUMMARY_FIELDS = {
     "lvvis_train_base": {
@@ -70,6 +80,122 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _resolve_lvvis_root() -> Path:
+    env_value = os.environ.get("WSOVVIS_LVVIS_ROOT")
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return (_repo_root() / "videocutler" / "datasets" / "LV-VIS").resolve()
+
+
+def _annotation_json_path(dataset_name: str) -> Path:
+    if dataset_name == "lvvis_train_base":
+        ann_rel = "annotations/train_instances.json"
+    elif dataset_name == "lvvis_val":
+        ann_rel = "annotations/val_instances.json"
+    else:
+        raise ValueError(f"dataset does not support full raw export: {dataset_name}")
+    return _resolve_lvvis_root() / ann_rel
+
+
+def _load_video_metadata(dataset_name: str) -> Dict[int, Dict[str, int]]:
+    ann_path = _annotation_json_path(dataset_name)
+    if not ann_path.exists():
+        raise FileNotFoundError(f"LV-VIS annotation json not found: {ann_path}")
+    payload = json.loads(ann_path.read_text(encoding="utf-8"))
+    videos = payload.get("videos", [])
+    meta: Dict[int, Dict[str, int]] = {}
+    for video in videos:
+        video_id = int(video["id"])
+        file_names = video.get("file_names") or video.get("filenames") or []
+        length = int(video.get("length", len(file_names)))
+        width = int(video.get("width", 0) or 0)
+        height = int(video.get("height", 0) or 0)
+        meta[video_id] = {
+            "video_id": video_id,
+            "clip_id": video_id,
+            "length": length,
+            "width": width,
+            "height": height,
+        }
+    return meta
+
+
+def _load_raw_results(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"raw results json not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError(f"raw results json must be a list: {path}")
+    records: List[Dict[str, Any]] = []
+    for idx, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"raw result {idx} is not an object")
+        records.append(item)
+    return records
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _encode_for_sort(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _bbox_from_rle(rle: Dict[str, Any]) -> List[float] | None:
+    try:
+        from pycocotools import mask as mask_utils
+
+        bbox_xywh = mask_utils.toBbox(rle)
+        if bbox_xywh is None or len(bbox_xywh) != 4:
+            return None
+        x, y, w, h = [float(v) for v in bbox_xywh]
+        if w <= 0 or h <= 0:
+            return None
+        return [x, y, x + w, y + h]
+    except Exception:
+        return None
+
+
+def _iter_valid_segmentations(segmentations: Iterable[Any]) -> Iterable[Tuple[int, Dict[str, Any]]]:
+    for frame_index, seg in enumerate(segmentations):
+        if seg is None:
+            continue
+        if not isinstance(seg, dict):
+            continue
+        if "counts" not in seg or "size" not in seg:
+            continue
+        size = seg.get("size")
+        if not isinstance(size, list) or len(size) != 2:
+            continue
+        yield frame_index, {"counts": seg["counts"], "size": [int(size[0]), int(size[1])]}
+
+
+def _split_tag(dataset_name: str, smoke: bool) -> str:
+    if dataset_name == "lvvis_train_base":
+        return "train_smoke" if smoke else "train"
+    if dataset_name == "lvvis_val":
+        return "val_smoke" if smoke else "val"
+    return "aux_val_smoke" if smoke else "aux_val"
+
+
+def _default_raw_results_path(dataset_name: str) -> Path:
+    rel = RAW_RESULTS_DEFAULTS.get(dataset_name)
+    if not rel:
+        raise ValueError(f"dataset does not support full raw export: {dataset_name}")
+    return _repo_root() / rel
+
+
 def _load_smoke_fixture(dataset_name: str) -> str:
     fixture_rel = SMOKE_FIXTURE_RELS.get(dataset_name)
     if not fixture_rel:
@@ -84,16 +210,125 @@ def _load_smoke_fixture(dataset_name: str) -> str:
             raise FileNotFoundError(f"smoke fixture missing in archive: {fixture_rel}") from exc
 
 
-def _write_exports(args: argparse.Namespace) -> None:
-    fixture_text = _load_smoke_fixture(args.dataset_name)
+def _records_from_smoke_fixture(dataset_name: str) -> List[Dict[str, Any]]:
+    fixture_text = _load_smoke_fixture(dataset_name)
+    return [json.loads(line) for line in fixture_text.splitlines() if line.strip()]
+
+
+def _records_from_raw_results(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    raw_path = Path(args.raw_results_json).expanduser().resolve() if args.raw_results_json else _default_raw_results_path(args.dataset_name)
+    raw_results = _load_raw_results(raw_path)
+    video_meta = _load_video_metadata(args.dataset_name)
+
+    grouped: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
+    for raw_idx, raw in enumerate(raw_results):
+        video_id = _safe_int(raw.get("video_id"), -1)
+        if video_id < 0:
+            continue
+        grouped.setdefault(video_id, []).append((raw_idx, raw))
+
+    split_tag = _split_tag(args.dataset_name, smoke=False)
+    records: List[Dict[str, Any]] = []
+    for video_id in sorted(grouped.keys()):
+        meta = video_meta.get(video_id, {"video_id": video_id, "clip_id": video_id, "width": 0, "height": 0})
+        per_video: List[Dict[str, Any]] = []
+        for raw_idx, raw in grouped[video_id]:
+            frame_indices: List[int] = []
+            masks_rle: List[Dict[str, Any]] = []
+            boxes_xyxy: List[List[float] | None] = []
+            image_size: List[int] | None = None
+            segmentations = raw.get("segmentations", [])
+            if not isinstance(segmentations, list):
+                segmentations = []
+            for frame_index, seg in _iter_valid_segmentations(segmentations):
+                frame_indices.append(int(frame_index))
+                masks_rle.append(seg)
+                boxes_xyxy.append(_bbox_from_rle(seg))
+                if image_size is None:
+                    image_size = [int(seg["size"][0]), int(seg["size"][1])]
+
+            if image_size is None:
+                fallback_h = _safe_int(meta.get("height"), 0)
+                fallback_w = _safe_int(meta.get("width"), 0)
+                if fallback_h > 0 and fallback_w > 0:
+                    image_size = [fallback_h, fallback_w]
+                elif masks_rle:
+                    first_size = masks_rle[0]["size"]
+                    image_size = [int(first_size[0]), int(first_size[1])]
+                else:
+                    image_size = [1, 1]
+
+            valid_carrier = len(frame_indices) > 0
+            per_video.append(
+                {
+                    "dataset_name": args.dataset_name,
+                    "split_tag": split_tag,
+                    "clip_id": _safe_int(meta.get("clip_id"), video_id),
+                    "video_id": _safe_int(meta.get("video_id"), video_id),
+                    "pred_score": _safe_float(raw.get("score"), 0.0),
+                    "frame_indices": frame_indices,
+                    "masks_rle": masks_rle,
+                    "boxes_xyxy": boxes_xyxy,
+                    "valid_carrier": valid_carrier,
+                    "invalid_reason": None if valid_carrier else "no_valid_mask_frames",
+                    "generator_tag": GENERATOR_TAG,
+                    "generator_cfg_path": GENERATOR_CFG_PATH,
+                    "generator_ckpt_path": str(Path(args.generator_ckpt).expanduser()),
+                    "image_size": image_size,
+                    "pred_label_raw": _safe_int(raw.get("category_id"), 1) - 1,
+                    "_raw_index": int(raw_idx),
+                }
+            )
+
+        per_video = sorted(
+            per_video,
+            key=lambda item: (
+                -float(item["pred_score"]),
+                list(item["frame_indices"]),
+                _encode_for_sort(item["masks_rle"]),
+                int(item["_raw_index"]),
+            ),
+        )
+        for rank_in_clip, item in enumerate(per_video):
+            item["rank_in_clip"] = int(rank_in_clip)
+            item.pop("_raw_index", None)
+            records.append(item)
+
+    materialized = materialize_trajectory_bank(records)
+    materialized = sorted(materialized, key=lambda item: str(item["trajectory_id"]))
+    return materialized
+
+
+def _ensure_image_size(records: List[Dict[str, Any]]) -> None:
+    for idx, record in enumerate(records):
+        image_size = record.get("image_size")
+        if not isinstance(image_size, list) or len(image_size) != 2:
+            inferred = None
+            masks = list(record.get("masks_rle", []))
+            for item in masks:
+                if isinstance(item, dict) and isinstance(item.get("size"), list) and len(item["size"]) == 2:
+                    inferred = [int(item["size"][0]), int(item["size"][1])]
+                    break
+            if inferred is None:
+                raise ValueError(f"trajectory record {idx} missing required image_size and cannot infer it")
+            record["image_size"] = inferred
+
+
+def _write_exports(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    if args.smoke:
+        records = _records_from_smoke_fixture(args.dataset_name)
+    else:
+        records = _records_from_raw_results(args)
+
+    _ensure_image_size(records)
     export_rel = Path("exports") / args.dataset_name / "trajectory_records.jsonl"
     export_path = _repo_root() / export_rel
     export_path.parent.mkdir(parents=True, exist_ok=True)
-    records = [json.loads(line) for line in fixture_text.splitlines() if line.strip()]
     export_path.write_text(
         "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
         encoding="utf-8",
     )
+    return records
 
 
 def _lvvis_root_binding() -> Dict[str, str]:
@@ -277,6 +512,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip_ckpt", default="openai_clip_vit_b16")
     parser.add_argument("--ckpt_path")
     parser.add_argument("--contract_check_json")
+    parser.add_argument(
+        "--raw_results_json",
+        help=(
+            "Path to official VideoCutLER raw inference results.json for full export. "
+            "If omitted, defaults to OUTPUT/<dataset>_videocutler_r50/inference/results.json."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -287,14 +529,18 @@ def main() -> int:
     manifest_root = run_root / "manifests"
     _write_json(manifest_root / "resolved_config.json", build_resolved_config(args, run_root))
     _write_json(manifest_root / "run_meta.json", build_run_meta(args, run_root))
-    _write_exports(args)
+    records = _write_exports(args)
+    validation_errors: List[str] = []
+    for index, record in enumerate(records):
+        errs = validate_trajectory_record(record)
+        if errs:
+            validation_errors.append(f"record {index}: {', '.join(errs)}")
+            if len(validation_errors) >= 5:
+                break
+    if validation_errors:
+        raise ValueError("exported trajectory record validation failed: " + "; ".join(validation_errors))
     if args.contract_check_json:
-        fixture_text = _load_smoke_fixture(args.dataset_name)
-        records = [json.loads(line) for line in fixture_text.splitlines() if line.strip()]
-        if args.dataset_name == "lvvis_train_base":
-            split_tag = "train_smoke" if args.smoke else "train"
-        else:
-            split_tag = "val_smoke" if args.smoke else "val"
+        split_tag = _split_tag(args.dataset_name, args.smoke)
         payload_path = _repo_root() / Path("exports") / args.dataset_name / "trajectory_records.jsonl"
         _merge_contract_check(
             Path(args.contract_check_json),

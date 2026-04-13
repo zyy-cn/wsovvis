@@ -6,12 +6,14 @@ from typing import Any, Dict, List, Tuple
 
 from common import (
     changed_file_snapshot,
+    codex_outputs_dir,
     control_file,
     parse_args,
     map_generated_relpaths,
     path_boundary_baseline_path,
     gate_output_path,
     read_json,
+    relative_to_repo,
     resolve_package_ref,
     require_schema,
     require_task_truth,
@@ -26,6 +28,27 @@ def _split_schema_target(target: str) -> Tuple[str, str]:
         return "", ""
     a, b = target.split("::", 1)
     return a.strip(), b.strip()
+
+
+def _task_output_dir(repo_root: Path, task: Dict[str, Any]) -> Path:
+    active_gate = str(task.get("active_gate", "")).strip()
+    task_id = str(task.get("task_id", "")).strip()
+    if active_gate:
+        return codex_outputs_dir(repo_root) / active_gate
+    if task_id.endswith("-task"):
+        task_id = task_id[: -len("-task")]
+    return codex_outputs_dir(repo_root) / task_id
+
+
+def _handoff_summary_status(repo_root: Path, task: Dict[str, Any]) -> Tuple[str, str]:
+    out_dir = _task_output_dir(repo_root, task)
+    md_path = out_dir / "final_summary.md"
+    json_path = out_dir / "final_summary.json"
+    if md_path.exists() and json_path.exists():
+        return "PASS", relative_to_repo(repo_root, json_path)
+    if md_path.exists():
+        return "FAIL", relative_to_repo(repo_root, md_path)
+    return "FAIL", "missing"
 
 
 def _matches_any(allow_paths: List[str], rel: str) -> bool:
@@ -302,6 +325,36 @@ def _run_package_check(repo_root: Path, active_gate: str, check_id: str, phase: 
             _require_fields(records, ["run_scope", "coverage_ratio", "consumer_ready"], errors)
             if records and "missing_frame_ratio" not in records[0]:
                 errors.append("missing field: missing_frame_ratio")
+        elif check_id == "full_split_frame_geometry_applicability":
+            _require_fields(records, ["status", "report_kind", "coverage_ratio", "checked_frame_count", "failed_frame_count"], errors)
+            if records:
+                sample = records[0]
+                if sample.get("report_kind") != "full_split_frame_geometry_applicability":
+                    errors.append("report_kind must be full_split_frame_geometry_applicability")
+                if sample.get("status") != "PASS":
+                    errors.append("geometry applicability report status must be PASS")
+                try:
+                    checked = int(sample.get("checked_frame_count", 0) or 0)
+                    failed = int(sample.get("failed_frame_count", 0) or 0)
+                    if checked < 0 or failed < 0 or failed > checked:
+                        errors.append("invalid checked/failed frame counters")
+                except Exception:
+                    errors.append("invalid checked/failed frame counters")
+        elif check_id == "trajectory_mask_to_token_projection":
+            _require_fields(records, ["status", "report_kind", "coverage_ratio", "checked_frame_count", "failed_frame_count"], errors)
+            if records:
+                sample = records[0]
+                if sample.get("report_kind") != "trajectory_mask_to_token_projection":
+                    errors.append("report_kind must be trajectory_mask_to_token_projection")
+                if sample.get("status") != "PASS":
+                    errors.append("trajectory projection report status must be PASS")
+                try:
+                    checked = int(sample.get("checked_frame_count", 0) or 0)
+                    failed = int(sample.get("failed_frame_count", 0) or 0)
+                    if checked < 0 or failed < 0 or failed > checked:
+                        errors.append("invalid checked/failed frame counters")
+                except Exception:
+                    errors.append("invalid checked/failed frame counters")
         elif check_id == "carrier_bank_coverage_ready":
             _require_fields(records, ["run_scope", "coverage_ratio", "invalid_reason_stats", "consumer_ready"], errors)
         elif check_id == "text_bank_consumer_ready":
@@ -356,6 +409,8 @@ def main() -> int:
     contract_check_paths: List[str] = []
     baseline_ref = str(path_boundary_baseline_path(repo_root))
     task_truth_stamp = ""
+    handoff_completeness = "FAIL"
+    handoff_summary_artifact = "missing"
 
     status = "FAIL"
     try:
@@ -370,6 +425,9 @@ def main() -> int:
             return phase_ok and runner_ok
 
         task = read_json(control_file(repo_root, "CURRENT_TASK.json"))
+        handoff_completeness, handoff_summary_artifact = _handoff_summary_status(repo_root, task)
+        notes.append(f"handoff_completeness={handoff_completeness}")
+        notes.append(f"handoff_summary_artifact={handoff_summary_artifact}")
         contract_check_paths = [
             path for path in task.get("required_outputs", []) if path.endswith("_contract_check.json")
         ]
@@ -506,10 +564,15 @@ def main() -> int:
         'path_boundary_status': path_boundary_status,
         'path_boundary_baseline_ref': baseline_ref,
         'path_boundary_violations': path_boundary_violations,
+        'handoff_completeness': handoff_completeness,
+        'handoff_summary_artifact': handoff_summary_artifact,
         'notes': notes,
     }
     try:
-        require_schema(out, schema_root / 'validation_result.schema.json', 'validation_result')
+        legacy_out = dict(out)
+        legacy_out.pop('handoff_completeness', None)
+        legacy_out.pop('handoff_summary_artifact', None)
+        require_schema(legacy_out, schema_root / 'validation_result.schema.json', 'validation_result')
     except Exception as exc:
         out['status'] = 'FAIL'
         out['failure_code'] = out.get('failure_code') or 'FAIL_TAKEOVER_INCOMPLETE'

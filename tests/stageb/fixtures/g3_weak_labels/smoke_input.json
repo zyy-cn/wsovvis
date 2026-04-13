@@ -1,0 +1,21 @@
+{
+  "dataset_name": "lvvis_train_base",
+  "seed": 42,
+  "videos": [
+    {
+      "video_id": 2232,
+      "full_raw_ids": [
+        101,
+        104,
+        106
+      ]
+    },
+    {
+      "video_id": 2233,
+      "full_raw_ids": [
+        101,
+        106
+      ]
+    }
+  ]
+}
