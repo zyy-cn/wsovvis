@@ -145,6 +145,7 @@ def _resolve_image_path(split_root: Path, lvvis_root: Path, rel_file: str) -> Pa
 
 def _collect_samples(dataset_name: str, smoke: bool, progress: Any | None = None):
     from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import FrameSample
+    from videocutler.ext_stageb_ovvis.data.datasets.lvvis_smoke import load_lvvis_smoke_subset_data
 
     cfg = SPLIT_CFG[dataset_name]
     env_root = os.environ.get("WSOVVIS_LVVIS_ROOT", "").strip()
@@ -154,9 +155,14 @@ def _collect_samples(dataset_name: str, smoke: bool, progress: Any | None = None
         lvvis_root = (_repo_root() / "videocutler" / "datasets" / "LV-VIS").resolve()
     annotation_path = lvvis_root / cfg["annotation_rel"]
     split_root = lvvis_root / cfg["image_root_rel"]
-    data = _read_json(annotation_path)
+    if smoke and dataset_name == "lvvis_train_base":
+        _, subset_data, subset_image_root = load_lvvis_smoke_subset_data(dataset_name, smoke_num_videos=2)
+        data = subset_data
+        split_root = subset_image_root
+    else:
+        data = _read_json(annotation_path)
     videos = sorted(data.get("videos", []), key=lambda item: int(item["id"]))
-    if smoke:
+    if smoke and dataset_name != "lvvis_train_base":
         videos = videos[:2]
 
     samples: List[FrameSample] = []

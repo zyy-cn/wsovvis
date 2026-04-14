@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
-from .lvvis import _SPLITS, register_lvvis_instances, resolve_lvvis_root
+
+ROOT_ENV_VAR = "WSOVVIS_LVVIS_ROOT"
+ROOT_FALLBACK = "videocutler/datasets/LV-VIS"
+_SPLITS: Dict[str, Tuple[str, str, str]] = {
+    "lvvis_train_base": ("train", "annotations/train_instances.json", "train"),
+    "lvvis_val": ("val", "annotations/val_instances.json", "val"),
+}
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def resolve_lvvis_root() -> Path:
+    env_value = os.environ.get(ROOT_ENV_VAR)
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return (_repo_root() / ROOT_FALLBACK).resolve()
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -16,11 +34,10 @@ def _subset_split_name(dataset_name: str, smoke_num_videos: int) -> str:
     return f"{dataset_name}_smoke_first{int(smoke_num_videos)}"
 
 
-def register_lvvis_smoke_subset(
+def load_lvvis_smoke_subset_data(
     dataset_name: str,
     smoke_num_videos: int,
-    smoke_root: Path,
-) -> Tuple[str, Path, Path]:
+) -> Tuple[str, Dict[str, Any], Path]:
     if dataset_name not in _SPLITS:
         raise ValueError(f"unsupported LV-VIS dataset: {dataset_name}")
     if smoke_num_videos <= 0:
@@ -30,7 +47,7 @@ def register_lvvis_smoke_subset(
     lvvis_root = resolve_lvvis_root()
     source_json = lvvis_root / annotation_rel
     source_data = _load_json(source_json)
-    videos = sorted(source_data.get("videos", []), key=lambda item: item["id"])[: smoke_num_videos]
+    videos: List[Dict[str, Any]] = sorted(source_data.get("videos", []), key=lambda item: item["id"])[: smoke_num_videos]
     video_ids = {int(video["id"]) for video in videos}
     annotations = [
         annotation
@@ -40,8 +57,19 @@ def register_lvvis_smoke_subset(
     subset_data = dict(source_data)
     subset_data["videos"] = videos
     subset_data["annotations"] = annotations
-
     smoke_name = _subset_split_name(dataset_name, smoke_num_videos)
+    return smoke_name, subset_data, lvvis_root / image_rel
+
+
+def register_lvvis_smoke_subset(
+    dataset_name: str,
+    smoke_num_videos: int,
+    smoke_root: Path,
+) -> Tuple[str, Path, Path]:
+    from .lvvis import register_lvvis_instances
+
+    split_tag, _, _ = _SPLITS[dataset_name]
+    smoke_name, subset_data, image_root = load_lvvis_smoke_subset_data(dataset_name, smoke_num_videos)
     smoke_root = smoke_root.expanduser().resolve()
     smoke_annotation_path = smoke_root / "annotations" / f"{split_tag}_instances_smoke_first{smoke_num_videos}.json"
     smoke_annotation_path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,5 +78,5 @@ def register_lvvis_smoke_subset(
         encoding="utf-8",
     )
 
-    register_lvvis_instances(smoke_name, smoke_annotation_path, lvvis_root / image_rel)
-    return smoke_name, smoke_annotation_path, lvvis_root / image_rel
+    register_lvvis_instances(smoke_name, smoke_annotation_path, image_root)
+    return smoke_name, smoke_annotation_path, image_root

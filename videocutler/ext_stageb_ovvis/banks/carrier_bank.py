@@ -27,7 +27,12 @@ class CarrierBuildConfig:
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[4]
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "codex" / "control" / "CURRENT_TASK.json").exists():
+            return parent
+    # Fallback keeps backward compatibility with the known repo layout.
+    return current.parents[3]
 
 
 def _safe_id(text: str) -> str:
@@ -95,6 +100,8 @@ def _decode_mask_rle(mask_item: Any, image_size: Sequence[int]) -> np.ndarray:
         rle = dict(mask_item)
         if "size" not in rle:
             rle["size"] = [h, w]
+        if isinstance(rle.get("counts"), list):
+            rle = mask_utils.frPyObjects(rle, h, w)
         decoded = mask_utils.decode(rle)
         return np.asarray(decoded, dtype=np.uint8)
     if isinstance(mask_item, str):
