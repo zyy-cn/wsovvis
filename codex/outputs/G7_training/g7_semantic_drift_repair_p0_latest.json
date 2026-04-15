@@ -1,0 +1,66 @@
+{
+  "status": "PASS",
+  "task_id": "G7_training-task",
+  "active_gate": "G7_training",
+  "package_authorized_p0": true,
+  "control_plane_refreshed": true,
+  "preflight": {
+    "local_git_clean": true,
+    "tree_match": true,
+    "remote_no_touch_clean": true,
+    "overall_preflight_status": "PASS"
+  },
+  "bounded_smoke": {
+    "prealign": {
+      "status": "PASS",
+      "exp_name": "g7_p0_prealign_smoke",
+      "record_count_input": 32,
+      "record_count_trainable": 22,
+      "record_count_output": 22,
+      "coverage_ratio_trainable": 0.6875,
+      "determinism_ok": true
+    },
+    "softem": {
+      "status": "PASS",
+      "exp_name": "g7_p0_softem_smoke",
+      "mode": "base_then_aug",
+      "record_count_input": 32,
+      "record_count_trainable": 22,
+      "record_count_output": 22,
+      "coverage_ratio_trainable": 0.6875,
+      "em_subiterations": 2,
+      "selected_checkpoint_path": "train/softem_aug/checkpoints/softem_aug_last.pth"
+    }
+  },
+  "files_changed": [
+    "videocutler/ext_stageb_ovvis/data/g7_phase1_materialization.py",
+    "videocutler/ext_stageb_ovvis/algorithms/_g7_semantics.py",
+    "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
+    "codex/control/PATH_POLICY.json",
+    "codex/control/CURRENT_TASK.json",
+    "codex/control/VALIDATION_PLAN.json",
+    "codex/control/TAKEOVER_LATEST.md",
+    "codex/state/private-cache/task_truth_stamp.json",
+    "tests/stageb/test_g7_core_repair_minimum.py",
+    "tests/stageb/test_g7_audit_v1.py",
+    "tests/stageb/test_g7_extra_recovery_audit.py",
+    "videocutler/ext_stageb_ovvis/audit/extra_recovery_audit.py",
+    "videocutler/run_stageb_audit_g7_extra_recovery.py"
+  ],
+  "canonical_small_artifacts": [
+    "codex/outputs/g7_training/prealign_contract_check.json",
+    "codex/outputs/g7_training/softem_contract_check.json",
+    "train/prealign/train_state.json",
+    "train/prealign/proxy_records.jsonl",
+    "train/softem_base/train_state.json",
+    "train/softem_base/responsibility_records.jsonl",
+    "train/softem_aug/train_state.json",
+    "train/softem_aug/responsibility_records.jsonl"
+  ],
+  "audit_infrastructure_compatibility": {
+    "audit_v1": "intact",
+    "extra_recovery_audit": "intact"
+  },
+  "formal_training_ready": false,
+  "next_action": "await next task assignment or formal-run approval"
+}
