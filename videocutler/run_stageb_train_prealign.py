@@ -56,6 +56,28 @@ def _write_jsonl(path: Path, rows: list[Dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _write_contract_check(repo_root: Path, *, train_result: Dict[str, Any], summary: Dict[str, Any]) -> Path:
+    contract_check = {
+        "gate_id": "G7_training",
+        "contract_ref": "contracts/gates/G7_training.gate_contract.json",
+        "status": "PASS" if summary.get("status") == "PASS" else "FAIL",
+        "artifact_path_base": "output_root_relative",
+        "primary_artifacts": [
+            "train/prealign/train_state.json",
+            "train/prealign/proxy_records.jsonl",
+        ],
+        "checks_run": [
+            "train_state_selected_for_infer_readable",
+            "stage_local_snapshot_reader_readable",
+            "artifact_exists",
+            "artifact_schema_valid",
+        ],
+    }
+    contract_path = repo_root / "codex" / "outputs" / "g7_training" / "prealign_contract_check.json"
+    _write_json(contract_path, contract_check)
+    return contract_path
+
+
 def main() -> int:
     args = parse_args()
     if str(args.dataset_name) != "lvvis_train_base":
@@ -137,6 +159,7 @@ def main() -> int:
         },
     }
     _write_json(_phase1_summary_path(repo_root), summary)
+    _write_contract_check(repo_root, train_result=train_result, summary=summary)
 
     print(json.dumps(summary, ensure_ascii=False))
     return 0

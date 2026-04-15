@@ -412,7 +412,6 @@ def run_soft_em(
         train_state = {
             "stage_id": stage.stage_id,
             "epoch": int(stage.epochs),
-            "run_scope": "smoke" if bool(config.smoke) else "full",
             "selected_for_infer": stage.selected_for_infer,
             "selected_for_infer_authority": "explicit_train_state_field",
             "checkpoint_last": str((Path("train") / stage.stage_id / "checkpoints" / stage.checkpoint_name).as_posix()),

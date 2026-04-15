@@ -58,6 +58,42 @@ def _write_jsonl(path: Path, rows: list[Dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _write_contract_check(repo_root: Path, *, softem_result: Dict[str, Any], summary: Dict[str, Any], run_scope: str) -> Path:
+    stage_reports = list(softem_result.get("stage_reports", []))
+    primary_artifacts: list[str] = [
+        "train/prealign/train_state.json",
+        "train/prealign/proxy_records.jsonl",
+        "train/prealign/checkpoints/prealign_last.pth",
+    ]
+    for stage in stage_reports:
+        train_state_path = str(stage.get("train_state_path", "")).strip()
+        resp_path = str(stage.get("responsibility_records_path", "")).strip()
+        ckpt_path = str(stage.get("checkpoint_last_path", "")).strip()
+        for rel in (train_state_path, resp_path, ckpt_path):
+            if rel and rel not in primary_artifacts:
+                primary_artifacts.append(rel)
+    contract_check = {
+        "gate_id": "G7_training",
+        "contract_ref": "contracts/gates/G7_training.gate_contract.json",
+        "status": "PASS" if summary.get("status") == "PASS" else "FAIL",
+        "artifact_path_base": "output_root_relative",
+        "primary_artifacts": primary_artifacts,
+        "checks_run": [
+            "train_state_selected_for_infer_readable",
+            "selected_checkpoint_exists",
+            "stage_local_snapshot_reader_readable",
+            "artifact_exists",
+            "artifact_schema_valid",
+        ],
+        "run_scope": str(run_scope),
+        "selected_checkpoint_path": str(softem_result.get("selected_checkpoint_path", "")).strip(),
+        "consumer_ready": bool(summary.get("status") == "PASS" and not str(run_scope) == "smoke"),
+    }
+    contract_path = repo_root / "codex" / "outputs" / "g7_training" / "softem_contract_check.json"
+    _write_json(contract_path, contract_check)
+    return contract_path
+
+
 def main() -> int:
     args = parse_args()
     if str(args.dataset_name) != "lvvis_train_base":
@@ -153,6 +189,7 @@ def main() -> int:
         "selected_checkpoint_path": softem_result["selected_checkpoint_path"],
     }
     _write_json(_summary_path(repo_root), summary)
+    _write_contract_check(repo_root, softem_result=softem_result, summary=summary, run_scope="smoke" if bool(args.smoke) else "full")
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 
