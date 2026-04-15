@@ -17,6 +17,7 @@ from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     fuse_carrier_frame_logits,
     fuse_carrier_frame_logits_torch,
     load_combined_evidence,
+    refine_responsibilities,
 )
 from videocutler.ext_stageb_ovvis.banks.text_bank import resolve_text_prototype
 from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
