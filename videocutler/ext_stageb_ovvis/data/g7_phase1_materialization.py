@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
+
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_combined_evidence, load_text_vocab
+
 
 Record = Dict[str, Any]
 
@@ -16,6 +20,14 @@ class Phase1MaterializationConfig:
     trajectory_source_branch: str = "mainline"
     smoke: bool = False
     smoke_max_trajectories: int = 128
+
+
+def _normalize(vec: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:
+    arr = np.asarray(vec, dtype=np.float32)
+    norm = float(np.linalg.norm(arr))
+    if norm <= eps:
+        return None
+    return (arr / norm).astype(np.float32)
 
 
 def _load_json(path: Path) -> Any:
@@ -141,22 +153,66 @@ def _stable_trajectory_order(records: Iterable[Record]) -> List[Record]:
 def _candidate_domain(
     weak_label_record: Optional[Record],
     text_by_raw: Mapping[int, Record],
-) -> Tuple[List[int], List[int], List[int], List[Record], List[str]]:
+    *,
+    text_vocab_ids: Sequence[int],
+    text_vocab_matrix: np.ndarray,
+    evidence_vector: Optional[np.ndarray],
+) -> Tuple[List[int], List[int], List[int], List[Record], List[str], List[Record]]:
     if weak_label_record is None:
-        return [], [], [], [], ["missing_weak_label_record"]
+        return [], [], [], [], ["missing_weak_label_record"], []
     observed = sorted({int(x) for x in list(weak_label_record.get("observed_raw_ids", []))})
     known = [raw_id for raw_id in observed if raw_id in text_by_raw]
     missing = [raw_id for raw_id in observed if raw_id not in text_by_raw]
-    extra_pool = [raw_id for raw_id in sorted(text_by_raw.keys()) if raw_id not in set(known)]
+    known_set = set(known)
+    extra_pool = [raw_id for raw_id in list(text_vocab_ids) if int(raw_id) not in known_set]
     extra_cap = min(8, max(1, len(known))) if extra_pool else 0
-    extra = extra_pool[:extra_cap]
+    extra: List[int] = []
+    provenance: List[Record] = []
+    if extra_pool:
+        if evidence_vector is not None:
+            evidence = _normalize(evidence_vector)
+            if evidence is None:
+                evidence_scores = None
+            else:
+                evidence_scores = np.asarray(text_vocab_matrix, dtype=np.float32) @ np.asarray(evidence, dtype=np.float32)
+            if evidence_scores is not None and int(np.asarray(evidence_scores).shape[0]) == len(text_vocab_ids):
+                scored_pool = [
+                    (float(evidence_scores[idx]), int(raw_id))
+                    for idx, raw_id in enumerate(list(text_vocab_ids))
+                    if int(raw_id) not in known_set
+                ]
+                scored_pool.sort(key=lambda item: (-item[0], item[1]))
+                selected = scored_pool[:extra_cap]
+                extra = [raw_id for _, raw_id in selected]
+                provenance = [
+                    {
+                        "raw_id": int(raw_id),
+                        "score": float(score),
+                        "rank": int(rank) + 1,
+                        "admission_reason": "topk_non_observed_by_sample_evidence",
+                    }
+                    for rank, (score, raw_id) in enumerate(selected)
+                ]
+            else:
+                provenance = []
+        if not extra:
+            extra = extra_pool[:extra_cap]
+            provenance = [
+                {
+                    "raw_id": int(raw_id),
+                    "score": None,
+                    "rank": int(rank) + 1,
+                    "admission_reason": "static_fallback_missing_sample_evidence",
+                }
+                for rank, raw_id in enumerate(extra)
+            ]
     candidates = [text_by_raw[raw_id] for raw_id in [*known, *extra]]
     errors: List[str] = []
     if missing:
         errors.append("missing_text_prototype_for_observed_raw_id")
     if extra_pool and not extra:
         errors.append("no_extra_candidates_selected")
-    return observed, known, extra, candidates, errors
+    return observed, known, extra, candidates, errors, provenance
 
 
 def _required_sample_fields() -> List[str]:
@@ -226,7 +282,7 @@ def materialize_phase1_training_samples(
     frame_records = _load_jsonl(output_root / assets["frame_records"]["path"])
     geom_records = _load_jsonl(output_root / assets["frame_geom_records"]["path"])
     weak_records = _load_json(output_root / assets["weak_labels"]["path"])
-    text_records = _load_jsonl(output_root / assets["text_prototypes"]["path"])
+    text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(output_root)
 
     if not isinstance(weak_records, list):
         raise ValueError("weak_labels_train must be a JSON array")
@@ -284,9 +340,29 @@ def materialize_phase1_training_samples(
             else:
                 geom_rows.append(gm)
 
-        observed_raw_ids, candidate_ids_known, candidate_ids_extra, candidate_text, candidate_errors = _candidate_domain(
+        evidence_vector = None
+        if carrier_rec is not None and frame_rows and geom_rows:
+            try:
+                _, _, evidence_vector = load_combined_evidence(
+                    {
+                        "carrier_record": carrier_rec,
+                        "frame_feature_rows": frame_rows,
+                        "frame_geometry_rows": geom_rows,
+                    },
+                    output_root=output_root,
+                    dataset_name=config.dataset_name,
+                    trajectory_source_branch=config.trajectory_source_branch,
+                )
+            except Exception:
+                evidence_vector = None
+                invalid_reasons.append("missing_sample_evidence_for_extra_proposal")
+
+        observed_raw_ids, candidate_ids_known, candidate_ids_extra, candidate_text, candidate_errors, candidate_provenance = _candidate_domain(
             weak_rec,
             text_by_raw,
+            text_vocab_ids=text_vocab_ids,
+            text_vocab_matrix=text_vocab_matrix,
+            evidence_vector=evidence_vector,
         )
         invalid_reasons.extend(candidate_errors)
         if candidate_errors and "class_text_bank_view" not in missing_views:
@@ -306,6 +382,8 @@ def materialize_phase1_training_samples(
             "observed_raw_ids": observed_raw_ids,
             "candidate_ids_known": candidate_ids_known,
             "candidate_ids_extra": candidate_ids_extra,
+            "candidate_ids_extra_provenance": candidate_provenance,
+            "candidate_proposal_source": "sample_evidence_ranked_non_observed" if evidence_vector is not None else "static_fallback_no_sample_evidence",
             "missing_views": sorted(set(missing_views)),
             "invalid_reasons": sorted(set(invalid_reasons)),
         }

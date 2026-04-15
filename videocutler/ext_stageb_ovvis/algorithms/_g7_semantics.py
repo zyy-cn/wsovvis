@@ -221,16 +221,22 @@ def refine_responsibilities(
     scores: Dict[str, float] = {"unknown": base_unknown + 0.0}
     weight_by_id: Dict[str, float] = {"unknown": 1.0}
     coverage_bonus_applied_to: List[int] = []
+    known_total_mass = float(sum(max(0.0, float(init.get(str(int(raw_id)), 0.0))) for raw_id in known_ids))
+    extra_total_mass = float(sum(max(0.0, float(init.get(str(int(raw_id)), 0.0))) for raw_id in extra_ids))
+    known_denom = float(known_total_mass if known_total_mass > 1e-12 else max(len(known_ids), 1))
+    extra_denom = float(extra_total_mass if extra_total_mass > 1e-12 else max(len(extra_ids), 1))
 
     for raw_id, model_prob in zip(domain_ids, model_probs_arr.tolist()):
         init_mass = max(0.0, float(init.get(str(int(raw_id)), 0.0)))
         score = math.log(max(model_prob, 1e-12)) + math.log(max(init_mass, 1e-12))
         weight = 1.0
         if int(raw_id) in known_ids:
-            weight = 1.0 + float(coverage_bonus)
+            coverage_share = init_mass / known_denom
+            weight = 1.0 + float(coverage_bonus) * float(coverage_share)
             coverage_bonus_applied_to.append(int(raw_id))
         elif int(raw_id) in extra_ids:
-            weight = max(1e-6, 1.0 - float(extra_penalty))
+            extra_share = init_mass / extra_denom
+            weight = max(1e-6, 1.0 - float(extra_penalty) * float(extra_share))
         scores[str(int(raw_id))] = score + math.log(max(weight, 1e-12))
         weight_by_id[str(int(raw_id))] = float(weight)
 

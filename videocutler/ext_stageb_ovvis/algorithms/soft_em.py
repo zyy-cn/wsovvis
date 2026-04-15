@@ -250,6 +250,29 @@ def _stage_mass_from_logits(
     coverage_bonus: float = 0.15,
     extra_penalty: float = 0.05,
 ) -> Tuple[Dict[str, float], Dict[str, float], List[int]]:
+    return _stage_mass_from_logits_iterative(
+        stage_id=stage_id,
+        candidate_ids_known=candidate_ids_known,
+        candidate_ids_extra=candidate_ids_extra,
+        initial_mass=initial_mass,
+        stage_logits=stage_logits,
+        coverage_bonus=coverage_bonus,
+        extra_penalty=extra_penalty,
+        em_subiterations=1,
+    )[:3]
+
+
+def _stage_mass_from_logits_iterative(
+    *,
+    stage_id: str,
+    candidate_ids_known: Sequence[int],
+    candidate_ids_extra: Sequence[int],
+    initial_mass: Mapping[str, float],
+    stage_logits: np.ndarray,
+    coverage_bonus: float = 0.15,
+    extra_penalty: float = 0.05,
+    em_subiterations: int = 1,
+) -> Tuple[Dict[str, float], Dict[str, float], List[int], List[Dict[str, Any]]]:
     domain_ids, known_ids, extra_ids = build_stage_domain_indices(
         candidate_ids_known,
         candidate_ids_extra,
@@ -258,30 +281,40 @@ def _stage_mass_from_logits(
     logits = np.asarray(stage_logits, dtype=np.float64)
     if logits.ndim != 1 or int(logits.shape[0]) != len(domain_ids) + 1:
         raise ValueError("stage logits shape mismatch")
-    init = _normalize_mass(initial_mass)
-    scores: List[float] = []
+    current_mass = _normalize_mass(initial_mass)
     keys: List[str] = ["unknown", *[str(int(raw_id)) for raw_id in domain_ids]]
+    model_probs = torch.softmax(torch.tensor(logits[1:], dtype=torch.float64), dim=0).cpu().numpy().astype(np.float64)
+    trace: List[Dict[str, Any]] = []
     coverage_bonus_applied_to: List[int] = []
-    for idx, key in enumerate(keys):
-        raw_bias = 0.0
-        if key == "unknown":
-            weight = 1.0
-        else:
-            raw_id = int(key)
-            if raw_id in known_ids:
-                weight = 1.0 + float(coverage_bonus)
-                coverage_bonus_applied_to.append(raw_id)
-            elif raw_id in extra_ids:
-                weight = max(1e-6, 1.0 - float(extra_penalty))
-            else:
-                weight = 1.0
-            raw_bias = math.log(max(weight, 1e-12))
-        scores.append(float(logits[idx]) + math.log(max(init.get(key, 0.0), 1e-12)) + raw_bias)
-    score_tensor = torch.tensor(scores, dtype=torch.float64)
-    probs = torch.softmax(score_tensor, dim=0).cpu().numpy().astype(np.float64)
-    final_mass = {key: float(prob) for key, prob in zip(keys, probs.tolist())}
-    init_full = {key: float(init.get(key, 0.0)) for key in keys}
-    return _normalize_mass(init_full), _normalize_mass(final_mass), sorted(set(coverage_bonus_applied_to))
+    final_mass = dict(current_mass)
+    init_mass = dict(current_mass)
+
+    for subiter_index in range(max(1, int(em_subiterations))):
+        refined_init, refined_final, coverage_bonus_applied_to = refine_responsibilities(
+            initial_mass=current_mass,
+            model_probs=model_probs,
+            candidate_ids_known=known_ids,
+            candidate_ids_extra=extra_ids,
+            stage_id=stage_id,
+            coverage_bonus=coverage_bonus,
+            extra_penalty=extra_penalty,
+        )
+        trace.append(
+            {
+                "subiteration_index": int(subiter_index),
+                "r_init": refined_init,
+                "r_final": refined_final,
+                "coverage_bonus_applied_to": list(coverage_bonus_applied_to),
+            }
+        )
+        init_mass = refined_init
+        final_mass = refined_final
+        current_mass = refined_final
+
+    # Ensure the returned dictionaries include all expected keys even when the stage domain is empty.
+    init_mass = _normalize_mass({key: float(init_mass.get(key, 0.0)) for key in keys})
+    final_mass = _normalize_mass({key: float(final_mass.get(key, 0.0)) for key in keys})
+    return init_mass, final_mass, sorted(set(coverage_bonus_applied_to)), trace
 
 
 def _load_proxy_rows(output_root: Path) -> List[Record]:
@@ -337,6 +370,7 @@ def run_soft_em(
         )
         losses: List[float] = []
         iteration_index = 0
+        stage_trace_sample: List[Dict[str, Any]] = []
 
         if audit_callback is not None:
             audit_callback(
@@ -378,13 +412,16 @@ def run_soft_em(
                 init_domain = {"unknown": float(init_mass.get("unknown", 1.0))}
                 for raw_id in domain_ids:
                     init_domain[str(int(raw_id))] = float(init_mass.get(str(int(raw_id)), 0.0))
-                refined_init, refined_final, coverage_bonus_applied_to = _stage_mass_from_logits(
+                refined_init, refined_final, coverage_bonus_applied_to, trace = _stage_mass_from_logits_iterative(
                     stage_id=stage.stage_id,
                     candidate_ids_known=ex["candidate_ids_known"],
                     candidate_ids_extra=ex["candidate_ids_extra"],
                     initial_mass=init_domain,
                     stage_logits=stage_logits.detach().cpu().numpy(),
+                    em_subiterations=max(1, int(config.em_subiterations)),
                 )
+                if not stage_trace_sample:
+                    stage_trace_sample = list(trace)
                 target = torch.tensor(
                     [refined_final["unknown"], *[refined_final[str(int(raw_id))] for raw_id in domain_ids]],
                     device=device,
@@ -406,6 +443,8 @@ def run_soft_em(
                     "r_init": refined_init,
                     "r_final": refined_final,
                     "coverage_bonus_applied_to": coverage_bonus_applied_to,
+                    "em_subiterations": int(max(1, int(config.em_subiterations))),
+                    "em_subiteration_count": int(len(trace)),
                     "iteration_index": int(iteration_index),
                     "join_key": str(ex_tid),
                 }
@@ -465,15 +504,17 @@ def run_soft_em(
             checkpoint_path,
         )
         stage_reports.append(
-            {
-                "stage_id": stage.stage_id,
-                "responsibility_records_path": stage.responsibility_relpath,
-                "train_state_path": stage.train_state_relpath,
-                "checkpoint_last_path": str((Path("train") / stage.stage_id / "checkpoints" / stage.checkpoint_name).as_posix()),
-                "record_count_output": int(len(cache.by_trajectory_id)),
-                "loss_mean": float(np.mean(losses)) if losses else 0.0,
-                "loss_last": float(losses[-1]) if losses else 0.0,
-            }
+                {
+                    "stage_id": stage.stage_id,
+                    "responsibility_records_path": stage.responsibility_relpath,
+                    "train_state_path": stage.train_state_relpath,
+                    "checkpoint_last_path": str((Path("train") / stage.stage_id / "checkpoints" / stage.checkpoint_name).as_posix()),
+                    "record_count_output": int(len(cache.by_trajectory_id)),
+                    "loss_mean": float(np.mean(losses)) if losses else 0.0,
+                    "loss_last": float(losses[-1]) if losses else 0.0,
+                    "em_subiterations": int(max(1, int(config.em_subiterations))),
+                    "subiteration_trace_sample": stage_trace_sample,
+                }
         )
         current_checkpoint = checkpoint_path
 
