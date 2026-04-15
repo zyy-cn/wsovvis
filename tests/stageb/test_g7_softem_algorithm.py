@@ -33,6 +33,41 @@ def _setup_minimal_softem_fixture(tmp_path: Path) -> list[dict]:
         text_dir / "text_prototype_records.jsonl",
         [{"raw_id": 1, "proto_path": "payload/text_prototypes.npz#protos[0]", "path_base_mode": "artifact_parent_dir"}],
     )
+    frame_dir = tmp_path / "frame_bank" / "lvvis_train_base"
+    (frame_dir / "payload").mkdir(parents=True, exist_ok=True)
+    frame_tokens = np.zeros((1, 4, 768), dtype=np.float16)
+    frame_tokens[0, 0, 0] = 1.0
+    np.savez(frame_dir / "payload" / "clip_7_feats.npz", slot_0=frame_tokens[0])
+    _write_jsonl(
+        frame_dir / "frame_records.jsonl",
+        [{"clip_id": "7", "frame_index": 0, "feat_path": "payload/clip_7_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
+    )
+    _write_jsonl(
+        frame_dir / "frame_geom_records.jsonl",
+        [
+            {
+                "clip_id": "7",
+                "frame_index": 0,
+                "orig_h": 28,
+                "orig_w": 28,
+                "resized_h": 28,
+                "resized_w": 28,
+                "padded_h": 28,
+                "padded_w": 28,
+                "scale_y": 1.0,
+                "scale_x": 1.0,
+                "pad_left": 0,
+                "pad_top": 0,
+                "pad_right": 0,
+                "pad_bottom": 0,
+                "patch_size": 14,
+                "grid_h": 2,
+                "grid_w": 2,
+                "valid_token_mask_path": "frame_geom_records.jsonl#0",
+                "path_base_mode": "artifact_parent_dir",
+            }
+        ],
+    )
 
     prealign_dir = tmp_path / "train" / "prealign"
     (prealign_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
@@ -75,8 +110,30 @@ def _setup_minimal_softem_fixture(tmp_path: Path) -> list[dict]:
             "trajectory_record": {"video_id": 8},
             "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
             "weak_label_record": {"observed_raw_ids": [1]},
-            "frame_feature_rows": [],
-            "frame_geometry_rows": [],
+            "frame_feature_rows": [{"feat_path": "payload/clip_7_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
+            "frame_geometry_rows": [
+                {
+                    "clip_id": "7",
+                    "frame_index": 0,
+                    "orig_h": 28,
+                    "orig_w": 28,
+                    "resized_h": 28,
+                    "resized_w": 28,
+                    "padded_h": 28,
+                    "padded_w": 28,
+                    "scale_y": 1.0,
+                    "scale_x": 1.0,
+                    "pad_left": 0,
+                    "pad_top": 0,
+                    "pad_right": 0,
+                    "pad_bottom": 0,
+                    "patch_size": 14,
+                    "grid_h": 2,
+                    "grid_w": 2,
+                    "valid_token_mask_path": "frame_geom_records.jsonl#0",
+                    "path_base_mode": "artifact_parent_dir",
+                }
+            ],
             "candidate_text_prototypes": [
                 {"raw_id": 1, "proto_path": "payload/text_prototypes.npz#protos[0]", "path_base_mode": "artifact_parent_dir"}
             ],

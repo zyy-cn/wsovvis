@@ -83,7 +83,7 @@ def _prepare_fixture(tmp_path: Path) -> Path:
             {
                 "clip_id": "101",
                 "video_id": 101,
-                "observed_raw_ids": [1, 2],
+                "observed_raw_ids": [1],
                 "observation_protocol_id": "keep80_seed42",
                 "completeness_status": "unknown",
             }
@@ -202,4 +202,5 @@ def test_phase1_materialization_flags_missing_views(tmp_path: Path) -> None:
     assert by_tid["traj_000002"]["sample_valid"] is False
     assert "missing_carrier_record" in by_tid["traj_000002"]["invalid_reasons"]
     assert "missing_weak_label_record" in by_tid["traj_000002"]["invalid_reasons"]
-
+    assert by_tid["traj_000001"]["candidate_ids_extra"]
+    assert len(by_tid["traj_000001"]["candidate_text_prototypes"]) > len(by_tid["traj_000001"]["candidate_ids_known"])

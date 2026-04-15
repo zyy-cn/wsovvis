@@ -10,8 +10,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_locator
-from videocutler.ext_stageb_ovvis.banks.text_bank import resolve_text_prototype
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
+    fuse_carrier_frame_logits,
+    fuse_carrier_frame_logits_torch,
+    load_combined_evidence,
+    load_text_vocab,
+    observed_mass_loss,
+)
 from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
 
 
@@ -67,8 +72,6 @@ def _prepare_examples(
     dataset_name: str,
     trajectory_source_branch: str,
 ) -> Dict[str, Any]:
-    carrier_parent = _carrier_artifact_parent(output_root, dataset_name, trajectory_source_branch)
-    text_records_path = output_root / "text_bank" / "text_prototype_records.jsonl"
     examples: List[Dict[str, Any]] = []
     skipped: Dict[str, int] = {}
 
@@ -80,28 +83,15 @@ def _prepare_examples(
             bump("sample_not_valid_from_phase1")
             continue
 
-        carrier_record = sample.get("carrier_record")
-        if not isinstance(carrier_record, dict):
-            bump("missing_carrier_record")
-            continue
-        z_norm_path = str(carrier_record.get("z_norm_path", ""))
-        if not z_norm_path:
-            bump("missing_z_norm_path")
-            continue
-
-        traj_vec = read_vector_from_locator(carrier_parent, z_norm_path)
-        cand_records = list(sample.get("candidate_text_prototypes", []))
-        if not cand_records:
-            bump("empty_candidate_text_prototypes")
-            continue
-        candidate_vectors: List[np.ndarray] = []
-        candidate_ids_known = [int(x) for x in list(sample.get("candidate_ids_known", []))]
-        observed_set = {int(x) for x in list(sample.get("observed_raw_ids", []))}
-        for rec in cand_records:
-            candidate_vectors.append(resolve_text_prototype(text_records_path, rec))
-        pos_indices = [idx for idx, raw_id in enumerate(candidate_ids_known) if int(raw_id) in observed_set]
-        if not pos_indices:
-            bump("no_positive_candidate")
+        try:
+            carrier_vec, frame_vec, combined_vec = load_combined_evidence(
+                sample,
+                output_root=output_root,
+                dataset_name=dataset_name,
+                trajectory_source_branch=trajectory_source_branch,
+            )
+        except Exception:
+            bump("missing_frame_evidence")
             continue
 
         examples.append(
@@ -109,11 +99,10 @@ def _prepare_examples(
                 "trajectory_id": str(sample["trajectory_id"]),
                 "clip_id": int(sample["clip_id"]),
                 "video_id": int(sample["trajectory_record"]["video_id"]),
-                "observed_raw_ids": sorted(observed_set),
-                "candidate_ids_known": candidate_ids_known,
-                "traj_vec": np.asarray(traj_vec, dtype=np.float32),
-                "candidate_matrix": np.asarray(candidate_vectors, dtype=np.float32),
-                "positive_indices": pos_indices,
+                "observed_raw_ids": sorted({int(x) for x in list(sample.get("observed_raw_ids", []))}),
+                "carrier_vec": np.asarray(carrier_vec, dtype=np.float32),
+                "frame_vec": np.asarray(frame_vec, dtype=np.float32),
+                "combined_vec": np.asarray(combined_vec, dtype=np.float32),
             }
         )
     return {"examples": examples, "skipped_reason_histogram": skipped}
@@ -139,6 +128,8 @@ def train_prealign(
     total_samples = len(materialized_samples)
     if not examples:
         raise RuntimeError("no valid trainable prealign examples after phase-1 filtering")
+    text_vocab_ids, text_vocab_records, text_vocab_matrix = load_text_vocab(output_root)
+    text_vocab_matrix_t = torch.from_numpy(text_vocab_matrix.astype(np.float32))
 
     projector = Projector(config.projector).to(device)
     projector.train()
@@ -148,6 +139,7 @@ def train_prealign(
         weight_decay=float(config.weight_decay),
     )
     losses: List[float] = []
+    text_candidate_matrix = np.asarray(text_vocab_matrix, dtype=np.float32)
 
     if audit_callback is not None:
         audit_callback(
@@ -170,16 +162,18 @@ def train_prealign(
     for epoch_index in range(int(config.epochs)):
         random.Random(int(config.seed)).shuffle(examples)
         for ex in examples:
-            x = torch.from_numpy(ex["traj_vec"]).to(device=device, dtype=torch.float32).unsqueeze(0)
-            q = projector(x)
-            cands = torch.from_numpy(ex["candidate_matrix"]).to(device=device, dtype=torch.float32)
-            cands = F.normalize(cands, p=2.0, dim=-1)
-            logits = torch.matmul(q, cands.t()).squeeze(0) / float(config.temperature)
-            target = torch.zeros_like(logits)
-            positive = ex["positive_indices"]
-            target[positive] = 1.0 / float(len(positive))
-            log_prob = torch.log_softmax(logits, dim=0)
-            loss = -torch.sum(target * log_prob)
+            _, _, logits = fuse_carrier_frame_logits_torch(
+                projector=projector,
+                carrier_vec=ex["carrier_vec"],
+                frame_vec=ex["frame_vec"],
+                candidate_matrix=text_candidate_matrix,
+                temperature=float(config.temperature),
+            )
+            observed_raw_ids = [int(x) for x in ex["observed_raw_ids"]]
+            positive = [idx for idx, raw_id in enumerate(text_vocab_ids) if int(raw_id) in observed_raw_ids]
+            if not positive:
+                raise RuntimeError(f"no observed raw ids found in text vocab for trajectory {ex['trajectory_id']}")
+            loss = observed_mass_loss(logits, positive, unknown_logit=torch.zeros((), device=device, dtype=torch.float32))
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -206,15 +200,19 @@ def train_prealign(
     proxy_rows: List[Record] = []
     with torch.no_grad():
         for ex in sorted(examples, key=lambda row: str(row["trajectory_id"])):
-            x = torch.from_numpy(ex["traj_vec"]).to(device=device, dtype=torch.float32).unsqueeze(0)
-            q = projector(x)
-            cands = torch.from_numpy(ex["candidate_matrix"]).to(device=device, dtype=torch.float32)
-            cands = F.normalize(cands, p=2.0, dim=-1)
-            logits = torch.matmul(q, cands.t()).squeeze(0) / float(config.temperature)
-            probs = torch.softmax(logits, dim=0).detach().cpu().numpy().astype(np.float64)
-            proxy_mass = {"unknown": float(max(0.0, 1.0 - float(np.sum(probs))))}
-            for idx, raw_id in enumerate(ex["candidate_ids_known"]):
-                proxy_mass[str(int(raw_id))] = float(probs[idx])
+            _, _, logits_np = fuse_carrier_frame_logits(
+                projector=projector,
+                carrier_vec=ex["carrier_vec"],
+                frame_vec=ex["frame_vec"],
+                candidate_matrix=text_candidate_matrix,
+                temperature=float(config.temperature),
+            )
+            logits = torch.from_numpy(np.asarray(logits_np, dtype=np.float32)).to(device=device, dtype=torch.float32)
+            logits_full = torch.cat([torch.zeros(1, device=device, dtype=torch.float32), logits], dim=0)
+            probs = torch.softmax(logits_full, dim=0).detach().cpu().numpy().astype(np.float64)
+            proxy_mass = {"unknown": float(probs[0])}
+            for idx, raw_id in enumerate(text_vocab_ids):
+                proxy_mass[str(int(raw_id))] = float(probs[idx + 1])
             proxy_rows.append(
                 {
                     "dataset_name": str(config.dataset_name),

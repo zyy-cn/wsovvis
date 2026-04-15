@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +11,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_locator
 from videocutler.ext_stageb_ovvis.banks.responsibility_cache import ResponsibilityCache
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
+    build_stage_domain_indices,
+    fuse_carrier_frame_logits,
+    fuse_carrier_frame_logits_torch,
+    load_combined_evidence,
+)
 from videocutler.ext_stageb_ovvis.banks.text_bank import resolve_text_prototype
 from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
 
@@ -92,10 +98,9 @@ def _prepare_examples(
     dataset_name: str,
     trajectory_source_branch: str,
 ) -> Dict[str, Any]:
-    carrier_parent = _carrier_artifact_parent(output_root, dataset_name, trajectory_source_branch)
-    text_records_path = output_root / "text_bank" / "text_prototype_records.jsonl"
     examples: List[Dict[str, Any]] = []
     skipped: Dict[str, int] = {}
+    text_records_path = output_root / "text_bank" / "text_prototype_records.jsonl"
 
     def bump(reason: str) -> None:
         skipped[reason] = int(skipped.get(reason, 0)) + 1
@@ -104,36 +109,33 @@ def _prepare_examples(
         if not bool(sample.get("sample_valid", False)):
             bump("sample_not_valid_from_phase1")
             continue
-        carrier_record = sample.get("carrier_record")
-        if not isinstance(carrier_record, dict):
-            bump("missing_carrier_record")
-            continue
-        z_norm_path = str(carrier_record.get("z_norm_path", ""))
-        if not z_norm_path:
-            bump("missing_z_norm_path")
-            continue
         try:
-            traj_vec = read_vector_from_locator(carrier_parent, z_norm_path)
+            carrier_vec, frame_vec, combined_vec = load_combined_evidence(
+                sample,
+                output_root=output_root,
+                dataset_name=dataset_name,
+                trajectory_source_branch=trajectory_source_branch,
+            )
         except Exception:
-            bump("invalid_carrier_vector_locator")
+            bump("missing_frame_evidence")
             continue
         candidate_records = list(sample.get("candidate_text_prototypes", []))
         if not candidate_records:
             bump("empty_candidate_text_prototypes")
             continue
-        try:
-            candidate_matrix = [resolve_text_prototype(text_records_path, rec) for rec in candidate_records]
-        except Exception:
-            bump("invalid_text_prototype_locator")
-            continue
         candidate_ids_known = [int(x) for x in list(sample.get("candidate_ids_known", []))]
         candidate_ids_extra = [int(x) for x in list(sample.get("candidate_ids_extra", []))]
-        if len(candidate_ids_known) != len(candidate_matrix):
+        if len(candidate_ids_known) + len(candidate_ids_extra) != len(candidate_records):
             bump("candidate_id_vector_length_mismatch")
             continue
         observed_set = {int(x) for x in list(sample.get("observed_raw_ids", []))}
         if not candidate_ids_known:
             bump("empty_candidate_ids_known")
+            continue
+        try:
+            candidate_matrix = [resolve_text_prototype(text_records_path, rec) for rec in candidate_records]
+        except Exception:
+            bump("invalid_text_prototype_locator")
             continue
         examples.append(
             {
@@ -143,8 +145,11 @@ def _prepare_examples(
                 "observed_raw_ids": sorted(observed_set),
                 "candidate_ids_known": candidate_ids_known,
                 "candidate_ids_extra": candidate_ids_extra,
-                "traj_vec": np.asarray(traj_vec, dtype=np.float32),
                 "candidate_matrix": np.asarray(candidate_matrix, dtype=np.float32),
+                "carrier_vec": np.asarray(carrier_vec, dtype=np.float32),
+                "frame_vec": np.asarray(frame_vec, dtype=np.float32),
+                "combined_vec": np.asarray(combined_vec, dtype=np.float32),
+                "candidate_records": candidate_records,
             }
         )
     return {"examples": examples, "skipped_reason_histogram": skipped}
@@ -176,50 +181,6 @@ def _normalize_mass(mass: Mapping[str, float]) -> Dict[str, float]:
     if total <= 0.0:
         return {"unknown": 1.0}
     return {key: float(value / total) for key, value in out.items()}
-
-
-def _project_probs(
-    projector: Projector,
-    ex: Mapping[str, Any],
-    *,
-    device: torch.device,
-    temperature: float,
-) -> np.ndarray:
-    x = torch.from_numpy(np.asarray(ex["traj_vec"], dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-    q = projector(x)
-    cands = torch.from_numpy(np.asarray(ex["candidate_matrix"], dtype=np.float32)).to(device=device, dtype=torch.float32)
-    cands = F.normalize(cands, p=2.0, dim=-1)
-    logits = torch.matmul(q, cands.t()).squeeze(0) / float(temperature)
-    probs = torch.softmax(logits, dim=0)
-    return probs.detach().cpu().numpy().astype(np.float64)
-
-
-def _compose_targets(
-    *,
-    candidate_ids_known: Sequence[int],
-    initial_mass: Mapping[str, float],
-    projected_probs: np.ndarray,
-) -> Tuple[np.ndarray, Dict[str, float], Dict[str, float]]:
-    init = _normalize_mass(initial_mass)
-    init_known = np.array([float(init.get(str(int(raw_id)), 0.0)) for raw_id in candidate_ids_known], dtype=np.float64)
-    model_known = np.asarray(projected_probs, dtype=np.float64)
-    if model_known.ndim != 1 or model_known.shape[0] != init_known.shape[0]:
-        raise ValueError("projected probability shape mismatch")
-    mixed_known = 0.5 * init_known + 0.5 * model_known
-    known_total = float(np.sum(mixed_known))
-    unknown_mass = float(max(0.0, 1.0 - known_total))
-    full_mass = {"unknown": unknown_mass}
-    for idx, raw_id in enumerate(candidate_ids_known):
-        full_mass[str(int(raw_id))] = float(mixed_known[idx])
-    full_mass = _normalize_mass(full_mass)
-    target_known = np.asarray([float(full_mass.get(str(int(raw_id)), 0.0)) for raw_id in candidate_ids_known], dtype=np.float64)
-    denom = float(np.sum(target_known))
-    if denom <= 0.0:
-        target_known = np.full((len(candidate_ids_known),), fill_value=1.0 / float(len(candidate_ids_known)), dtype=np.float64)
-    else:
-        target_known = target_known / denom
-    r_final = _normalize_mass(full_mass)
-    return target_known, init, r_final
 
 
 def _stage_cfg(config: SoftEMConfig) -> List[SoftEMStageConfig]:
@@ -269,6 +230,58 @@ def _stage_cfg(config: SoftEMConfig) -> List[SoftEMStageConfig]:
             ),
         ]
     raise ValueError(f"unsupported soft-em mode: {config.mode}")
+
+
+def _stage_domain_for_stage(stage_id: str, example: Mapping[str, Any]) -> Tuple[List[int], List[int], List[int]]:
+    return build_stage_domain_indices(
+        example.get("candidate_ids_known", []),
+        example.get("candidate_ids_extra", []),
+        stage_id=stage_id,
+    )
+
+
+def _stage_mass_from_logits(
+    *,
+    stage_id: str,
+    candidate_ids_known: Sequence[int],
+    candidate_ids_extra: Sequence[int],
+    initial_mass: Mapping[str, float],
+    stage_logits: np.ndarray,
+    coverage_bonus: float = 0.15,
+    extra_penalty: float = 0.05,
+) -> Tuple[Dict[str, float], Dict[str, float], List[int]]:
+    domain_ids, known_ids, extra_ids = build_stage_domain_indices(
+        candidate_ids_known,
+        candidate_ids_extra,
+        stage_id=stage_id,
+    )
+    logits = np.asarray(stage_logits, dtype=np.float64)
+    if logits.ndim != 1 or int(logits.shape[0]) != len(domain_ids) + 1:
+        raise ValueError("stage logits shape mismatch")
+    init = _normalize_mass(initial_mass)
+    scores: List[float] = []
+    keys: List[str] = ["unknown", *[str(int(raw_id)) for raw_id in domain_ids]]
+    coverage_bonus_applied_to: List[int] = []
+    for idx, key in enumerate(keys):
+        raw_bias = 0.0
+        if key == "unknown":
+            weight = 1.0
+        else:
+            raw_id = int(key)
+            if raw_id in known_ids:
+                weight = 1.0 + float(coverage_bonus)
+                coverage_bonus_applied_to.append(raw_id)
+            elif raw_id in extra_ids:
+                weight = max(1e-6, 1.0 - float(extra_penalty))
+            else:
+                weight = 1.0
+            raw_bias = math.log(max(weight, 1e-12))
+        scores.append(float(logits[idx]) + math.log(max(init.get(key, 0.0), 1e-12)) + raw_bias)
+    score_tensor = torch.tensor(scores, dtype=torch.float64)
+    probs = torch.softmax(score_tensor, dim=0).cpu().numpy().astype(np.float64)
+    final_mass = {key: float(prob) for key, prob in zip(keys, probs.tolist())}
+    init_full = {key: float(init.get(key, 0.0)) for key in keys}
+    return _normalize_mass(init_full), _normalize_mass(final_mass), sorted(set(coverage_bonus_applied_to))
 
 
 def _load_proxy_rows(output_root: Path) -> List[Record]:
@@ -349,19 +362,35 @@ def run_soft_em(
             for ex in examples:
                 ex_tid = str(ex["trajectory_id"])
                 init_mass = cache.get_init_mass(ex_tid)
-                projected = _project_probs(projector, ex, device=device, temperature=float(config.temperature))
-                target_known, init_norm, final_norm = _compose_targets(
-                    candidate_ids_known=ex["candidate_ids_known"],
-                    initial_mass=init_mass,
-                    projected_probs=projected,
+                domain_ids, known_ids, extra_ids = _stage_domain_for_stage(stage.stage_id, ex)
+                _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
+                    projector=projector,
+                    carrier_vec=ex["carrier_vec"],
+                    frame_vec=ex["frame_vec"],
+                    candidate_matrix=ex["candidate_matrix"],
+                    temperature=float(config.temperature),
                 )
-                x = torch.from_numpy(np.asarray(ex["traj_vec"], dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-                q = projector(x)
-                cands = torch.from_numpy(np.asarray(ex["candidate_matrix"], dtype=np.float32)).to(device=device, dtype=torch.float32)
-                cands = F.normalize(cands, p=2.0, dim=-1)
-                logits = torch.matmul(q, cands.t()).squeeze(0) / float(config.temperature)
-                target = torch.from_numpy(target_known.astype(np.float32)).to(device=device, dtype=torch.float32)
-                loss = -(target * torch.log_softmax(logits, dim=0)).sum()
+                stage_candidate_count = len(domain_ids)
+                if stage_candidate_count <= 0:
+                    raise RuntimeError(f"empty candidate domain for stage {stage.stage_id}")
+                stage_logits_candidates = logits_known_extra[:stage_candidate_count]
+                stage_logits = torch.cat([torch.zeros(1, device=device, dtype=torch.float32), stage_logits_candidates], dim=0)
+                init_domain = {"unknown": float(init_mass.get("unknown", 1.0))}
+                for raw_id in domain_ids:
+                    init_domain[str(int(raw_id))] = float(init_mass.get(str(int(raw_id)), 0.0))
+                refined_init, refined_final, coverage_bonus_applied_to = _stage_mass_from_logits(
+                    stage_id=stage.stage_id,
+                    candidate_ids_known=ex["candidate_ids_known"],
+                    candidate_ids_extra=ex["candidate_ids_extra"],
+                    initial_mass=init_domain,
+                    stage_logits=stage_logits.detach().cpu().numpy(),
+                )
+                target = torch.tensor(
+                    [refined_final["unknown"], *[refined_final[str(int(raw_id))] for raw_id in domain_ids]],
+                    device=device,
+                    dtype=torch.float32,
+                )
+                loss = -(target * torch.log_softmax(stage_logits, dim=0)).sum()
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
@@ -374,9 +403,9 @@ def run_soft_em(
                     "candidate_ids_known": [int(x) for x in ex["candidate_ids_known"]],
                     "candidate_ids_extra": [int(x) for x in ex["candidate_ids_extra"]],
                     "unknown_slot": "unknown",
-                    "r_init": init_norm,
-                    "r_final": final_norm,
-                    "coverage_bonus_applied_to": [],
+                    "r_init": refined_init,
+                    "r_final": refined_final,
+                    "coverage_bonus_applied_to": coverage_bonus_applied_to,
                     "iteration_index": int(iteration_index),
                     "join_key": str(ex_tid),
                 }

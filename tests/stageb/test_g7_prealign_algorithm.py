@@ -52,6 +52,40 @@ def _prepare_fixture(root: Path) -> None:
             {"raw_id": 7, "proto_path": "payload/text_prototypes.npz#protos[1]", "path_base_mode": "artifact_parent_dir"},
         ],
     )
+    frame_dir = root / "frame_bank" / "lvvis_train_base"
+    (frame_dir / "payload").mkdir(parents=True, exist_ok=True)
+    frame_tokens = np.random.RandomState(2).randn(1, 4, 768).astype(np.float16)
+    np.savez(frame_dir / "payload" / "clip_1_feats.npz", slot_0=frame_tokens[0])
+    _write_jsonl(
+        frame_dir / "frame_records.jsonl",
+        [{"clip_id": "1", "frame_index": 0, "feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
+    )
+    _write_jsonl(
+        frame_dir / "frame_geom_records.jsonl",
+        [
+            {
+                "clip_id": "1",
+                "frame_index": 0,
+                "orig_h": 28,
+                "orig_w": 28,
+                "resized_h": 28,
+                "resized_w": 28,
+                "padded_h": 28,
+                "padded_w": 28,
+                "scale_y": 1.0,
+                "scale_x": 1.0,
+                "pad_left": 0,
+                "pad_top": 0,
+                "pad_right": 0,
+                "pad_bottom": 0,
+                "patch_size": 14,
+                "grid_h": 2,
+                "grid_w": 2,
+                "valid_token_mask_path": "frame_geom_records.jsonl#0",
+                "path_base_mode": "artifact_parent_dir",
+            }
+        ],
+    )
 
 
 def test_train_prealign_writes_canonical_stage_local_artifacts(tmp_path: Path) -> None:
@@ -62,8 +96,30 @@ def test_train_prealign_writes_canonical_stage_local_artifacts(tmp_path: Path) -
         "trajectory_record": {"video_id": 1},
         "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
         "weak_label_record": {"observed_raw_ids": [3], "clip_id": "1", "video_id": 1},
-        "frame_feature_rows": [],
-        "frame_geometry_rows": [],
+        "frame_feature_rows": [{"feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
+        "frame_geometry_rows": [
+            {
+                "clip_id": "1",
+                "frame_index": 0,
+                "orig_h": 28,
+                "orig_w": 28,
+                "resized_h": 28,
+                "resized_w": 28,
+                "padded_h": 28,
+                "padded_w": 28,
+                "scale_y": 1.0,
+                "scale_x": 1.0,
+                "pad_left": 0,
+                "pad_top": 0,
+                "pad_right": 0,
+                "pad_bottom": 0,
+                "patch_size": 14,
+                "grid_h": 2,
+                "grid_w": 2,
+                "valid_token_mask_path": "frame_geom_records.jsonl#0",
+                "path_base_mode": "artifact_parent_dir",
+            }
+        ],
         "candidate_text_prototypes": [
             {"raw_id": 3, "proto_path": "payload/text_prototypes.npz#protos[0]", "path_base_mode": "artifact_parent_dir"},
             {"raw_id": 7, "proto_path": "payload/text_prototypes.npz#protos[1]", "path_base_mode": "artifact_parent_dir"},
@@ -90,4 +146,3 @@ def test_train_prealign_writes_canonical_stage_local_artifacts(tmp_path: Path) -
     assert proxy["trajectory_id"] == "traj_1"
     assert "3" in proxy["proxy_mass"]
     assert (tmp_path / "train" / "prealign" / "checkpoints" / "prealign_last.pth").is_file()
-

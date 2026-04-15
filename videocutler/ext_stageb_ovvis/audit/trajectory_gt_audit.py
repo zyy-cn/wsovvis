@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_locator
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import fuse_carrier_frame_logits
 from videocutler.ext_stageb_ovvis.banks.text_bank import resolve_text_prototype
 
 
@@ -300,11 +301,50 @@ def build_attribution_rows(
             if sample_valid and traj_locator and candidate_vectors and candidate_known_ids and len(candidate_known_ids) == len(candidate_vectors):
                 try:
                     traj_vec = _trajectory_vector(output_root, traj_locator, trajectory_source_branch, dataset_name)
-                    x = torch.from_numpy(np.asarray(traj_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-                    q = projector(x)
-                    cands = torch.from_numpy(np.asarray(candidate_vectors, dtype=np.float32)).to(device=device, dtype=torch.float32)
-                    cands = torch.nn.functional.normalize(cands, p=2.0, dim=-1)
-                    logits = torch.matmul(q, cands.t()).squeeze(0) / float(temperature)
+                    frame_vectors: List[np.ndarray] = []
+                    frame_rows = list(sample.get("frame_feature_rows", []))
+                    geom_rows = list(sample.get("frame_geometry_rows", []))
+                    if len(frame_rows) == len(geom_rows) and frame_rows:
+                        from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import (
+                            read_feature_vector,
+                            reconstruct_valid_token_mask_from_geometry,
+                        )
+
+                        def _coerce_token_feature_matrix(feature: np.ndarray, grid_h: int, grid_w: int) -> Optional[np.ndarray]:
+                            feature = np.asarray(feature, dtype=np.float32)
+                            if feature.ndim != 2:
+                                return None
+                            grid_tokens = int(grid_h) * int(grid_w)
+                            if int(feature.shape[0]) == grid_tokens:
+                                return feature
+                            if int(feature.shape[0]) == grid_tokens + 1:
+                                return feature[1:]
+                            return None
+
+                        frame_parent = output_root / "frame_bank" / dataset_name
+                        for frame_row, geom_row in zip(frame_rows, geom_rows):
+                            feat_path = str(frame_row.get("feat_path", ""))
+                            if not feat_path:
+                                continue
+                            feature = read_feature_vector(frame_parent, feat_path)
+                            token_matrix = _coerce_token_feature_matrix(feature, int(geom_row["grid_h"]), int(geom_row["grid_w"]))
+                            if token_matrix is None:
+                                continue
+                            valid_mask = reconstruct_valid_token_mask_from_geometry(geom_row).astype(np.float32).reshape(-1)
+                            denom = float(np.sum(valid_mask))
+                            if denom <= 1e-12:
+                                continue
+                            frame_vec = np.sum(token_matrix * valid_mask[:, None], axis=0).astype(np.float32) / denom
+                            frame_vectors.append(frame_vec)
+                    frame_vec = np.mean(np.stack(frame_vectors, axis=0), axis=0).astype(np.float32) if frame_vectors else np.zeros_like(traj_vec)
+                    _, _, fused_logits_np = fuse_carrier_frame_logits(
+                        projector=projector,
+                        carrier_vec=traj_vec,
+                        frame_vec=frame_vec,
+                        candidate_matrix=np.asarray(candidate_vectors, dtype=np.float32),
+                        temperature=float(temperature),
+                    )
+                    logits = torch.from_numpy(np.asarray(fused_logits_np, dtype=np.float32)).to(device=device, dtype=torch.float32)
                     scores = torch.softmax(logits, dim=0).detach().cpu().numpy().astype(np.float64)
                     order = np.argsort(-scores, kind="mergesort")
                     k = int(topk) if int(topk) > 0 else 5

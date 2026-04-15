@@ -147,11 +147,16 @@ def _candidate_domain(
     observed = sorted({int(x) for x in list(weak_label_record.get("observed_raw_ids", []))})
     known = [raw_id for raw_id in observed if raw_id in text_by_raw]
     missing = [raw_id for raw_id in observed if raw_id not in text_by_raw]
-    candidates = [text_by_raw[raw_id] for raw_id in known]
+    extra_pool = [raw_id for raw_id in sorted(text_by_raw.keys()) if raw_id not in set(known)]
+    extra_cap = min(8, max(1, len(known))) if extra_pool else 0
+    extra = extra_pool[:extra_cap]
+    candidates = [text_by_raw[raw_id] for raw_id in [*known, *extra]]
     errors: List[str] = []
     if missing:
         errors.append("missing_text_prototype_for_observed_raw_id")
-    return observed, known, [], candidates, errors
+    if extra_pool and not extra:
+        errors.append("no_extra_candidates_selected")
+    return observed, known, extra, candidates, errors
 
 
 def _required_sample_fields() -> List[str]:
