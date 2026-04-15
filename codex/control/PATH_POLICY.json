@@ -1,6 +1,6 @@
 {
   "task_id": "G7_training-task",
-  "task_truth_stamp": "460ccef2b34867e9fb47bb892ae5a5d95f07b1dab8427090f9f4d3275871dcd0",
+  "task_truth_stamp": "b162fe2c6d13ba54e9cb5a9097c4ad82af304a11bc27a5ca3b7d9fc9b666d6d9",
   "active_gate": "G7_training",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/banks/trajectory_bank.py",
@@ -16,7 +16,7 @@
     "videocutler/run_stageb_train_prealign.py",
     "videocutler/run_stageb_train_softem.py",
     "tests/stageb/",
-    "outputs/G7_training/"
+    "codex/outputs/G7_training/"
   ],
   "forbid_paths": [],
   "protected_paths": [],
