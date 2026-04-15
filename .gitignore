@@ -10,6 +10,7 @@ dinov2/
 weights/
 runs/
 codex/
+train/
 outputs/
 frame_bank/
 exports/

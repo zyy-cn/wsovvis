@@ -1,0 +1,39 @@
+{
+  "mode": "local_remote",
+  "REMOTE_HOST_ALIAS": "gpu4090d",
+  "REMOTE_REPO_DIR": "/home/zyy/code/wsovvis",
+  "REMOTE_VERIFY_WRAPPER_NAME": "remote_verify.sh",
+  "CONDA_SH_PATH": "/home/zyy/software/miniconda3/etc/profile.d/conda.sh",
+  "CONDA_ENV_NAME": "wsovvis",
+  "PYTHONPATH_ENTRY": "/home/zyy/code/wsovvis",
+  "SYNC_MODE": "upload_only",
+  "SYNC_MANAGED_LOCAL_PATHS": [
+    "."
+  ],
+  "SYNC_MANAGED_REMOTE_PATHS": [
+    "."
+  ],
+  "REMOTE_EXCLUDED_PATHS": [
+    ".git",
+    "codex/state/runtime",
+    "codex/state/logs",
+    "codex/outputs",
+    "codex/tasks"
+  ],
+  "REMOTE_RUNTIME_ASSET_ROOTS": [
+    "weights",
+    "frame_bank",
+    "carrier_bank",
+    "carrier_bank_gt",
+    "datasets",
+    "checkpoints",
+    "exports",
+    "exports_gt",
+    "videocutler/datasets",
+    "logs"
+  ],
+  "SYNC_SMALL_ARTIFACTS_ONLY": true,
+  "GIT_REMOTE_URL": "git@github.com:zyy-cn/wsovvis.git",
+  "GIT_REMOTE_NAME": "origin",
+  "GIT_DEFAULT_BRANCH": "main"
+}

@@ -113,6 +113,8 @@ def main() -> int:
                 output_root=output_root,
                 trajectory_source_branch=args.trajectory_source_branch,
                 smoke=bool(args.smoke),
+                num_workers=int(args.num_workers),
+                device=str(args.device),
             )
         )
         if args.trajectory_source_branch == "gt_upper_bound":
@@ -156,6 +158,11 @@ def main() -> int:
                 "record_count_input": result["record_count_input"],
                 "record_count_output": result["record_count_output"],
                 "coverage_ratio": result["coverage_ratio"],
+                "num_workers_requested": result.get("num_workers_requested"),
+                "num_workers_used": result.get("num_workers_used"),
+                "device_requested": result.get("device_requested"),
+                "device_effective": result.get("device_effective"),
+                "timing_sec": result.get("timing_sec", {}),
                 "carrier_records_path": str(result["carrier_records_path"]),
             },
             ensure_ascii=False,
