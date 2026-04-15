@@ -1,0 +1,28 @@
+{
+  "task_id": "G7_training-task",
+  "task_truth_stamp": "460ccef2b34867e9fb47bb892ae5a5d95f07b1dab8427090f9f4d3275871dcd0",
+  "active_gate": "G7_training",
+  "allow_paths": [
+    "videocutler/ext_stageb_ovvis/banks/trajectory_bank.py",
+    "videocutler/ext_stageb_ovvis/banks/frame_feature_bank.py",
+    "videocutler/ext_stageb_ovvis/banks/carrier_bank.py",
+    "videocutler/ext_stageb_ovvis/banks/text_bank.py",
+    "videocutler/ext_stageb_ovvis/data/weak_labels.py",
+    "videocutler/ext_stageb_ovvis/data/trajectory_dataset.py",
+    "videocutler/ext_stageb_ovvis/models/projector.py",
+    "videocutler/ext_stageb_ovvis/algorithms/prealign.py",
+    "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
+    "videocutler/ext_stageb_ovvis/banks/responsibility_cache.py",
+    "videocutler/run_stageb_train_prealign.py",
+    "videocutler/run_stageb_train_softem.py",
+    "tests/stageb/",
+    "outputs/G7_training/"
+  ],
+  "forbid_paths": [],
+  "protected_paths": [],
+  "shared_path_rules": [],
+  "write_policy": {
+    "default": "deny",
+    "exceptions": []
+  }
+}
