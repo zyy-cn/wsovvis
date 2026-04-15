@@ -30,6 +30,20 @@ def _normalize(vec: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:
     return (arr / norm).astype(np.float32)
 
 
+def _project_evidence_to_text_dim(evidence_vector: np.ndarray, text_dim: int) -> Optional[np.ndarray]:
+    evidence = _normalize(evidence_vector)
+    if evidence is None:
+        return None
+    target_dim = int(text_dim)
+    if target_dim <= 0:
+        return None
+    projected = np.zeros(target_dim, dtype=np.float32)
+    width = min(int(evidence.shape[0]), target_dim)
+    if width > 0:
+        projected[:width] = evidence[:width]
+    return _normalize(projected)
+
+
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -170,7 +184,7 @@ def _candidate_domain(
     provenance: List[Record] = []
     if extra_pool:
         if evidence_vector is not None:
-            evidence = _normalize(evidence_vector)
+            evidence = _project_evidence_to_text_dim(evidence_vector, int(np.asarray(text_vocab_matrix).shape[1]))
             if evidence is None:
                 evidence_scores = None
             else:
