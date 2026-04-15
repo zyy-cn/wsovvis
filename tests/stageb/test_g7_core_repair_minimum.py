@@ -16,6 +16,7 @@ from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
     Phase1MaterializationConfig,
     materialize_phase1_training_samples,
 )
+from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
 
 
 def _write_jsonl(path: Path, rows) -> None:
@@ -174,7 +175,7 @@ def test_prealign_full_vocab_observed_mass_includes_unknown() -> None:
 def test_softem_base_and_aug_domains_differ_and_unknown_competes() -> None:
     init_mass = {"unknown": 0.2, "1": 0.5, "3": 0.2, "7": 0.1}
     base_logits = np.zeros(1 + 1, dtype=np.float64)
-    aug_logits = np.zeros(1 + 2, dtype=np.float64)
+    aug_logits = np.zeros(1 + 3, dtype=np.float64)
     base_init, base_final, base_bonus = _stage_mass_from_logits(
         stage_id="softem_base",
         candidate_ids_known=[1],
