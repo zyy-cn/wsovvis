@@ -239,12 +239,12 @@ def refine_responsibilities(
     probs = torch.softmax(score_tensor, dim=0).cpu().numpy().astype(np.float64)
     final_mass = {key: float(prob) for key, prob in zip(ordered_keys, probs.tolist())}
     init_mass = {key: float(max(0.0, float(init.get(key, 0.0)))) for key in ordered_keys}
-    init_mass = _normalize(init_mass) if init_mass else {"unknown": 1.0}
-    final_mass = _normalize(final_mass)
+    init_mass = _normalize_mass_dict(init_mass) if init_mass else {"unknown": 1.0}
+    final_mass = _normalize_mass_dict(final_mass)
     return final_mass, init_mass, sorted(set(coverage_bonus_applied_to))
 
 
-def _normalize(mass: Mapping[str, float]) -> Dict[str, float]:
+def _normalize_mass_dict(mass: Mapping[str, float]) -> Dict[str, float]:
     total = 0.0
     normalized: Dict[str, float] = {}
     for key, value in mass.items():
