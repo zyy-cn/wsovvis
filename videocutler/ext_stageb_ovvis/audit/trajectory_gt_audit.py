@@ -151,6 +151,20 @@ def _safe_entropy(probs: np.ndarray) -> float:
     return float(-np.sum(probs * np.log(probs)))
 
 
+def _snapshot_order_key(snapshot_id: Any) -> tuple[int, int, str]:
+    text = str(snapshot_id).strip()
+    if text == "stage_start":
+        return (0, 0, text)
+    if text.startswith("epoch_"):
+        try:
+            return (1, int(text.split("_", 1)[1]), text)
+        except Exception:
+            return (1, 10**9, text)
+    if text == "stage_end":
+        return (2, 0, text)
+    return (1, 10**9, text)
+
+
 @lru_cache(maxsize=65536)
 def _cached_text_vector(records_path_str: str, raw_id: int, proto_path: str) -> np.ndarray:
     records_path = Path(records_path_str)
@@ -371,7 +385,7 @@ def summarize_attribution_rows(
         per_trajectory.setdefault(str(row.get("trajectory_id", "")), []).append(row)
     for traj_rows in per_trajectory.values():
         ordered = list(traj_rows)
-        ordered.sort(key=lambda row: (_STAGE_ORDER.get(str(row.get("stage_id", "")), 99), str(row.get("snapshot_id", ""))))
+        ordered.sort(key=lambda row: (_STAGE_ORDER.get(str(row.get("stage_id", "")), 99), _snapshot_order_key(row.get("snapshot_id", ""))))
         prev_right: Optional[bool] = None
         for row in ordered:
             if not (row.get("gt_available_for_audit") and row.get("gt_rank") is not None):
@@ -399,7 +413,7 @@ def summarize_attribution_rows(
     monotonic_score_hits = 0
     for traj_rows in per_trajectory.values():
         ordered = list(traj_rows)
-        ordered.sort(key=lambda row: (_STAGE_ORDER.get(str(row.get("stage_id", "")), 99), str(row.get("snapshot_id", ""))))
+        ordered.sort(key=lambda row: (_STAGE_ORDER.get(str(row.get("stage_id", "")), 99), _snapshot_order_key(row.get("snapshot_id", ""))))
         gt_sequence = [row for row in ordered if row.get("gt_available_for_audit") and row.get("gt_rank") is not None and row.get("gt_score") is not None]
         if len(gt_sequence) < 2:
             continue
