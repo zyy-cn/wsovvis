@@ -1069,5 +1069,5 @@ def test_closed_set_bounded_experiment_smoke(tmp_path: Path) -> None:
     assert (fixture_root / "train" / "prealign" / "train_state.json").is_file()
     assert (fixture_root / "train" / "softem_base" / "train_state.json").is_file()
     assert (fixture_root / "train" / "softem_aug" / "train_state.json").is_file()
-    assert (fixture_root / "codex" / "outputs" / "G7_training" / "g7_closed_set_drop_recovery_latest.json").is_file()
-    assert (fixture_root / "codex" / "outputs" / "G7_training" / "g7_closed_set_drop_recovery_latest.md").is_file()
+    assert (repo_root / "codex" / "outputs" / "G7_training" / "g7_closed_set_drop_recovery_latest.json").is_file()
+    assert (repo_root / "codex" / "outputs" / "G7_training" / "g7_closed_set_drop_recovery_latest.md").is_file()
