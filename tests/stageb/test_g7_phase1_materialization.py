@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import numpy as np
 from pathlib import Path
 
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
@@ -172,6 +173,18 @@ def _prepare_fixture(tmp_path: Path) -> Path:
             {"raw_id": 2, "proto_path": "payload/text_prototypes.npz#protos[1]", "path_base_mode": "artifact_parent_dir"},
         ],
     )
+
+    # Minimal payload files used by phase-1 evidence/text loading.
+    (root / "carrier_bank" / "lvvis_train_base").mkdir(parents=True, exist_ok=True)
+    np.savez(root / "carrier_bank" / "lvvis_train_base" / "carrier_vectors_traj.npz", z_norm=np.ones((1, 768), dtype=np.float16))
+    (root / "frame_bank" / "lvvis_train_base" / "payload").mkdir(parents=True, exist_ok=True)
+    np.savez(root / "frame_bank" / "lvvis_train_base" / "payload" / "clip_101_feats.npz", slot_0=np.ones((64, 768), dtype=np.float16), slot_1=np.ones((64, 768), dtype=np.float16))
+    np.savez(root / "frame_bank" / "lvvis_train_base" / "payload" / "clip_102_feats.npz", slot_0=np.ones((64, 768), dtype=np.float16))
+    (root / "text_bank" / "payload").mkdir(parents=True, exist_ok=True)
+    text_protos = np.zeros((2, 512), dtype=np.float32)
+    text_protos[0, 0] = 1.0
+    text_protos[1, 1] = 1.0
+    np.savez(root / "text_bank" / "payload" / "text_prototypes.npz", protos=text_protos)
     return root
 
 

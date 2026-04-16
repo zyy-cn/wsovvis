@@ -273,7 +273,7 @@ def test_phase1_candidate_extra_is_evidence_driven_and_excludes_observed(tmp_pat
     assert sample["candidate_ids_known"] == [1]
     assert sample["candidate_ids_extra"] == [7]
     assert sample["candidate_ids_extra_provenance"][0]["raw_id"] == 7
-    assert sample["candidate_ids_extra_provenance"][0]["admission_reason"] == "topk_non_observed_by_sample_evidence"
+    assert sample["candidate_ids_extra_provenance"][0]["admission_reason"] == "topk_non_observed_by_clip_evidence"
 
 
 def test_prealign_full_vocab_observed_mass_includes_unknown() -> None:
@@ -353,7 +353,7 @@ def test_frame_and_carrier_evidence_combine(tmp_path: Path) -> None:
         "frame_feature_rows": [fixture["frame_row"]],
         "frame_geometry_rows": [fixture["geom_row"]],
     }
-    carrier_vec, frame_vec, combined_vec = load_combined_evidence(
+    carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
         sample,
         output_root=tmp_path,
         dataset_name="lvvis_train_base",
@@ -367,6 +367,7 @@ def test_frame_and_carrier_evidence_combine(tmp_path: Path) -> None:
         temperature=0.07,
     )
     assert carrier_vec[0] > 0.0
+    assert len(frame_vectors) == 1
     assert frame_vec[1] > 0.0
     assert combined_vec[0] > 0.0 and combined_vec[1] > 0.0
     assert not np.allclose(combined_vec, carrier_vec)

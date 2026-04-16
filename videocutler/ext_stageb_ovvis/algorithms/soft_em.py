@@ -47,7 +47,7 @@ class SoftEMConfig:
     smoke: bool = False
     temperature: float = 0.07
     weight_decay: float = 1e-2
-    em_subiterations: int = 1
+    em_subiterations: int = 2
     projector: ProjectorConfig = ProjectorConfig()
     base_epochs: int = 1
     aug_epochs: int = 1
@@ -111,7 +111,7 @@ def _prepare_examples(
             bump("sample_not_valid_from_phase1")
             continue
         try:
-            carrier_vec, frame_vec, combined_vec = load_combined_evidence(
+            carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
                 sample,
                 output_root=output_root,
                 dataset_name=dataset_name,
@@ -148,6 +148,7 @@ def _prepare_examples(
                 "candidate_ids_extra": candidate_ids_extra,
                 "candidate_matrix": np.asarray(candidate_matrix, dtype=np.float32),
                 "carrier_vec": np.asarray(carrier_vec, dtype=np.float32),
+                "frame_vectors": [np.asarray(vec, dtype=np.float32) for vec in frame_vectors],
                 "frame_vec": np.asarray(frame_vec, dtype=np.float32),
                 "combined_vec": np.asarray(combined_vec, dtype=np.float32),
                 "candidate_records": candidate_records,
@@ -248,8 +249,9 @@ def _stage_mass_from_logits(
     candidate_ids_extra: Sequence[int],
     initial_mass: Mapping[str, float],
     stage_logits: np.ndarray,
-    coverage_bonus: float = 0.15,
-    extra_penalty: float = 0.05,
+    coverage_bonus: float = 0.1,
+    extra_penalty: float = 0.1,
+    coverage_context: Optional[Mapping[str, float]] = None,
 ) -> Tuple[Dict[str, float], Dict[str, float], List[int]]:
     return _stage_mass_from_logits_iterative(
         stage_id=stage_id,
@@ -259,6 +261,7 @@ def _stage_mass_from_logits(
         stage_logits=stage_logits,
         coverage_bonus=coverage_bonus,
         extra_penalty=extra_penalty,
+        coverage_context=coverage_context,
         em_subiterations=1,
     )[:3]
 
@@ -270,8 +273,9 @@ def _stage_mass_from_logits_iterative(
     candidate_ids_extra: Sequence[int],
     initial_mass: Mapping[str, float],
     stage_logits: np.ndarray,
-    coverage_bonus: float = 0.15,
-    extra_penalty: float = 0.05,
+    coverage_bonus: float = 0.1,
+    extra_penalty: float = 0.1,
+    coverage_context: Optional[Mapping[str, float]] = None,
     em_subiterations: int = 1,
 ) -> Tuple[Dict[str, float], Dict[str, float], List[int], List[Dict[str, Any]]]:
     domain_ids, known_ids, extra_ids = build_stage_domain_indices(
@@ -291,6 +295,9 @@ def _stage_mass_from_logits_iterative(
     init_mass = dict(current_mass)
 
     for subiter_index in range(max(1, int(em_subiterations))):
+        current_unknown = float(current_mass.get("unknown", 0.0))
+        current_known_mass = float(sum(float(current_mass.get(str(int(raw_id)), 0.0)) for raw_id in known_ids))
+        current_extra_mass = float(sum(float(current_mass.get(str(int(raw_id)), 0.0)) for raw_id in extra_ids))
         refined_init, refined_final, coverage_bonus_applied_to = refine_responsibilities(
             initial_mass=current_mass,
             model_probs=model_probs,
@@ -298,13 +305,20 @@ def _stage_mass_from_logits_iterative(
             candidate_ids_extra=extra_ids,
             stage_id=stage_id,
             coverage_bonus=coverage_bonus,
+            coverage_epsilon=1.0,
             extra_penalty=extra_penalty,
+            coverage_context=coverage_context,
         )
         trace.append(
             {
                 "subiteration_index": int(subiter_index),
+                "current_round_mass": dict(current_mass),
+                "current_round_unknown_mass": current_unknown,
+                "current_round_known_mass": current_known_mass,
+                "current_round_extra_mass": current_extra_mass,
                 "r_init": refined_init,
                 "r_final": refined_final,
+                "coverage_context": dict(coverage_context or {}),
                 "coverage_bonus_applied_to": list(coverage_bonus_applied_to),
             }
         )
@@ -317,6 +331,26 @@ def _stage_mass_from_logits_iterative(
     final_mass = _normalize_mass({key: float(final_mass.get(key, 0.0)) for key in keys})
     return init_mass, final_mass, sorted(set(coverage_bonus_applied_to)), trace
 
+
+
+
+def _compute_clip_known_coverage_context(
+    *,
+    cache: ResponsibilityCache,
+    examples_by_clip: Mapping[int, Sequence[Mapping[str, Any]]],
+    clip_id: int,
+    known_ids: Sequence[int],
+) -> Dict[str, float]:
+    context: Dict[str, float] = {}
+    clip_examples = list(examples_by_clip.get(int(clip_id), []))
+    for raw_id in known_ids:
+        key = str(int(raw_id))
+        total = 0.0
+        for ex in clip_examples:
+            init_mass = cache.get_init_mass(str(ex["trajectory_id"]))
+            total += float(init_mass.get(key, 0.0))
+        context[key] = float(total)
+    return context
 
 def _load_proxy_rows(output_root: Path) -> List[Record]:
     proxy_path = output_root / "train" / "prealign" / "proxy_records.jsonl"
@@ -352,6 +386,9 @@ def run_soft_em(
     )
     examples = list(prepared["examples"])
     skipped = dict(prepared["skipped_reason_histogram"])
+    examples_by_clip: Dict[int, List[Dict[str, Any]]] = {}
+    for ex in examples:
+        examples_by_clip.setdefault(int(ex["clip_id"]), []).append(ex)
     if not examples:
         raise RuntimeError("no trainable examples available for soft-EM")
     proxy_rows = _load_proxy_rows(output_root)
@@ -404,6 +441,7 @@ def run_soft_em(
                     frame_vec=ex["frame_vec"],
                     candidate_matrix=ex["candidate_matrix"],
                     temperature=float(config.temperature),
+                    frame_vectors=ex["frame_vectors"],
                 )
                 stage_candidate_count = len(domain_ids)
                 if stage_candidate_count <= 0:
@@ -413,12 +451,19 @@ def run_soft_em(
                 init_domain = {"unknown": float(init_mass.get("unknown", 1.0))}
                 for raw_id in domain_ids:
                     init_domain[str(int(raw_id))] = float(init_mass.get(str(int(raw_id)), 0.0))
+                coverage_context = _compute_clip_known_coverage_context(
+                    cache=cache,
+                    examples_by_clip=examples_by_clip,
+                    clip_id=int(ex["clip_id"]),
+                    known_ids=ex["candidate_ids_known"],
+                )
                 refined_init, refined_final, coverage_bonus_applied_to, trace = _stage_mass_from_logits_iterative(
                     stage_id=stage.stage_id,
                     candidate_ids_known=ex["candidate_ids_known"],
                     candidate_ids_extra=ex["candidate_ids_extra"],
                     initial_mass=init_domain,
                     stage_logits=stage_logits.detach().cpu().numpy(),
+                    coverage_context=coverage_context,
                     em_subiterations=max(1, int(config.em_subiterations)),
                 )
                 if not stage_trace_sample:

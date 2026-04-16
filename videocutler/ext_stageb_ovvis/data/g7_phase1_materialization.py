@@ -170,21 +170,30 @@ def _candidate_domain(
     *,
     text_vocab_ids: Sequence[int],
     text_vocab_matrix: np.ndarray,
-    evidence_vector: Optional[np.ndarray],
-) -> Tuple[List[int], List[int], List[int], List[Record], List[str], List[Record]]:
+    sample_evidence_vector: Optional[np.ndarray],
+    clip_evidence_vector: Optional[np.ndarray],
+) -> Tuple[List[int], List[int], List[int], List[Record], List[str], List[Record], str]:
     if weak_label_record is None:
-        return [], [], [], [], ["missing_weak_label_record"], []
+        return [], [], [], [], ["missing_weak_label_record"], [], "missing_weak_label_record"
     observed = sorted({int(x) for x in list(weak_label_record.get("observed_raw_ids", []))})
+    observed_set = set(observed)
     known = [raw_id for raw_id in observed if raw_id in text_by_raw]
     missing = [raw_id for raw_id in observed if raw_id not in text_by_raw]
-    known_set = set(known)
-    extra_pool = [raw_id for raw_id in list(text_vocab_ids) if int(raw_id) not in known_set]
-    extra_cap = min(8, max(1, len(known))) if extra_pool else 0
+    extra_pool = [raw_id for raw_id in list(text_vocab_ids) if int(raw_id) not in observed_set]
+    extra_cap = min(2, max(1, len(known))) if extra_pool else 0
     extra: List[int] = []
     provenance: List[Record] = []
+    proposal_source = "no_extra_candidates_available"
     if extra_pool:
-        if evidence_vector is not None:
-            evidence = _project_evidence_to_text_dim(evidence_vector, int(np.asarray(text_vocab_matrix).shape[1]))
+        proposal_source = "static_fallback_missing_clip_and_sample_evidence"
+        ranked_sources = [
+            ("clip_evidence", clip_evidence_vector, "topk_non_observed_by_clip_evidence"),
+            ("sample_evidence", sample_evidence_vector, "topk_non_observed_by_sample_evidence"),
+        ]
+        for source_name, current_evidence, admission_reason in ranked_sources:
+            if current_evidence is None:
+                continue
+            evidence = _project_evidence_to_text_dim(current_evidence, int(np.asarray(text_vocab_matrix).shape[1]))
             if evidence is None:
                 evidence_scores = None
             else:
@@ -193,7 +202,7 @@ def _candidate_domain(
                 scored_pool = [
                     (float(evidence_scores[idx]), int(raw_id))
                     for idx, raw_id in enumerate(list(text_vocab_ids))
-                    if int(raw_id) not in known_set
+                    if int(raw_id) not in observed_set
                 ]
                 scored_pool.sort(key=lambda item: (-item[0], item[1]))
                 selected = scored_pool[:extra_cap]
@@ -203,10 +212,13 @@ def _candidate_domain(
                         "raw_id": int(raw_id),
                         "score": float(score),
                         "rank": int(rank) + 1,
-                        "admission_reason": "topk_non_observed_by_sample_evidence",
+                        "admission_reason": str(admission_reason),
+                        "proposal_source": str(source_name),
                     }
                     for rank, (score, raw_id) in enumerate(selected)
                 ]
+                proposal_source = str(source_name)
+                break
             else:
                 provenance = []
         if not extra:
@@ -216,7 +228,8 @@ def _candidate_domain(
                     "raw_id": int(raw_id),
                     "score": None,
                     "rank": int(rank) + 1,
-                    "admission_reason": "static_fallback_missing_sample_evidence",
+                    "admission_reason": "static_fallback_missing_clip_and_sample_evidence",
+                    "proposal_source": "fallback",
                 }
                 for rank, raw_id in enumerate(extra)
             ]
@@ -226,7 +239,7 @@ def _candidate_domain(
         errors.append("missing_text_prototype_for_observed_raw_id")
     if extra_pool and not extra:
         errors.append("no_extra_candidates_selected")
-    return observed, known, extra, candidates, errors, provenance
+    return observed, known, extra, candidates, errors, provenance, proposal_source
 
 
 def _required_sample_fields() -> List[str]:
@@ -274,6 +287,27 @@ def _sample_fingerprint(records: Sequence[Record]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _aggregate_clip_evidence(sample_evidence_by_traj: Mapping[str, Optional[np.ndarray]], partial_samples: Sequence[Record]) -> Dict[str, np.ndarray]:
+    grouped: Dict[str, List[np.ndarray]] = {}
+    for sample in partial_samples:
+        clip_id = str(sample.get("clip_id", ""))
+        traj_id = str(sample.get("trajectory_id", ""))
+        evidence = sample_evidence_by_traj.get(traj_id)
+        if evidence is None:
+            continue
+        grouped.setdefault(clip_id, []).append(np.asarray(evidence, dtype=np.float32))
+    clip_evidence: Dict[str, np.ndarray] = {}
+    for clip_id, vectors in grouped.items():
+        if not vectors:
+            continue
+        stacked = np.stack(vectors, axis=0).astype(np.float32)
+        mean_vec = np.mean(stacked, axis=0).astype(np.float32)
+        normalized = _normalize(mean_vec)
+        if normalized is not None:
+            clip_evidence[clip_id] = normalized.astype(np.float32)
+    return clip_evidence
+
+
 def materialize_phase1_training_samples(
     output_root: Path,
     config: Phase1MaterializationConfig,
@@ -309,7 +343,9 @@ def materialize_phase1_training_samples(
     text_by_raw = _build_lookup_by_key(text_records, lambda rec: int(rec["raw_id"]))
 
     materialized: List[Record] = []
+    partial_samples: List[Record] = []
     skip_reason_histogram: Dict[str, int] = {}
+    sample_evidence_by_traj: Dict[str, Optional[np.ndarray]] = {}
 
     def bump(reason: str) -> None:
         skip_reason_histogram[reason] = int(skip_reason_histogram.get(reason, 0)) + 1
@@ -357,7 +393,7 @@ def materialize_phase1_training_samples(
         evidence_vector = None
         if carrier_rec is not None and frame_rows and geom_rows:
             try:
-                _, _, evidence_vector = load_combined_evidence(
+                _, _, _, evidence_vector = load_combined_evidence(
                     {
                         "carrier_record": carrier_rec,
                         "frame_feature_rows": frame_rows,
@@ -370,13 +406,34 @@ def materialize_phase1_training_samples(
             except Exception:
                 evidence_vector = None
                 invalid_reasons.append("missing_sample_evidence_for_extra_proposal")
+        sample_evidence_by_traj[trajectory_id] = evidence_vector
+        partial_samples.append({
+            "trajectory_id": trajectory_id,
+            "clip_id": clip_id_text,
+            "trajectory_record": traj,
+            "carrier_record": carrier_rec,
+            "weak_label_record": weak_rec,
+            "frame_feature_rows": frame_rows,
+            "frame_geometry_rows": geom_rows,
+            "missing_views": sorted(set(missing_views)),
+            "invalid_reasons": sorted(set(invalid_reasons)),
+        })
 
-        observed_raw_ids, candidate_ids_known, candidate_ids_extra, candidate_text, candidate_errors, candidate_provenance = _candidate_domain(
+    clip_evidence_by_clip = _aggregate_clip_evidence(sample_evidence_by_traj, partial_samples)
+
+    for partial in partial_samples:
+        trajectory_id = str(partial["trajectory_id"])
+        clip_id_text = str(partial["clip_id"])
+        weak_rec = partial.get("weak_label_record")
+        missing_views = list(partial.get("missing_views", []))
+        invalid_reasons = list(partial.get("invalid_reasons", []))
+        observed_raw_ids, candidate_ids_known, candidate_ids_extra, candidate_text, candidate_errors, candidate_provenance, candidate_source = _candidate_domain(
             weak_rec,
             text_by_raw,
             text_vocab_ids=text_vocab_ids,
             text_vocab_matrix=text_vocab_matrix,
-            evidence_vector=evidence_vector,
+            sample_evidence_vector=sample_evidence_by_traj.get(trajectory_id),
+            clip_evidence_vector=clip_evidence_by_clip.get(clip_id_text),
         )
         invalid_reasons.extend(candidate_errors)
         if candidate_errors and "class_text_bank_view" not in missing_views:
@@ -387,17 +444,17 @@ def materialize_phase1_training_samples(
         sample: Record = {
             "trajectory_id": trajectory_id,
             "clip_id": clip_id_text,
-            "trajectory_record": traj,
-            "carrier_record": carrier_rec,
+            "trajectory_record": partial["trajectory_record"],
+            "carrier_record": partial["carrier_record"],
             "weak_label_record": weak_rec,
-            "frame_feature_rows": frame_rows,
-            "frame_geometry_rows": geom_rows,
+            "frame_feature_rows": partial["frame_feature_rows"],
+            "frame_geometry_rows": partial["frame_geometry_rows"],
             "candidate_text_prototypes": candidate_text,
             "observed_raw_ids": observed_raw_ids,
             "candidate_ids_known": candidate_ids_known,
             "candidate_ids_extra": candidate_ids_extra,
             "candidate_ids_extra_provenance": candidate_provenance,
-            "candidate_proposal_source": "sample_evidence_ranked_non_observed" if evidence_vector is not None else "static_fallback_no_sample_evidence",
+            "candidate_proposal_source": candidate_source,
             "missing_views": sorted(set(missing_views)),
             "invalid_reasons": sorted(set(invalid_reasons)),
         }

@@ -84,7 +84,7 @@ def _prepare_examples(
             continue
 
         try:
-            carrier_vec, frame_vec, combined_vec = load_combined_evidence(
+            carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
                 sample,
                 output_root=output_root,
                 dataset_name=dataset_name,
@@ -95,16 +95,17 @@ def _prepare_examples(
             continue
 
         examples.append(
-            {
-                "trajectory_id": str(sample["trajectory_id"]),
-                "clip_id": int(sample["clip_id"]),
-                "video_id": int(sample["trajectory_record"]["video_id"]),
-                "observed_raw_ids": sorted({int(x) for x in list(sample.get("observed_raw_ids", []))}),
-                "carrier_vec": np.asarray(carrier_vec, dtype=np.float32),
-                "frame_vec": np.asarray(frame_vec, dtype=np.float32),
-                "combined_vec": np.asarray(combined_vec, dtype=np.float32),
-            }
-        )
+                {
+                    "trajectory_id": str(sample["trajectory_id"]),
+                    "clip_id": int(sample["clip_id"]),
+                    "video_id": int(sample["trajectory_record"]["video_id"]),
+                    "observed_raw_ids": sorted({int(x) for x in list(sample.get("observed_raw_ids", []))}),
+                    "carrier_vec": np.asarray(carrier_vec, dtype=np.float32),
+                    "frame_vectors": [np.asarray(vec, dtype=np.float32) for vec in frame_vectors],
+                    "frame_vec": np.asarray(frame_vec, dtype=np.float32),
+                    "combined_vec": np.asarray(combined_vec, dtype=np.float32),
+                }
+            )
     return {"examples": examples, "skipped_reason_histogram": skipped}
 
 
@@ -168,6 +169,7 @@ def train_prealign(
                 frame_vec=ex["frame_vec"],
                 candidate_matrix=text_candidate_matrix,
                 temperature=float(config.temperature),
+                frame_vectors=ex["frame_vectors"],
             )
             observed_raw_ids = [int(x) for x in ex["observed_raw_ids"]]
             positive = [idx for idx, raw_id in enumerate(text_vocab_ids) if int(raw_id) in observed_raw_ids]
@@ -206,6 +208,7 @@ def train_prealign(
                 frame_vec=ex["frame_vec"],
                 candidate_matrix=text_candidate_matrix,
                 temperature=float(config.temperature),
+                frame_vectors=ex["frame_vectors"],
             )
             logits = torch.from_numpy(np.asarray(logits_np, dtype=np.float32)).to(device=device, dtype=torch.float32)
             logits_full = torch.cat([torch.zeros(1, device=device, dtype=torch.float32), logits], dim=0)

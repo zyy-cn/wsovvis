@@ -1,6 +1,6 @@
 {
   "task_id": "G7_training-task",
-  "task_truth_stamp": "af311d1a60f1f4ffca58e32a8ba8559370eb4f9f4937255ad19174e4d4542b99",
+  "task_truth_stamp": "ca4d22d6c6e89c1940e9b154e7b4c4eb3a1cdfc081817d240725e462fe7ee44d",
   "active_gate": "G7_training",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/banks/trajectory_bank.py",
@@ -15,6 +15,14 @@
     "videocutler/ext_stageb_ovvis/banks/responsibility_cache.py",
     "videocutler/run_stageb_train_prealign.py",
     "videocutler/run_stageb_train_softem.py",
+    "train/audit/closed_set_selected_classes.json",
+    "train/audit/closed_set_selected_clips.json",
+    "train/audit/closed_set_drop_protocol.json",
+    "train/audit/closed_set_drop_recovery_ledger.jsonl",
+    "train/audit/closed_set_drop_recovery_summary.json",
+    "train/audit/closed_set_drop_recovery_casebook.jsonl",
+    "codex/outputs/G7_training/g7_closed_set_drop_recovery_latest.md",
+    "codex/outputs/G7_training/g7_closed_set_drop_recovery_latest.json",
     "tests/stageb/",
     "codex/outputs/G7_training/"
   ],

@@ -60,7 +60,7 @@ def load_combined_evidence(
     output_root: Path,
     dataset_name: str,
     trajectory_source_branch: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
     if trajectory_source_branch == "mainline":
         carrier_parent = output_root / "carrier_bank" / dataset_name
     elif trajectory_source_branch == "gt_upper_bound":
@@ -107,7 +107,7 @@ def load_combined_evidence(
     combined = np.mean(np.stack([_normalize(carrier_vec), _normalize(frame_vec)], axis=0), axis=0)
     if combined is None:
         raise ValueError("combined evidence is zero norm")
-    return carrier_vec.astype(np.float32), frame_vec.astype(np.float32), combined.astype(np.float32)
+    return carrier_vec.astype(np.float32), [np.asarray(vec, dtype=np.float32) for vec in frame_vectors], frame_vec.astype(np.float32), combined.astype(np.float32)
 
 
 def fuse_carrier_frame_logits_torch(
@@ -118,19 +118,29 @@ def fuse_carrier_frame_logits_torch(
     candidate_matrix: np.ndarray,
     temperature: float,
     lambda_frame: float = 0.25,
+    frame_vectors: Optional[Sequence[np.ndarray]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     candidate_matrix = np.asarray(candidate_matrix, dtype=np.float32)
     if candidate_matrix.ndim != 2:
         raise ValueError("candidate_matrix must be rank-2")
     device = next(projector.parameters()).device if hasattr(projector, "parameters") else torch.device("cpu")
     carrier_tensor = torch.from_numpy(np.asarray(carrier_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-    frame_tensor = torch.from_numpy(np.asarray(frame_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
     candidate_tensor = torch.from_numpy(candidate_matrix.astype(np.float32)).to(device=device, dtype=torch.float32)
     candidate_tensor = F.normalize(candidate_tensor, p=2.0, dim=-1)
     carrier_q = projector(carrier_tensor)
-    frame_q = projector(frame_tensor)
     carrier_logits = torch.matmul(carrier_q, candidate_tensor.t()).squeeze(0) / float(temperature)
-    frame_logits = torch.matmul(frame_q, candidate_tensor.t()).squeeze(0) / float(temperature)
+    if frame_vectors is not None:
+        frame_list = [np.asarray(vec, dtype=np.float32) for vec in frame_vectors]
+        if not frame_list:
+            raise ValueError("frame_vectors cannot be empty when provided")
+        frame_tensor = torch.from_numpy(np.stack(frame_list, axis=0).astype(np.float32)).to(device=device, dtype=torch.float32)
+        frame_q = projector(frame_tensor)
+        frame_logits = torch.matmul(frame_q, candidate_tensor.t()) / float(temperature)
+        frame_logits = frame_logits.mean(dim=0)
+    else:
+        frame_tensor = torch.from_numpy(np.asarray(frame_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
+        frame_q = projector(frame_tensor)
+        frame_logits = torch.matmul(frame_q, candidate_tensor.t()).squeeze(0) / float(temperature)
     fused_logits = (1.0 - float(lambda_frame)) * carrier_logits + float(lambda_frame) * frame_logits
     return carrier_logits, frame_logits, fused_logits
 
@@ -143,6 +153,7 @@ def fuse_carrier_frame_logits(
     candidate_matrix: np.ndarray,
     temperature: float,
     lambda_frame: float = 0.25,
+    frame_vectors: Optional[Sequence[np.ndarray]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     with torch.no_grad():
         carrier_logits, frame_logits, fused_logits = fuse_carrier_frame_logits_torch(
@@ -152,6 +163,7 @@ def fuse_carrier_frame_logits(
             candidate_matrix=candidate_matrix,
             temperature=temperature,
             lambda_frame=lambda_frame,
+            frame_vectors=frame_vectors,
         )
     return (
         np.asarray(carrier_logits.detach().cpu().numpy(), dtype=np.float32),
@@ -204,8 +216,11 @@ def refine_responsibilities(
     candidate_ids_known: Sequence[int],
     candidate_ids_extra: Sequence[int],
     stage_id: str,
-    coverage_bonus: float = 0.15,
-    extra_penalty: float = 0.05,
+    coverage_bonus: float = 0.1,
+    coverage_epsilon: float = 1.0,
+    extra_penalty: float = 0.1,
+    unknown_bias: float = 0.0,
+    coverage_context: Optional[Mapping[str, float]] = None,
 ) -> Tuple[Dict[str, float], Dict[str, float], List[int]]:
     domain_ids, known_ids, extra_ids = build_stage_domain_indices(
         candidate_ids_known,
@@ -217,28 +232,25 @@ def refine_responsibilities(
         raise ValueError("model probability shape mismatch")
     init = {str(key): max(0.0, float(value)) for key, value in dict(initial_mass).items()}
     unknown_init = max(0.0, float(init.get("unknown", 0.0)))
-    base_unknown = math.log(max(unknown_init, 1e-12))
-    scores: Dict[str, float] = {"unknown": base_unknown + 0.0}
-    weight_by_id: Dict[str, float] = {"unknown": 1.0}
+    base_unknown = math.log(max(unknown_init, 1e-12)) + float(unknown_bias)
+    scores: Dict[str, float] = {"unknown": base_unknown}
     coverage_bonus_applied_to: List[int] = []
-    known_total_mass = float(sum(max(0.0, float(init.get(str(int(raw_id)), 0.0))) for raw_id in known_ids))
-    extra_total_mass = float(sum(max(0.0, float(init.get(str(int(raw_id)), 0.0))) for raw_id in extra_ids))
+    coverage_map = {str(key): max(0.0, float(value)) for key, value in dict(coverage_context or {}).items()}
+    known_total_mass = float(sum(max(0.0, float(coverage_map.get(str(int(raw_id)), init.get(str(int(raw_id)), 0.0)))) for raw_id in known_ids))
     known_denom = float(known_total_mass if known_total_mass > 1e-12 else max(len(known_ids), 1))
-    extra_denom = float(extra_total_mass if extra_total_mass > 1e-12 else max(len(extra_ids), 1))
 
     for raw_id, model_prob in zip(domain_ids, model_probs_arr.tolist()):
         init_mass = max(0.0, float(init.get(str(int(raw_id)), 0.0)))
         score = math.log(max(model_prob, 1e-12)) + math.log(max(init_mass, 1e-12))
-        weight = 1.0
         if int(raw_id) in known_ids:
-            coverage_share = init_mass / known_denom
-            weight = 1.0 + float(coverage_bonus) * float(coverage_share)
+            coverage_mass = max(0.0, float(coverage_map.get(str(int(raw_id)), init_mass)))
+            coverage_share = coverage_mass / known_denom
+            coverage_term = float(coverage_bonus) * math.log(float(coverage_epsilon) + max(coverage_share, 0.0))
+            score = score + coverage_term
             coverage_bonus_applied_to.append(int(raw_id))
         elif int(raw_id) in extra_ids:
-            extra_share = init_mass / extra_denom
-            weight = max(1e-6, 1.0 - float(extra_penalty) * float(extra_share))
-        scores[str(int(raw_id))] = score + math.log(max(weight, 1e-12))
-        weight_by_id[str(int(raw_id))] = float(weight)
+            score = score - float(extra_penalty)
+        scores[str(int(raw_id))] = score
 
     ordered_keys = ["unknown", *[str(int(raw_id)) for raw_id in domain_ids]]
     score_tensor = torch.tensor([scores[key] for key in ordered_keys], dtype=torch.float64)

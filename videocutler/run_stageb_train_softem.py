@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--aug_learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--em_subiterations", type=int, default=1)
+    parser.add_argument("--em_subiterations", type=int, default=None)
     return parser.parse_args()
 
 
@@ -56,6 +56,12 @@ def _write_jsonl(path: Path, rows: list[Dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def resolve_em_subiterations(*, smoke: bool, explicit: int | None) -> int:
+    if explicit is not None:
+        return int(explicit)
+    return 2 if bool(smoke) else 3
 
 
 def _write_contract_check(repo_root: Path, *, softem_result: Dict[str, Any], summary: Dict[str, Any], run_scope: str) -> Path:
@@ -125,11 +131,13 @@ def main() -> int:
         aug_epochs = int(args.aug_epochs) if args.aug_epochs is not None else 1
         base_lr = float(args.base_learning_rate) if args.base_learning_rate is not None else 5e-5
         aug_lr = float(args.aug_learning_rate) if args.aug_learning_rate is not None else 5e-5
+        em_subiterations = resolve_em_subiterations(smoke=True, explicit=args.em_subiterations)
     else:
         base_epochs = int(args.base_epochs) if args.base_epochs is not None else 5
         aug_epochs = int(args.aug_epochs) if args.aug_epochs is not None else 5
         base_lr = float(args.base_learning_rate) if args.base_learning_rate is not None else 1e-4
         aug_lr = float(args.aug_learning_rate) if args.aug_learning_rate is not None else 1e-4
+        em_subiterations = resolve_em_subiterations(smoke=False, explicit=args.em_subiterations)
 
     softem_result = run_soft_em(
         output_root=output_root,
@@ -143,7 +151,7 @@ def main() -> int:
             smoke=bool(args.smoke),
             temperature=float(args.temperature),
             weight_decay=float(args.weight_decay),
-            em_subiterations=int(args.em_subiterations),
+            em_subiterations=int(em_subiterations),
             base_epochs=int(base_epochs),
             aug_epochs=int(aug_epochs),
             base_learning_rate=float(base_lr),
