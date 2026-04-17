@@ -116,12 +116,12 @@ def _scan_asset_root(output_root: Path, rels: Mapping[str, str]) -> Dict[str, An
         "trajectory_view",
         "carrier_view",
         "weak_label_view",
-        "pooled_frame_view",
+        "frame_feature_view",
+        "frame_geometry_view",
         "text_bank_view",
     ]
     upstream_asset_view_keys = [
-        "frame_feature_view",
-        "frame_geometry_view",
+        "pooled_frame_view",
     ]
     return {
         "output_root": str(output_root),
@@ -255,7 +255,6 @@ def _required_sample_fields() -> List[str]:
         "trajectory_record",
         "carrier_record",
         "weak_label_record",
-        "pooled_frame_record",
         "candidate_text_prototypes",
         "observed_raw_ids",
         "candidate_ids_known",
@@ -267,8 +266,6 @@ def _required_sample_fields() -> List[str]:
 
 def _validate_sample_shape(sample: Record) -> List[str]:
     missing = [field for field in _required_sample_fields() if field not in sample]
-    if not isinstance(sample.get("pooled_frame_record"), Mapping):
-        missing.append("pooled_frame_record_type")
     if not isinstance(sample.get("candidate_text_prototypes"), list):
         missing.append("candidate_text_prototypes_type")
     if not isinstance(sample.get("candidate_ids_known"), list):
@@ -304,7 +301,7 @@ def materialize_phase1_training_samples(
     )
     runtime_output_root = Path(str(resolution["runtime_output_root"]))
     assets = resolution["assets"]
-    for key in ("trajectory_records", "carrier_records", "pooled_frame_records", "weak_labels", "text_prototypes"):
+    for key in ("trajectory_records", "carrier_records", "frame_records", "frame_geom_records", "weak_labels", "text_prototypes"):
         if not assets[key]["exists"]:
             raise FileNotFoundError(f"missing required canonical input: {assets[key]['path']}")
 
@@ -313,7 +310,7 @@ def materialize_phase1_training_samples(
         _load_jsonl(runtime_output_root / assets["trajectory_records"]["path"], limit=traj_limit)
     )
     carrier_records = _load_jsonl(runtime_output_root / assets["carrier_records"]["path"])
-    pooled_frame_records = _load_jsonl(runtime_output_root / assets["pooled_frame_records"]["path"])
+    pooled_frame_records = _load_jsonl(runtime_output_root / assets["pooled_frame_records"]["path"]) if assets["pooled_frame_records"]["exists"] else []
     weak_records = _load_json(runtime_output_root / assets["weak_labels"]["path"])
     text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(runtime_output_root)
 
@@ -354,10 +351,6 @@ def materialize_phase1_training_samples(
         if weak_rec is None:
             missing_views.append("clip_weak_label_view")
             invalid_reasons.append("missing_weak_label_record")
-
-        if pooled_frame_rec is None:
-            missing_views.append("pooled_frame_view")
-            invalid_reasons.append("missing_pooled_frame_record")
 
         partial_samples.append({
             "trajectory_id": trajectory_id,

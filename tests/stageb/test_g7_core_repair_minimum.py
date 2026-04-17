@@ -89,7 +89,7 @@ def _prepare_fixture(root: Path) -> None:
     )
 
 
-def test_phase1_materialization_requires_pooled_frame_and_marks_placeholder(tmp_path: Path) -> None:
+def test_phase1_materialization_uses_runtime_frame_bank_and_marks_placeholder(tmp_path: Path) -> None:
     _prepare_fixture(tmp_path)
     result = materialize_phase1_training_samples(
         tmp_path,

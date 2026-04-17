@@ -259,23 +259,22 @@ def test_phase1_materialization_prefers_authoritative_remote_when_local_incomple
     assert result["stats"]["valid_sample_count"] >= 1
 
 
-def test_phase1_materialization_accepts_missing_upstream_frame_rows_when_pooled_frame_exists(tmp_path: Path) -> None:
+def test_phase1_materialization_accepts_missing_pooled_frame_records_when_frame_bank_exists(tmp_path: Path) -> None:
     root = _prepare_fixture(tmp_path)
-    (root / "frame_bank" / "lvvis_train_base" / "frame_records.jsonl").unlink()
-    (root / "frame_bank" / "lvvis_train_base" / "frame_geom_records.jsonl").unlink()
+    (root / "frame_bank" / "lvvis_train_base" / "pooled_frame_records.jsonl").unlink()
     result = materialize_phase1_training_samples(
         root,
         Phase1MaterializationConfig(dataset_name="lvvis_train_base", smoke=True, smoke_max_trajectories=16),
     )
     by_tid = {sample["trajectory_id"]: sample for sample in result["samples"]}
     assert by_tid["traj_000001"]["sample_valid"] is True
-    assert "missing_frame_feature_row" not in by_tid["traj_000001"]["invalid_reasons"]
-    assert "missing_frame_geometry_row" not in by_tid["traj_000001"]["invalid_reasons"]
+    assert "missing_pooled_frame_record" not in by_tid["traj_000001"]["invalid_reasons"]
     assert result["resolution"]["required_canonical_views"] == [
         "trajectory_view",
         "carrier_view",
         "weak_label_view",
-        "pooled_frame_view",
+        "frame_feature_view",
+        "frame_geometry_view",
         "text_bank_view",
     ]
-    assert result["resolution"]["upstream_asset_only_views"] == ["frame_feature_view", "frame_geometry_view"]
+    assert result["resolution"]["upstream_asset_only_views"] == ["pooled_frame_view"]
