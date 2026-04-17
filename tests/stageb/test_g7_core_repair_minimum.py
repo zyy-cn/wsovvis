@@ -118,7 +118,7 @@ def test_refine_responsibilities_trace_schema_and_chaining() -> None:
     init_mass = {"unknown": 0.2, "1": 0.5, "3": 0.2, "7": 0.1}
     r_init, r_final, trace = refine_responsibilities(
         initial_mass=init_mass,
-        model_probs=[0.5, 0.3, 0.2],
+        model_logits=[0.5, 0.3, 0.2],
         candidate_ids_known=[1],
         candidate_ids_extra=[3, 7],
         stage_id="softem_aug",
@@ -131,7 +131,7 @@ def test_refine_responsibilities_trace_schema_and_chaining() -> None:
     assert trace["final_mass"] == r_final
     r_init2, r_final2, trace2 = refine_responsibilities(
         initial_mass=r_final,
-        model_probs=[0.5, 0.3, 0.2],
+        model_logits=[0.5, 0.3, 0.2],
         candidate_ids_known=[1],
         candidate_ids_extra=[3, 7],
         stage_id="softem_aug",
@@ -152,10 +152,12 @@ def test_observed_mass_loss_includes_unknown() -> None:
     assert torch.isclose(loss, torch.tensor(np.log(4.0), dtype=torch.float32))
 
 
-def test_frame_and_carrier_evidence_combine_with_pooled_frame(tmp_path: Path) -> None:
+def test_frame_and_carrier_evidence_combine_with_runtime_frame_logits_average(tmp_path: Path) -> None:
     _prepare_fixture(tmp_path)
     sample = {
-        "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
+        "clip_id": "1",
+        "trajectory_record": {"clip_id": 1, "frame_indices": [0]},
+        "carrier_record": {"clip_id": "1", "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]", "frame_indices": [0]},
         "pooled_frame_record": {"frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
     }
     carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
@@ -171,7 +173,7 @@ def test_frame_and_carrier_evidence_combine_with_pooled_frame(tmp_path: Path) ->
         candidate_matrix=np.asarray([[1.0, 0.0] + [0.0] * 510, [0.0, 1.0] + [0.0] * 510], dtype=np.float32),
         temperature=0.07,
     )
-    assert frame_vectors == []
+    assert len(frame_vectors) == 1
     assert carrier_vec[0] > 0.0
     assert frame_vec[1] > 0.0
     assert combined_vec[0] > 0.0 and combined_vec[1] > 0.0

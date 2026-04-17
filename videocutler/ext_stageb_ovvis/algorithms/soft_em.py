@@ -145,7 +145,7 @@ def _prepare_examples(
                 'candidate_ids_extra': candidate_ids_extra,
                 'candidate_matrix': np.asarray(candidate_matrix, dtype=np.float32),
                 'carrier_vec': np.asarray(carrier_vec, dtype=np.float32),
-                'frame_vectors': None,
+                'frame_vectors': [np.asarray(vec, dtype=np.float32) for vec in frame_vectors],
                 'frame_vec': np.asarray(frame_vec, dtype=np.float32),
                 'combined_vec': np.asarray(combined_vec, dtype=np.float32),
                 'candidate_records': candidate_records,
@@ -276,16 +276,23 @@ def _build_runtime_extra_cache(
     idx_by_raw = {int(raw_id): idx for idx, raw_id in enumerate(vocab_ids)}
     text_lookup = {int(rec['raw_id']): dict(rec) for rec in vocab_records}
     t_dis = _compute_t_dis(theta_t)
-    t_dis_value = float(t_dis.detach().cpu().item())
     with torch.no_grad():
         text_tensor = torch.from_numpy(np.asarray(vocab_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
         projected_text = F.normalize(text_projector(text_tensor), p=2.0, dim=-1)
         text_text_sim = torch.matmul(projected_text, projected_text.t()).detach().cpu().numpy().astype(np.float32)
-        carrier_matrix = F.normalize(torch.from_numpy(np.stack([np.asarray(ex['carrier_vec'], dtype=np.float32) for ex in examples], axis=0)).to(device=device, dtype=torch.float32), p=2.0, dim=-1)
-        frame_matrix = F.normalize(torch.from_numpy(np.stack([np.asarray(ex['frame_vec'], dtype=np.float32) for ex in examples], axis=0)).to(device=device, dtype=torch.float32), p=2.0, dim=-1)
-        carrier_scores = torch.matmul(carrier_matrix, projected_text.t()).detach().cpu().numpy().astype(np.float32) / max(t_dis_value, 1e-12)
-        frame_scores = torch.matmul(frame_matrix, projected_text.t()).detach().cpu().numpy().astype(np.float32) / max(t_dis_value, 1e-12)
-    fused_scores = (1.0 - float(lambda_frame)) * carrier_scores + float(lambda_frame) * frame_scores
+        fused_rows: List[np.ndarray] = []
+        for ex in examples:
+            _carrier_logits, _frame_logits, fused_logits = fuse_carrier_frame_logits(
+                projector=text_projector,
+                carrier_vec=np.asarray(ex['carrier_vec'], dtype=np.float32),
+                frame_vec=np.asarray(ex['frame_vec'], dtype=np.float32),
+                candidate_matrix=vocab_matrix,
+                temperature=t_dis,
+                lambda_frame=lambda_frame,
+                frame_vectors=ex.get('frame_vectors'),
+            )
+            fused_rows.append(np.asarray(fused_logits, dtype=np.float32))
+    fused_scores = np.stack(fused_rows, axis=0).astype(np.float32)
     examples_by_clip: Dict[int, List[Tuple[int, Mapping[str, Any]]]] = {}
     for row_idx, ex in enumerate(examples):
         examples_by_clip.setdefault(int(ex['clip_id']), []).append((row_idx, ex))
@@ -464,7 +471,7 @@ def _compute_clip_refinement_rows(
     device: torch.device,
 ) -> Tuple[List[Record], List[Dict[str, Any]]]:
     t_dis = _compute_t_dis(theta_t)
-    per_tid_model_probs: Dict[str, np.ndarray] = {}
+    per_tid_model_logits: Dict[str, np.ndarray] = {}
     per_tid_domain_ids: Dict[str, List[int]] = {}
     per_tid_known_ids: Dict[str, List[int]] = {}
     per_tid_extra_ids: Dict[str, List[int]] = {}
@@ -485,8 +492,8 @@ def _compute_clip_refinement_rows(
                 frame_vectors=ex.get('frame_vectors'),
             )
             stage_logits_candidates = logits_known_extra[: len(domain_ids)]
-            model_probs = torch.softmax(stage_logits_candidates, dim=0).detach().cpu().numpy().astype(np.float64)
-            per_tid_model_probs[tid] = model_probs
+            model_logits = stage_logits_candidates.detach().cpu().numpy().astype(np.float64)
+            per_tid_model_logits[tid] = model_logits
             per_tid_domain_ids[tid] = list(domain_ids)
             per_tid_known_ids[tid] = list(known_ids)
             per_tid_extra_ids[tid] = list(extra_ids)
@@ -516,7 +523,7 @@ def _compute_clip_refinement_rows(
             )
             refined_init, refined_final, refine_trace = refine_responsibilities(
                 initial_mass=current_masses_by_tid[tid],
-                model_probs=per_tid_model_probs[tid],
+                model_logits=per_tid_model_logits[tid],
                 candidate_ids_known=per_tid_known_ids[tid],
                 candidate_ids_extra=per_tid_extra_ids[tid],
                 stage_id=stage_id,

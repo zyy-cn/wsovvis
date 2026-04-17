@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -9,6 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_locator
+from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import read_feature_vector, reconstruct_valid_token_mask_from_geometry
 from videocutler.ext_stageb_ovvis.banks.frame_pooled_bank import read_pooled_frame_vector
 from videocutler.ext_stageb_ovvis.banks.text_bank import read_text_prototype_records, resolve_text_prototype
 
@@ -81,6 +84,92 @@ def load_text_vocab(output_root: Path) -> Tuple[List[int], List[Record], np.ndar
     return raw_ids, records, matrix
 
 
+def _coerce_token_feature_matrix(feature: np.ndarray, grid_h: int, grid_w: int) -> Optional[np.ndarray]:
+    feature = np.asarray(feature, dtype=np.float32)
+    if feature.ndim != 2:
+        return None
+    grid_tokens = int(grid_h) * int(grid_w)
+    if int(feature.shape[0]) == grid_tokens:
+        return feature
+    if int(feature.shape[0]) == grid_tokens + 1:
+        return feature[1:]
+    return None
+
+
+def _read_jsonl(path: Path) -> List[Record]:
+    rows: List[Record] = []
+    with path.open('r', encoding='utf-8') as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
+@lru_cache(maxsize=16)
+def _frame_bank_lookup(output_root_text: str, dataset_name: str) -> Tuple[Dict[Tuple[str, int], Record], Dict[Tuple[str, int], Record]]:
+    output_root = Path(output_root_text)
+    frame_root = output_root / 'frame_bank' / dataset_name
+    frame_rows = _read_jsonl(frame_root / 'frame_records.jsonl')
+    geom_rows = _read_jsonl(frame_root / 'frame_geom_records.jsonl')
+    frame_lookup = {(str(row['clip_id']), int(row['frame_index'])): dict(row) for row in frame_rows}
+    geom_lookup = {(str(row['clip_id']), int(row['frame_index'])): dict(row) for row in geom_rows}
+    return frame_lookup, geom_lookup
+
+
+def _collect_runtime_frame_vectors(sample: Mapping[str, Any], *, output_root: Path, dataset_name: str) -> List[np.ndarray]:
+    frame_rows = list(sample.get('frame_feature_rows', []))
+    geom_rows = list(sample.get('frame_geometry_rows', []))
+    if frame_rows and len(frame_rows) == len(geom_rows):
+        paired_rows = [(dict(frame_row), dict(geom_row)) for frame_row, geom_row in zip(frame_rows, geom_rows)]
+    else:
+        trajectory_record = sample.get('trajectory_record')
+        carrier_record = sample.get('carrier_record')
+        frame_indices = []
+        if isinstance(trajectory_record, Mapping):
+            frame_indices = [int(x) for x in list(trajectory_record.get('frame_indices', []))]
+        if not frame_indices and isinstance(carrier_record, Mapping):
+            frame_indices = [int(x) for x in list(carrier_record.get('frame_indices', []))]
+        clip_id = None
+        if isinstance(sample.get('clip_id'), (str, int)):
+            clip_id = str(sample.get('clip_id'))
+        elif isinstance(trajectory_record, Mapping) and 'clip_id' in trajectory_record:
+            clip_id = str(trajectory_record.get('clip_id'))
+        elif isinstance(carrier_record, Mapping) and 'clip_id' in carrier_record:
+            clip_id = str(carrier_record.get('clip_id'))
+        if clip_id is None or not frame_indices:
+            return []
+        frame_lookup, geom_lookup = _frame_bank_lookup(str(output_root), dataset_name)
+        paired_rows = []
+        for frame_index in frame_indices:
+            key = (str(clip_id), int(frame_index))
+            frame_row = frame_lookup.get(key)
+            geom_row = geom_lookup.get(key)
+            if frame_row is None or geom_row is None:
+                continue
+            paired_rows.append((dict(frame_row), dict(geom_row)))
+    if not paired_rows:
+        return []
+    frame_parent = output_root / 'frame_bank' / dataset_name
+    vectors: List[np.ndarray] = []
+    for frame_row, geom_row in paired_rows:
+        feat_path = str(frame_row.get('feat_path', ''))
+        if not feat_path:
+            continue
+        feature = read_feature_vector(frame_parent, feat_path)
+        token_matrix = _coerce_token_feature_matrix(feature, int(geom_row['grid_h']), int(geom_row['grid_w']))
+        if token_matrix is None:
+            continue
+        valid_mask = reconstruct_valid_token_mask_from_geometry(geom_row).astype(np.float32).reshape(-1)
+        denom = float(np.sum(valid_mask))
+        if denom <= 1e-12:
+            continue
+        frame_vec = np.sum(token_matrix * valid_mask[:, None], axis=0).astype(np.float32) / denom
+        vectors.append(frame_vec.astype(np.float32))
+    return vectors
+
+
 def load_combined_evidence(
     sample: Mapping[str, Any],
     *,
@@ -104,20 +193,25 @@ def load_combined_evidence(
         raise ValueError('missing carrier z_norm_path')
     carrier_vec = np.asarray(read_vector_from_locator(carrier_parent, z_norm_path), dtype=np.float32)
 
-    pooled_frame_record = sample.get('pooled_frame_record')
-    if not isinstance(pooled_frame_record, Mapping):
-        raise ValueError('missing pooled_frame_record')
-    frame_pooled_path = str(pooled_frame_record.get('frame_pooled_path', ''))
-    if not frame_pooled_path:
-        raise ValueError('missing pooled_frame_record.frame_pooled_path')
-    frame_vec = np.asarray(read_pooled_frame_vector(pooled_frame_parent, frame_pooled_path), dtype=np.float32)
+    frame_vectors = _collect_runtime_frame_vectors(sample, output_root=output_root, dataset_name=dataset_name)
+    if frame_vectors:
+        frame_stack = np.stack([np.asarray(vec, dtype=np.float32) for vec in frame_vectors], axis=0).astype(np.float32)
+        frame_vec = np.mean(frame_stack, axis=0).astype(np.float32)
+    else:
+        pooled_frame_record = sample.get('pooled_frame_record')
+        if not isinstance(pooled_frame_record, Mapping):
+            raise ValueError('missing pooled_frame_record')
+        frame_pooled_path = str(pooled_frame_record.get('frame_pooled_path', ''))
+        if not frame_pooled_path:
+            raise ValueError('missing pooled_frame_record.frame_pooled_path')
+        frame_vec = np.asarray(read_pooled_frame_vector(pooled_frame_parent, frame_pooled_path), dtype=np.float32)
 
     carrier_norm = _normalize(carrier_vec)
     frame_norm = _normalize(frame_vec)
     if carrier_norm is None or frame_norm is None:
         raise ValueError('combined evidence is zero norm')
     combined = np.mean(np.stack([carrier_norm, frame_norm], axis=0), axis=0).astype(np.float32)
-    return carrier_vec.astype(np.float32), [], frame_vec.astype(np.float32), combined.astype(np.float32)
+    return carrier_vec.astype(np.float32), [np.asarray(vec, dtype=np.float32) for vec in frame_vectors], frame_vec.astype(np.float32), combined.astype(np.float32)
 
 
 def fuse_carrier_frame_logits_torch(
@@ -220,7 +314,7 @@ def build_stage_domain_indices(
 def refine_responsibilities(
     *,
     initial_mass: Mapping[str, float],
-    model_probs: Sequence[float],
+    model_logits: Sequence[float],
     candidate_ids_known: Sequence[int],
     candidate_ids_extra: Sequence[int],
     stage_id: str,
@@ -235,21 +329,18 @@ def refine_responsibilities(
         candidate_ids_extra,
         stage_id=stage_id,
     )
-    model_probs_arr = np.asarray(model_probs, dtype=np.float64)
-    if model_probs_arr.ndim != 1 or int(model_probs_arr.shape[0]) != len(domain_ids):
-        raise ValueError('model probability shape mismatch')
+    model_logits_arr = np.asarray(model_logits, dtype=np.float64)
+    if model_logits_arr.ndim != 1 or int(model_logits_arr.shape[0]) != len(domain_ids):
+        raise ValueError('model logit shape mismatch')
     init = {str(key): max(0.0, float(value)) for key, value in dict(initial_mass).items()}
-    unknown_init = max(0.0, float(init.get('unknown', 0.0)))
-    base_unknown = math.log(max(unknown_init, 1e-12)) + float(b_u_value)
-    scores: Dict[str, float] = {'unknown': base_unknown}
+    scores: Dict[str, float] = {'unknown': float(b_u_value)}
     coverage_bonus_applied_to: List[int] = []
     extra_penalty_applied_to: List[int] = []
     coverage_map = {str(key): max(0.0, float(value)) for key, value in dict(coverage_context or {}).items()}
-    for raw_id, model_prob in zip(domain_ids, model_probs_arr.tolist()):
-        init_mass_value = max(0.0, float(init.get(str(int(raw_id)), 0.0)))
-        score = math.log(max(model_prob, 1e-12)) + math.log(max(init_mass_value, 1e-12))
+    for raw_id, model_logit in zip(domain_ids, model_logits_arr.tolist()):
+        score = float(model_logit)
         if int(raw_id) in known_ids:
-            coverage_mass = max(0.0, float(coverage_map.get(str(int(raw_id)), init_mass_value)))
+            coverage_mass = max(0.0, float(coverage_map.get(str(int(raw_id)), 0.0)))
             coverage_term = float(coverage_bonus) * math.log(float(coverage_epsilon) + max(coverage_mass, 0.0))
             score = score + coverage_term
             coverage_bonus_applied_to.append(int(raw_id))
@@ -287,4 +378,6 @@ def _normalize_mass_dict(mass: Mapping[str, float]) -> Dict[str, float]:
         total += v
     if total <= 0.0:
         return {'unknown': 1.0}
+    if abs(total - 1.0) <= 1e-12:
+        return {key: float(value) for key, value in normalized.items()}
     return {key: float(value / total) for key, value in normalized.items()}

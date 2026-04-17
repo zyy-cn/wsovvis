@@ -123,8 +123,8 @@ def _prepare_evidence_fixture(root: Path) -> None:
     _write_jsonl(
         root / "exports" / "lvvis_train_base" / "trajectory_records.jsonl",
         [
-            {"trajectory_id": "traj-a", "video_id": 10, "clip_id": 10, "frame_count": 1, "trajectory_source_branch": "mainline"},
-            {"trajectory_id": "traj-b", "video_id": 11, "clip_id": 11, "frame_count": 1, "trajectory_source_branch": "mainline"},
+            {"trajectory_id": "traj-a", "video_id": 10, "clip_id": 10, "frame_count": 1, "frame_indices": [0], "trajectory_source_branch": "mainline"},
+            {"trajectory_id": "traj-b", "video_id": 11, "clip_id": 11, "frame_count": 1, "frame_indices": [0], "trajectory_source_branch": "mainline"},
         ],
     )
     _write_json(
@@ -167,10 +167,10 @@ def test_runtime_extra_cache_uses_fused_unique_class_topk(tmp_path: Path) -> Non
 
 def test_refine_responsibilities_returns_trace_contract_and_allows_chaining() -> None:
     init_mass = {"unknown": 0.2, "1": 0.4, "3": 0.3, "7": 0.1}
-    model_probs = [0.4, 0.35, 0.25]
+    model_logits = [0.4, 0.35, 0.25]
     r_init, r_final, trace = refine_responsibilities(
         initial_mass=init_mass,
-        model_probs=model_probs,
+        model_logits=model_logits,
         candidate_ids_known=[1],
         candidate_ids_extra=[3, 7],
         stage_id="softem_aug",
@@ -184,7 +184,7 @@ def test_refine_responsibilities_returns_trace_contract_and_allows_chaining() ->
     assert trace["final_mass"] == r_final
     r_init2, r_final2, trace2 = refine_responsibilities(
         initial_mass=r_final,
-        model_probs=model_probs,
+        model_logits=model_logits,
         candidate_ids_known=[1],
         candidate_ids_extra=[3, 7],
         stage_id="softem_aug",
@@ -350,11 +350,11 @@ def test_runtime_extra_cache_marks_runtime_authority_enum(tmp_path: Path) -> Non
 
 def test_refine_responsibilities_uses_raw_coverage_mass_not_normalized_share() -> None:
     init_mass = {"unknown": 0.1, "1": 0.45, "3": 0.45}
-    model_probs = [0.6, 0.4]
+    model_logits = [0.6, 0.4]
     coverage_context = {"1": 4.0, "3": 1.0}
     _, r_final, _ = refine_responsibilities(
         initial_mass=init_mass,
-        model_probs=model_probs,
+        model_logits=model_logits,
         candidate_ids_known=[1, 3],
         candidate_ids_extra=[],
         stage_id="softem_base",
@@ -365,9 +365,9 @@ def test_refine_responsibilities_uses_raw_coverage_mass_not_normalized_share() -
         coverage_context=coverage_context,
     )
     scores = np.asarray([
-        np.log(0.1),
-        np.log(0.6) + np.log(0.45) + 0.1 * np.log(1.0 + 4.0),
-        np.log(0.4) + np.log(0.45) + 0.1 * np.log(1.0 + 1.0),
+        0.0,
+        0.6 + 0.1 * np.log(1.0 + 4.0),
+        0.4 + 0.1 * np.log(1.0 + 1.0),
     ], dtype=np.float64)
     expected = np.exp(scores - scores.max())
     expected = expected / expected.sum()
@@ -375,6 +375,32 @@ def test_refine_responsibilities_uses_raw_coverage_mass_not_normalized_share() -
     assert np.isclose(r_final["1"], expected[1], atol=1e-8)
     assert np.isclose(r_final["3"], expected[2], atol=1e-8)
 
+
+
+
+def test_refine_responsibilities_ignores_per_entry_prior_mass_when_model_and_coverage_match() -> None:
+    common_kwargs = dict(
+        model_logits=[0.5, 0.5],
+        candidate_ids_known=[1, 3],
+        candidate_ids_extra=[],
+        stage_id="softem_base",
+        coverage_bonus=0.1,
+        coverage_epsilon=1.0,
+        extra_penalty=0.1,
+        b_u_value=0.0,
+        coverage_context={"1": 2.0, "3": 2.0},
+    )
+    _, r_final_a, _ = refine_responsibilities(
+        initial_mass={"unknown": 0.1, "1": 0.8, "3": 0.1},
+        **common_kwargs,
+    )
+    _, r_final_b, _ = refine_responsibilities(
+        initial_mass={"unknown": 0.1, "1": 0.1, "3": 0.8},
+        **common_kwargs,
+    )
+    assert np.isclose(r_final_a["1"], r_final_b["1"], atol=1e-8)
+    assert np.isclose(r_final_a["3"], r_final_b["3"], atol=1e-8)
+    assert np.isclose(r_final_a["unknown"], r_final_b["unknown"], atol=1e-8)
 
 def test_softem_aug_initializes_new_extra_from_explicit_logits(tmp_path: Path) -> None:
     candidate_matrix = np.zeros((2, 512), dtype=np.float32)
