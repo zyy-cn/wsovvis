@@ -8,17 +8,32 @@ import torch
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     fuse_carrier_frame_logits_torch,
-    load_combined_evidence,
     observed_mass_loss,
     refine_responsibilities,
 )
-from videocutler.ext_stageb_ovvis.algorithms.soft_em import _stage_mass_from_logits_iterative
+from videocutler.ext_stageb_ovvis.algorithms.soft_em import (
+    _build_runtime_extra_cache,
+    _compute_clip_refinement_rows,
+    _prepare_examples,
+)
+from videocutler.ext_stageb_ovvis.banks.responsibility_cache import ResponsibilityCache
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
     Phase1MaterializationConfig,
     materialize_phase1_training_samples,
 )
-from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
-from videocutler.run_stageb_train_softem import resolve_em_subiterations
+
+
+class _OracleTextProjector(torch.nn.Module):
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        arr = torch.as_tensor(
+            inputs,
+            dtype=torch.float32,
+            device=inputs.device if isinstance(inputs, torch.Tensor) else None,
+        )
+        out = torch.zeros((arr.shape[0], 768), dtype=torch.float32, device=arr.device)
+        width = min(arr.shape[1], 768)
+        out[:, :width] = arr[:, :width]
+        return torch.nn.functional.normalize(out, p=2.0, dim=-1)
 
 
 def _write_jsonl(path: Path, rows) -> None:
@@ -40,7 +55,6 @@ def _prepare_evidence_fixture(root: Path) -> None:
     for path in (carrier_dir, frame_dir / "payload", text_dir / "payload"):
         path.mkdir(parents=True, exist_ok=True)
 
-    # Five text prototypes: one observed + four non-observed extras.
     protos = np.zeros((5, 512), dtype=np.float32)
     for idx in range(5):
         protos[idx, idx] = 1.0
@@ -56,254 +70,153 @@ def _prepare_evidence_fixture(root: Path) -> None:
         ],
     )
 
-    # Trajectory A should prefer extras 7 and 9.
-    carrier_a = np.zeros((1, 768), dtype=np.float16)
-    carrier_a[0, 3] = 1.0
-    np.savez(carrier_dir / "carrier_vectors_traj_a.npz", z_norm=carrier_a)
-    frame_a = np.zeros((1, 4, 768), dtype=np.float16)
-    frame_a[0, 0, 4] = 1.0
-    np.savez(frame_dir / "payload" / "clip_a_feats.npz", slot_0=frame_a[0])
-
-    # Trajectory B should prefer extras 3 and 5.
-    carrier_b = np.zeros((1, 768), dtype=np.float16)
-    carrier_b[0, 1] = 1.0
-    np.savez(carrier_dir / "carrier_vectors_traj_b.npz", z_norm=carrier_b)
-    frame_b = np.zeros((1, 4, 768), dtype=np.float16)
-    frame_b[0, 0, 2] = 1.0
-    np.savez(frame_dir / "payload" / "clip_b_feats.npz", slot_0=frame_b[0])
-
+    traj_a = np.zeros((1, 768), dtype=np.float16)
+    traj_a[0, 3] = 1.0
+    traj_a[0, 4] = 0.9
+    traj_b = np.zeros((1, 768), dtype=np.float16)
+    traj_b[0, 2] = 1.0
+    traj_b[0, 3] = 0.7
+    np.savez(carrier_dir / "carrier_vectors_a.npz", z_norm=traj_a)
+    np.savez(carrier_dir / "carrier_vectors_b.npz", z_norm=traj_b)
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
         [
-            {
-                "trajectory_id": "traj-a",
-                "clip_id": "10",
-                "z_norm_path": "carrier_vectors_traj_a.npz#z_norm[0]",
-                "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
-                "path_base_mode": "artifact_parent_dir",
-            },
-            {
-                "trajectory_id": "traj-b",
-                "clip_id": "11",
-                "z_norm_path": "carrier_vectors_traj_b.npz#z_norm[0]",
-                "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
-                "path_base_mode": "artifact_parent_dir",
-            },
+            {"trajectory_id": "traj-a", "clip_id": "10", "z_norm_path": "carrier_vectors_a.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": [], "path_base_mode": "artifact_parent_dir"},
+            {"trajectory_id": "traj-b", "clip_id": "11", "z_norm_path": "carrier_vectors_b.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": [], "path_base_mode": "artifact_parent_dir"},
         ],
     )
+
+
     _write_jsonl(
         frame_dir / "frame_records.jsonl",
         [
-            {"clip_id": "10", "frame_index": 0, "feat_path": "payload/clip_a_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
-            {"clip_id": "11", "frame_index": 0, "feat_path": "payload/clip_b_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
+            {"clip_id": "10", "frame_index": 0, "feat_path": "payload/clip_10_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
+            {"clip_id": "11", "frame_index": 0, "feat_path": "payload/clip_11_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
         ],
     )
     _write_jsonl(
         frame_dir / "frame_geom_records.jsonl",
         [
-            {
-                "clip_id": "10",
-                "frame_index": 0,
-                "orig_h": 28,
-                "orig_w": 28,
-                "resized_h": 28,
-                "resized_w": 28,
-                "padded_h": 28,
-                "padded_w": 28,
-                "scale_y": 1.0,
-                "scale_x": 1.0,
-                "pad_left": 0,
-                "pad_top": 0,
-                "pad_right": 0,
-                "pad_bottom": 0,
-                "patch_size": 14,
-                "grid_h": 2,
-                "grid_w": 2,
-                "valid_token_mask_path": "frame_geom_records.jsonl#0",
-                "path_base_mode": "artifact_parent_dir",
-            },
-            {
-                "clip_id": "11",
-                "frame_index": 0,
-                "orig_h": 28,
-                "orig_w": 28,
-                "resized_h": 28,
-                "resized_w": 28,
-                "padded_h": 28,
-                "padded_w": 28,
-                "scale_y": 1.0,
-                "scale_x": 1.0,
-                "pad_left": 0,
-                "pad_top": 0,
-                "pad_right": 0,
-                "pad_bottom": 0,
-                "patch_size": 14,
-                "grid_h": 2,
-                "grid_w": 2,
-                "valid_token_mask_path": "frame_geom_records.jsonl#1",
-                "path_base_mode": "artifact_parent_dir",
-            },
+            {"clip_id": "10", "frame_index": 0, "orig_h": 28, "orig_w": 28, "resized_h": 28, "resized_w": 28, "padded_h": 28, "padded_w": 28, "scale_y": 1.0, "scale_x": 1.0, "pad_left": 0, "pad_top": 0, "pad_right": 0, "pad_bottom": 0, "patch_size": 14, "grid_h": 2, "grid_w": 2, "valid_token_mask_path": "frame_geom_records.jsonl#0", "path_base_mode": "artifact_parent_dir"},
+            {"clip_id": "11", "frame_index": 0, "orig_h": 28, "orig_w": 28, "resized_h": 28, "resized_w": 28, "padded_h": 28, "padded_w": 28, "scale_y": 1.0, "scale_x": 1.0, "pad_left": 0, "pad_top": 0, "pad_right": 0, "pad_bottom": 0, "patch_size": 14, "grid_h": 2, "grid_w": 2, "valid_token_mask_path": "frame_geom_records.jsonl#1", "path_base_mode": "artifact_parent_dir"},
+        ],
+    )
+    np.savez(frame_dir / "payload" / "clip_10_feats.npz", slot_0=np.ones((4, 768), dtype=np.float16))
+    np.savez(frame_dir / "payload" / "clip_11_feats.npz", slot_0=np.ones((4, 768), dtype=np.float16))
+
+    pooled_a = np.zeros((1, 768), dtype=np.float16)
+    pooled_a[0, 3] = 0.8
+    pooled_a[0, 4] = 1.0
+    pooled_b = np.zeros((1, 768), dtype=np.float16)
+    pooled_b[0, 2] = 0.8
+    pooled_b[0, 1] = 1.0
+    np.savez(frame_dir / "payload" / "clip_10_pooled.npz", frame_pooled=pooled_a)
+    np.savez(frame_dir / "payload" / "clip_11_pooled.npz", frame_pooled=pooled_b)
+    _write_jsonl(
+        frame_dir / "pooled_frame_records.jsonl",
+        [
+            {"trajectory_id": "traj-a", "clip_id": "10", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_10_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
+            {"trajectory_id": "traj-b", "clip_id": "11", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_11_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
+        ],
+    )
+
+    _write_jsonl(
+        root / "exports" / "lvvis_train_base" / "trajectory_records.jsonl",
+        [
+            {"trajectory_id": "traj-a", "video_id": 10, "clip_id": 10, "frame_count": 1, "trajectory_source_branch": "mainline"},
+            {"trajectory_id": "traj-b", "video_id": 11, "clip_id": 11, "frame_count": 1, "trajectory_source_branch": "mainline"},
         ],
     )
     _write_json(
         root / "weak_labels" / "weak_labels_train.json",
         [
-            {"clip_id": "10", "video_id": 10, "observed_raw_ids": [1], "observation_protocol_id": "p1", "completeness_status": "unknown"},
-            {"clip_id": "11", "video_id": 11, "observed_raw_ids": [1], "observation_protocol_id": "p1", "completeness_status": "unknown"},
-        ],
-    )
-    _write_jsonl(
-        root / "exports" / "lvvis_train_base" / "trajectory_records.jsonl",
-        [
-            {
-                "dataset_name": "lvvis_train_base",
-                "split_tag": "train",
-                "clip_id": 10,
-                "video_id": 10,
-                "rank_in_clip": 0,
-                "trajectory_id": "traj-a",
-                "generator_tag": "videocutler_r50_native",
-                "pred_score": 0.9,
-                "frame_indices": [0],
-                "masks_rle": [{}],
-                "boxes_xyxy": [[0, 0, 10, 10]],
-                "valid_carrier": True,
-                "invalid_reason": None,
-                "image_size": [28, 28],
-            },
-            {
-                "dataset_name": "lvvis_train_base",
-                "split_tag": "train",
-                "clip_id": 11,
-                "video_id": 11,
-                "rank_in_clip": 0,
-                "trajectory_id": "traj-b",
-                "generator_tag": "videocutler_r50_native",
-                "pred_score": 0.9,
-                "frame_indices": [0],
-                "masks_rle": [{}],
-                "boxes_xyxy": [[0, 0, 10, 10]],
-                "valid_carrier": True,
-                "invalid_reason": None,
-                "image_size": [28, 28],
-            },
+            {"trajectory_id": "traj-a", "video_id": 10, "clip_id": 10, "observed_raw_ids": [1], "observed_contiguous_ids": [0], "observed_class_names": ["cls-1"], "completeness_status": "unknown", "label_source_type": "simulated_from_gt", "observation_protocol_id": "keep60_seed42"},
+            {"trajectory_id": "traj-b", "video_id": 11, "clip_id": 11, "observed_raw_ids": [1], "observed_contiguous_ids": [0], "observed_class_names": ["cls-1"], "completeness_status": "unknown", "label_source_type": "simulated_from_gt", "observation_protocol_id": "keep60_seed42"},
         ],
     )
 
 
-def test_oracle_prealign_observed_mass_full_vocab() -> None:
-    logits = torch.zeros(3, dtype=torch.float32)
-    loss = observed_mass_loss(logits, [1], unknown_logit=torch.zeros((), dtype=torch.float32))
-    assert torch.isclose(loss, torch.tensor(np.log(4.0), dtype=torch.float32))
-
-
-def test_oracle_extra_proposal_evidence_driven(tmp_path: Path) -> None:
+def test_runtime_extra_cache_uses_fused_unique_class_topk(tmp_path: Path) -> None:
     _prepare_evidence_fixture(tmp_path)
     result = materialize_phase1_training_samples(
         tmp_path,
-        Phase1MaterializationConfig(dataset_name="lvvis_train_base", smoke=True, smoke_max_trajectories=8),
+        Phase1MaterializationConfig(dataset_name="lvvis_train_base", trajectory_source_branch="mainline", smoke=True, smoke_max_trajectories=8),
+    )
+    examples = _prepare_examples(
+        result["samples"],
+        output_root=tmp_path,
+        dataset_name="lvvis_train_base",
+        trajectory_source_branch="mainline",
+    )["examples"]
+    theta_t = torch.nn.Parameter(torch.tensor(np.log(np.exp(0.07) - 1.0), dtype=torch.float32))
+    cache = _build_runtime_extra_cache(
+        examples=examples,
+        text_projector=_OracleTextProjector(),
+        theta_t=theta_t,
+        output_root=tmp_path,
+        k_extra=2,
+        alpha=0.25,
+        lambda_frame=0.25,
+        device=torch.device("cpu"),
+    )
+    assert set(cache[10]["candidate_ids_extra"]) == {7, 9}
+    assert len(set(cache[10]["candidate_ids_extra"])) == 2
+    assert cache[10]["candidate_ids_extra_provenance"][0]["admission_reason"] == "fused_score_class_level_max_with_observed_neighbor_penalty"
+    assert 1 not in cache[10]["candidate_ids_extra"]
+
+
+def test_refine_responsibilities_returns_trace_contract_and_allows_chaining() -> None:
+    init_mass = {"unknown": 0.2, "1": 0.4, "3": 0.3, "7": 0.1}
+    model_probs = [0.4, 0.35, 0.25]
+    r_init, r_final, trace = refine_responsibilities(
+        initial_mass=init_mass,
+        model_probs=model_probs,
+        candidate_ids_known=[1],
+        candidate_ids_extra=[3, 7],
+        stage_id="softem_aug",
+        coverage_bonus=0.1,
+        coverage_epsilon=1.0,
+        extra_penalty=0.1,
+        b_u_value=0.0,
+    )
+    assert set(trace.keys()) >= {"domain_ids", "known_ids", "extra_ids", "coverage_bonus_applied_to", "extra_penalty_applied_to", "b_u", "init_mass", "final_mass"}
+    assert trace["init_mass"] == r_init
+    assert trace["final_mass"] == r_final
+    r_init2, r_final2, trace2 = refine_responsibilities(
+        initial_mass=r_final,
+        model_probs=model_probs,
+        candidate_ids_known=[1],
+        candidate_ids_extra=[3, 7],
+        stage_id="softem_aug",
+        coverage_bonus=0.1,
+        coverage_epsilon=1.0,
+        extra_penalty=0.1,
+        b_u_value=0.0,
+        coverage_context={k: v for k, v in r_final.items() if k != "unknown"},
+    )
+    assert r_init2 == r_final
+    assert trace2["init_mass"] == r_init2
+    assert r_final2 != r_final
+
+
+def test_phase1_materialization_marks_extra_as_placeholder(tmp_path: Path) -> None:
+    _prepare_evidence_fixture(tmp_path)
+    result = materialize_phase1_training_samples(
+        tmp_path,
+        Phase1MaterializationConfig(dataset_name="lvvis_train_base", trajectory_source_branch="mainline", smoke=True, smoke_max_trajectories=8),
     )
     by_tid = {item["trajectory_id"]: item for item in result["samples"]}
-    assert by_tid["traj-a"]["candidate_ids_extra"] == [7]
-    assert by_tid["traj-b"]["candidate_ids_extra"] == [3]
-    assert set(by_tid["traj-a"]["candidate_ids_extra"]).isdisjoint(set(by_tid["traj-a"]["observed_raw_ids"]))
-    assert by_tid["traj-a"]["candidate_ids_extra_provenance"][0]["admission_reason"] == "topk_non_observed_by_clip_evidence"
-    assert by_tid["traj-a"]["candidate_ids_extra_provenance"][0]["raw_id"] == 7
-    assert 1 not in by_tid["traj-a"]["candidate_ids_extra"]
+    assert by_tid["traj-a"]["candidate_ids_extra"] == []
+    assert by_tid["traj-a"]["candidate_ids_extra_provenance"] == []
+    assert by_tid["traj-a"]["candidate_proposal_source"] == "phase1_extra_superseded_runtime_only"
 
 
-def test_oracle_coverage_refinement_mass_driven() -> None:
-    init_mass_a = {"unknown": 0.2, "1": 0.6, "3": 0.1, "7": 0.1}
-    init_mass_b = {"unknown": 0.2, "1": 0.2, "3": 0.5, "7": 0.1}
-    model_probs = [0.4, 0.35, 0.25]
-    final_a, init_a, bonus_a = refine_responsibilities(
-        initial_mass=init_mass_a,
-        model_probs=model_probs,
-        candidate_ids_known=[1],
-        candidate_ids_extra=[3, 7],
-        stage_id="softem_aug",
-        coverage_bonus=0.1,
-        coverage_epsilon=1.0,
-        extra_penalty=0.1,
-    )
-    final_b, init_b, bonus_b = refine_responsibilities(
-        initial_mass=init_mass_b,
-        model_probs=model_probs,
-        candidate_ids_known=[1],
-        candidate_ids_extra=[3, 7],
-        stage_id="softem_aug",
-        coverage_bonus=0.1,
-        coverage_epsilon=1.0,
-        extra_penalty=0.1,
-    )
-    assert bonus_a == [1]
-    assert bonus_b == [1]
-    assert init_a["1"] != init_b["1"]
-    assert final_a["1"] != final_b["1"]
-    assert final_a["3"] != final_b["3"]
-    assert "3" not in bonus_a
-    assert "7" not in bonus_a
-
-
-def test_oracle_em_subiterations_real() -> None:
-    init_mass = {"unknown": 0.2, "1": 0.4, "3": 0.3, "7": 0.1}
-    logits = np.array([0.0, 1.25, -0.75, 0.25], dtype=np.float64)
-    init1, final1, bonus1, trace1 = _stage_mass_from_logits_iterative(
-        stage_id="softem_aug",
-        candidate_ids_known=[1],
-        candidate_ids_extra=[3, 7],
-        initial_mass=init_mass,
-        stage_logits=logits,
-        em_subiterations=1,
-    )
-    init2, final2, bonus2, trace2 = _stage_mass_from_logits_iterative(
-        stage_id="softem_aug",
-        candidate_ids_known=[1],
-        candidate_ids_extra=[3, 7],
-        initial_mass=init_mass,
-        stage_logits=logits,
-        em_subiterations=2,
-    )
-    assert len(trace1) == 1
-    assert len(trace2) == 2
-    assert final1 != final2
-    assert trace2[0]["r_final"] != trace2[1]["r_final"]
-    assert trace2[1]["r_init"] != init_mass
-    assert trace2[1]["r_init"] != trace2[0]["r_init"]
-    assert bonus1 == bonus2 == [1]
-    assert init1.keys() == init2.keys()
-    assert all(abs(float(init1[key]) - float(init2[key])) < 1e-10 for key in init1)
-
-
-def test_oracle_unknown_competes() -> None:
-    final_mass, init_mass, bonus = refine_responsibilities(
-        initial_mass={"unknown": 0.7, "1": 0.2, "3": 0.1},
-        model_probs=[0.34],
-        candidate_ids_known=[1],
-        candidate_ids_extra=[],
-        stage_id="softem_base",
-        coverage_bonus=0.1,
-        coverage_epsilon=1.0,
-        extra_penalty=0.1,
-    )
-    assert bonus == [1]
-    assert "unknown" in final_mass and "1" in final_mass
-    assert 0.0 < final_mass["unknown"] < 1.0
-    assert 0.0 < final_mass["1"] < 1.0
-    assert init_mass["unknown"] > 0.0
-
-
-def test_oracle_frame_fusion_formula_check(tmp_path: Path) -> None:
-    _prepare_evidence_fixture(tmp_path)
-    projector = Projector(ProjectorConfig())
+def test_oracle_frame_fusion_formula_uses_temperature_scaling() -> None:
+    projector = _OracleTextProjector()
     carrier = np.zeros(768, dtype=np.float32)
     carrier[0] = 1.0
-    frame_a = np.zeros(768, dtype=np.float32)
-    frame_a[0] = 1.0
-    frame_b = np.zeros(768, dtype=np.float32)
-    frame_b[1] = 1.0
+    frame = np.zeros(768, dtype=np.float32)
+    frame[1] = 1.0
     candidate_matrix = np.zeros((3, 512), dtype=np.float32)
     candidate_matrix[0, 0] = 1.0
     candidate_matrix[1, 1] = 1.0
@@ -311,36 +224,207 @@ def test_oracle_frame_fusion_formula_check(tmp_path: Path) -> None:
     carrier_logits, frame_logits, fused_logits = fuse_carrier_frame_logits_torch(
         projector=projector,
         carrier_vec=carrier,
-        frame_vec=(frame_a + frame_b) / 2.0,
-        frame_vectors=[frame_a, frame_b],
+        frame_vec=frame,
         candidate_matrix=candidate_matrix,
-        temperature=0.07,
+        temperature=torch.tensor(0.07, dtype=torch.float32),
     )
-    device = next(projector.parameters()).device
-    carrier_tensor = torch.from_numpy(carrier).to(device=device, dtype=torch.float32).unsqueeze(0)
-    frame_tensor = torch.from_numpy(np.stack([frame_a, frame_b], axis=0)).to(device=device, dtype=torch.float32)
-    cand_tensor = torch.from_numpy(candidate_matrix).to(device=device, dtype=torch.float32)
-    cand_tensor = torch.nn.functional.normalize(cand_tensor, p=2.0, dim=-1)
-    expected_carrier = projector(carrier_tensor)
-    expected_frame = projector(frame_tensor)
-    expected_carrier_logits = torch.matmul(expected_carrier, cand_tensor.t()).squeeze(0) / 0.07
-    expected_frame_logits = torch.matmul(expected_frame, cand_tensor.t()) / 0.07
-    expected_frame_logits = expected_frame_logits.mean(dim=0)
-    expected_fused_logits = 0.75 * expected_carrier_logits + 0.25 * expected_frame_logits
-    assert torch.allclose(carrier_logits, expected_carrier_logits, atol=1e-6)
-    assert torch.allclose(frame_logits, expected_frame_logits, atol=1e-6)
-    assert torch.allclose(fused_logits, expected_fused_logits, atol=1e-6)
-    _, _, fallback_logits = fuse_carrier_frame_logits_torch(
+    assert carrier_logits.shape == (3,)
+    assert frame_logits.shape == (3,)
+    assert fused_logits.shape == (3,)
+    assert carrier_logits[0] > carrier_logits[1]
+    assert frame_logits[1] > frame_logits[0]
+
+
+def test_observed_mass_loss_keeps_unknown_slot() -> None:
+    logits = torch.zeros(3, dtype=torch.float32)
+    loss = observed_mass_loss(logits, [1], unknown_logit=torch.zeros((), dtype=torch.float32))
+    assert torch.isclose(loss, torch.tensor(np.log(4.0), dtype=torch.float32))
+
+def test_prealign_contract_uses_fused_logits_with_unknown_competitor() -> None:
+    projector = _OracleTextProjector()
+    carrier = np.zeros(768, dtype=np.float32)
+    carrier[0] = 1.0
+    frame = np.zeros(768, dtype=np.float32)
+    frame[1] = 1.0
+    candidate_matrix = np.zeros((2, 512), dtype=np.float32)
+    candidate_matrix[0, 0] = 1.0
+    candidate_matrix[1, 1] = 1.0
+    carrier_logits, frame_logits, fused_logits = fuse_carrier_frame_logits_torch(
         projector=projector,
         carrier_vec=carrier,
-        frame_vec=(frame_a + frame_b) / 2.0,
+        frame_vec=frame,
         candidate_matrix=candidate_matrix,
-        temperature=0.07,
+        temperature=torch.tensor(0.07, dtype=torch.float32),
     )
-    assert not torch.allclose(fused_logits, fallback_logits)
+    assert carrier_logits[0] > carrier_logits[1]
+    assert frame_logits[1] > frame_logits[0]
+    expected_fused = 0.75 * carrier_logits + 0.25 * frame_logits
+    assert torch.allclose(fused_logits, expected_fused)
+    loss = observed_mass_loss(fused_logits, [1], unknown_logit=torch.zeros((), dtype=torch.float32))
+    expected = -torch.log(torch.exp(fused_logits[1]) / (torch.tensor(1.0, dtype=torch.float32) + torch.exp(fused_logits[0]) + torch.exp(fused_logits[1])))
+    assert torch.isclose(loss, expected, atol=1e-6)
 
 
-def test_oracle_runner_default_em_subiterations_coherent() -> None:
-    assert resolve_em_subiterations(smoke=True, explicit=None) == 2
-    assert resolve_em_subiterations(smoke=False, explicit=None) == 3
-    assert resolve_em_subiterations(smoke=True, explicit=5) == 5
+def test_runtime_extra_cache_debias_uses_raw_cosine_not_temperature(tmp_path: Path) -> None:
+    text_dir = tmp_path / "text_bank"
+    (text_dir / "payload").mkdir(parents=True, exist_ok=True)
+    protos = np.zeros((3, 512), dtype=np.float32)
+    protos[0, 0] = 1.0
+    protos[1, 0] = 0.8
+    protos[1, 1] = 0.6
+    protos[2, 1] = 1.0
+    np.savez(text_dir / "payload" / "text_prototypes.npz", protos=protos)
+    _write_jsonl(
+        text_dir / "text_prototype_records.jsonl",
+        [
+            {"raw_id": 1, "proto_path": "payload/text_prototypes.npz#protos[0]", "path_base_mode": "artifact_parent_dir"},
+            {"raw_id": 3, "proto_path": "payload/text_prototypes.npz#protos[1]", "path_base_mode": "artifact_parent_dir"},
+            {"raw_id": 5, "proto_path": "payload/text_prototypes.npz#protos[2]", "path_base_mode": "artifact_parent_dir"},
+        ],
+    )
+    examples = [
+        {
+            "trajectory_id": "traj-zero",
+            "clip_id": 1,
+            "observed_raw_ids": [1],
+            "carrier_vec": np.zeros(768, dtype=np.float32),
+            "frame_vec": np.zeros(768, dtype=np.float32),
+        }
+    ]
+    theta_small = torch.nn.Parameter(torch.tensor(np.log(np.exp(0.07) - 1.0), dtype=torch.float32))
+    theta_large = torch.nn.Parameter(torch.tensor(np.log(np.exp(0.70) - 1.0), dtype=torch.float32))
+    cache_small = _build_runtime_extra_cache(
+        examples=examples,
+        text_projector=_OracleTextProjector(),
+        theta_t=theta_small,
+        output_root=tmp_path,
+        k_extra=2,
+        alpha=0.25,
+        lambda_frame=0.25,
+        device=torch.device("cpu"),
+    )
+    cache_large = _build_runtime_extra_cache(
+        examples=examples,
+        text_projector=_OracleTextProjector(),
+        theta_t=theta_large,
+        output_root=tmp_path,
+        k_extra=2,
+        alpha=0.25,
+        lambda_frame=0.25,
+        device=torch.device("cpu"),
+    )
+    score_small = {int(item["raw_id"]): float(item["score"]) for item in cache_small[1]["candidate_ids_extra_provenance"]}
+    score_large = {int(item["raw_id"]): float(item["score"]) for item in cache_large[1]["candidate_ids_extra_provenance"]}
+    assert score_small[3] == score_large[3]
+    assert score_small[5] == score_large[5]
+    assert np.isclose(score_small[3], -0.25 * 0.8, atol=1e-6)
+    assert np.isclose(score_small[5], 0.0, atol=1e-6)
+
+
+def test_runtime_extra_cache_marks_runtime_authority_enum(tmp_path: Path) -> None:
+    _prepare_evidence_fixture(tmp_path)
+    result = materialize_phase1_training_samples(
+        tmp_path,
+        Phase1MaterializationConfig(dataset_name="lvvis_train_base", trajectory_source_branch="mainline", smoke=True, smoke_max_trajectories=8),
+    )
+    examples = _prepare_examples(
+        result["samples"],
+        output_root=tmp_path,
+        dataset_name="lvvis_train_base",
+        trajectory_source_branch="mainline",
+    )["examples"]
+    theta_t = torch.nn.Parameter(torch.tensor(np.log(np.exp(0.07) - 1.0), dtype=torch.float32))
+    cache = _build_runtime_extra_cache(
+        examples=examples,
+        text_projector=_OracleTextProjector(),
+        theta_t=theta_t,
+        output_root=tmp_path,
+        k_extra=2,
+        alpha=0.25,
+        lambda_frame=0.25,
+        device=torch.device("cpu"),
+    )
+    assert cache[10]["candidate_ids_extra_authority"] == "runtime_refresh_cache_only"
+    assert cache[10]["candidate_ids_extra_runtime_authoritative"] == cache[10]["candidate_ids_extra"]
+
+
+def test_refine_responsibilities_uses_raw_coverage_mass_not_normalized_share() -> None:
+    init_mass = {"unknown": 0.1, "1": 0.45, "3": 0.45}
+    model_probs = [0.6, 0.4]
+    coverage_context = {"1": 4.0, "3": 1.0}
+    _, r_final, _ = refine_responsibilities(
+        initial_mass=init_mass,
+        model_probs=model_probs,
+        candidate_ids_known=[1, 3],
+        candidate_ids_extra=[],
+        stage_id="softem_base",
+        coverage_bonus=0.1,
+        coverage_epsilon=1.0,
+        extra_penalty=0.1,
+        b_u_value=0.0,
+        coverage_context=coverage_context,
+    )
+    scores = np.asarray([
+        np.log(0.1),
+        np.log(0.6) + np.log(0.45) + 0.1 * np.log(1.0 + 4.0),
+        np.log(0.4) + np.log(0.45) + 0.1 * np.log(1.0 + 1.0),
+    ], dtype=np.float64)
+    expected = np.exp(scores - scores.max())
+    expected = expected / expected.sum()
+    assert np.isclose(r_final["unknown"], expected[0], atol=1e-8)
+    assert np.isclose(r_final["1"], expected[1], atol=1e-8)
+    assert np.isclose(r_final["3"], expected[2], atol=1e-8)
+
+
+def test_softem_aug_initializes_new_extra_from_explicit_logits(tmp_path: Path) -> None:
+    candidate_matrix = np.zeros((2, 512), dtype=np.float32)
+    candidate_matrix[0, 0] = 1.0
+    candidate_matrix[1, 1] = 1.0
+    clip_examples = [
+        {
+            "trajectory_id": "traj-1",
+            "clip_id": 1,
+            "video_id": 1,
+            "candidate_ids_known": [1],
+            "candidate_ids_extra": [3],
+            "candidate_matrix": candidate_matrix,
+            "candidate_records": [{"raw_id": 1}, {"raw_id": 3}],
+            "carrier_vec": np.asarray([1.0] + [0.0] * 767, dtype=np.float32),
+            "frame_vec": np.asarray([0.0, 1.0] + [0.0] * 766, dtype=np.float32),
+            "frame_vectors": None,
+        }
+    ]
+    base_cache = ResponsibilityCache.from_records(
+        stage_id="softem_base",
+        records=[{"trajectory_id": "traj-1", "r_final": {"unknown": 0.1, "1": 0.9}}],
+    )
+    theta_t = torch.nn.Parameter(torch.tensor(np.log(np.exp(0.07) - 1.0), dtype=torch.float32))
+    b_u = torch.nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+    rows, _ = _compute_clip_refinement_rows(
+        stage_id="softem_aug",
+        clip_examples=clip_examples,
+        base_cache=base_cache,
+        text_projector=_OracleTextProjector(),
+        theta_t=theta_t,
+        b_u=b_u,
+        em_subiterations=1,
+        lambda_frame=0.25,
+        device=torch.device("cpu"),
+    )
+    row = rows[0]
+    t_dis = torch.nn.functional.softplus(theta_t.detach()) + 1e-4
+    _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
+        projector=_OracleTextProjector(),
+        carrier_vec=clip_examples[0]["carrier_vec"],
+        frame_vec=clip_examples[0]["frame_vec"],
+        candidate_matrix=clip_examples[0]["candidate_matrix"],
+        temperature=t_dis,
+        lambda_frame=0.25,
+        frame_vectors=None,
+    )
+    scores = torch.tensor([0.0, float(logits_known_extra[0]), float(logits_known_extra[1] - 0.1)], dtype=torch.float64)
+    expected = torch.softmax(scores, dim=0).cpu().numpy()
+    assert np.isclose(row["r_init"]["unknown"], float(expected[0]), atol=1e-8)
+    assert np.isclose(row["r_init"]["1"], float(expected[1]), atol=1e-8)
+    assert np.isclose(row["r_init"]["3"], float(expected[2]), atol=1e-8)
+    assert row["r_init"]["3"] > 0.0

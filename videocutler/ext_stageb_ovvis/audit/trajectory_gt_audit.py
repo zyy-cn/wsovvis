@@ -152,6 +152,15 @@ def _safe_entropy(probs: np.ndarray) -> float:
     return float(-np.sum(probs * np.log(probs)))
 
 
+def _candidate_domain_from_sample(sample: Mapping[str, Any]) -> Tuple[List[int], List[int], List[int], bool]:
+    known = _unique_ints(sample.get("candidate_ids_known", []))
+    proposal_source = str(sample.get("candidate_proposal_source", sample.get("candidate_source", ""))).strip()
+    extra_authoritative = proposal_source not in {"phase1_extra_superseded_runtime_only", ""}
+    extra = _unique_ints(sample.get("candidate_ids_extra", [])) if extra_authoritative else []
+    union = _unique_ints([*known, *extra])
+    return known, extra, union, extra_authoritative
+
+
 def _snapshot_order_key(snapshot_id: Any) -> tuple[int, int, str]:
     text = str(snapshot_id).strip()
     if text == "stage_start":
@@ -248,9 +257,7 @@ def build_attribution_rows(
             missing_views = [str(x) for x in list(sample.get("missing_views", []))]
             invalid_reasons = [str(x) for x in list(sample.get("invalid_reasons", []))]
             observed_raw_ids = _unique_ints(sample.get("observed_raw_ids", []))
-            candidate_ids_known = _unique_ints(sample.get("candidate_ids_known", []))
-            candidate_ids_extra = _unique_ints(sample.get("candidate_ids_extra", []))
-            candidate_ids_union = _unique_ints([*candidate_ids_known, *candidate_ids_extra])
+            candidate_ids_known, candidate_ids_extra, candidate_ids_union, candidate_ids_extra_authoritative = _candidate_domain_from_sample(sample)
 
             gt_record = gt_sidecar_lookup.get(trajectory_id, {})
             gt_class_id = _extract_gt_class_id(gt_record) if gt_record else None
@@ -273,6 +280,7 @@ def build_attribution_rows(
                 "candidate_ids_known": candidate_ids_known,
                 "candidate_ids_extra": candidate_ids_extra,
                 "candidate_ids_union": candidate_ids_union,
+                "candidate_ids_extra_authoritative": bool(candidate_ids_extra_authoritative),
                 "mass_final_topk": [],
                 "top1_id": None,
                 "top1_score": None,
@@ -300,43 +308,12 @@ def build_attribution_rows(
                 traj_locator = str(carrier_record.get("z_norm_path", "")).strip()
             if sample_valid and traj_locator and candidate_vectors and candidate_known_ids and len(candidate_known_ids) == len(candidate_vectors):
                 try:
-                    traj_vec = _trajectory_vector(output_root, traj_locator, trajectory_source_branch, dataset_name)
-                    frame_vectors: List[np.ndarray] = []
-                    frame_rows = list(sample.get("frame_feature_rows", []))
-                    geom_rows = list(sample.get("frame_geometry_rows", []))
-                    if len(frame_rows) == len(geom_rows) and frame_rows:
-                        from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import (
-                            read_feature_vector,
-                            reconstruct_valid_token_mask_from_geometry,
-                        )
-
-                        def _coerce_token_feature_matrix(feature: np.ndarray, grid_h: int, grid_w: int) -> Optional[np.ndarray]:
-                            feature = np.asarray(feature, dtype=np.float32)
-                            if feature.ndim != 2:
-                                return None
-                            grid_tokens = int(grid_h) * int(grid_w)
-                            if int(feature.shape[0]) == grid_tokens:
-                                return feature
-                            if int(feature.shape[0]) == grid_tokens + 1:
-                                return feature[1:]
-                            return None
-
-                        frame_parent = output_root / "frame_bank" / dataset_name
-                        for frame_row, geom_row in zip(frame_rows, geom_rows):
-                            feat_path = str(frame_row.get("feat_path", ""))
-                            if not feat_path:
-                                continue
-                            feature = read_feature_vector(frame_parent, feat_path)
-                            token_matrix = _coerce_token_feature_matrix(feature, int(geom_row["grid_h"]), int(geom_row["grid_w"]))
-                            if token_matrix is None:
-                                continue
-                            valid_mask = reconstruct_valid_token_mask_from_geometry(geom_row).astype(np.float32).reshape(-1)
-                            denom = float(np.sum(valid_mask))
-                            if denom <= 1e-12:
-                                continue
-                            frame_vec = np.sum(token_matrix * valid_mask[:, None], axis=0).astype(np.float32) / denom
-                            frame_vectors.append(frame_vec)
-                    frame_vec = np.mean(np.stack(frame_vectors, axis=0), axis=0).astype(np.float32) if frame_vectors else np.zeros_like(traj_vec)
+                    traj_vec, _frame_vectors_unused, frame_vec, _combined_vec = load_combined_evidence(
+                        sample,
+                        output_root=output_root,
+                        dataset_name=dataset_name,
+                        trajectory_source_branch=trajectory_source_branch,
+                    )
                     _, _, fused_logits_np = fuse_carrier_frame_logits(
                         projector=projector,
                         carrier_vec=traj_vec,

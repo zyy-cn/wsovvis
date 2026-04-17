@@ -11,7 +11,7 @@ from videocutler.ext_stageb_ovvis.audit.projector_quality_audit import run_proje
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="G7 stage-wise projector quality audit: audit-only semantic quality measurement across prealign, softem_base, and softem_aug."
+        description="G7 stage-wise text-projector quality audit: audit-only semantic quality measurement across prealign, softem_base, and softem_aug under the text-to-DINO authority."
     )
     parser.add_argument("--exp_name", required=True)
     parser.add_argument("--output_root", required=True)
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smoke_max_trajectories", type=int, default=128)
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--gt_sidecar_dir", default="audit")
-    parser.add_argument("--temperature", type=float, default=0.07)
+    parser.add_argument("--t_dis_override", type=float, default=None)
     return parser.parse_args()
 
 
@@ -68,7 +68,7 @@ def main() -> int:
         smoke_max_trajectories=int(args.smoke_max_trajectories),
         topk=int(args.topk),
         gt_sidecar_dir=str(args.gt_sidecar_dir),
-        temperature=float(args.temperature),
+        t_dis_override=(float(args.t_dis_override) if args.t_dis_override is not None else None),
     )
     payload.update(
         {

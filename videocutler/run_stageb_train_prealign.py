@@ -6,6 +6,18 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
+import sys
+
+
+def _bootstrap_repo_root_for_direct_cli() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_root_str = str(repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+
+
+_bootstrap_repo_root_for_direct_cli()
+
 from videocutler.ext_stageb_ovvis.algorithms.prealign import PrealignConfig, train_prealign
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
     Phase1MaterializationConfig,
@@ -15,7 +27,7 @@ from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="G7 prealign phase-1: resolve runtime assets and materialize bounded five-view training samples."
+        description="G7 prealign phase-1: resolve runtime assets and materialize canonical sample inputs."
     )
     parser.add_argument("--exp_name", required=True)
     parser.add_argument("--output_root", required=True)
@@ -28,7 +40,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
-    parser.add_argument("--temperature", type=float, default=0.07)
+    parser.add_argument("--t_dis_init", type=float, default=0.07)
+    parser.add_argument("--b_u_init", type=float, default=0.0)
+    parser.add_argument("--batch_budget", type=int, default=None)
     return parser.parse_args()
 
 
@@ -73,7 +87,7 @@ def _write_contract_check(repo_root: Path, *, train_result: Dict[str, Any], summ
             "artifact_schema_valid",
         ],
     }
-    contract_path = repo_root / "codex" / "outputs" / "g7_training" / "prealign_contract_check.json"
+    contract_path = repo_root / "codex" / "outputs" / "G7_training" / "prealign_contract_check.json"
     _write_json(contract_path, contract_check)
     return contract_path
 
@@ -123,7 +137,12 @@ def main() -> int:
             epochs=int(epochs),
             learning_rate=float(learning_rate),
             weight_decay=float(args.weight_decay),
-            temperature=float(args.temperature),
+            t_dis_init=float(args.t_dis_init),
+            b_u_init=float(args.b_u_init),
+            runtime_asset_source=str(result['resolution'].get('runtime_asset_source', 'local_canonical_assets')),
+            runtime_asset_source_local_incomplete=bool(result['resolution'].get('local_incomplete', False)),
+            runtime_asset_output_root=str(result['resolution'].get('runtime_output_root', str(output_root))),
+            batch_budget=(int(args.batch_budget) if args.batch_budget is not None else None),
         ),
     )
 
@@ -147,8 +166,14 @@ def main() -> int:
             "skipped_reason_histogram": train_result["skipped_reason_histogram"],
             "loss_mean": train_result["loss_mean"],
             "loss_last": train_result["loss_last"],
+            "optimization_loss_mean": train_result["optimization_loss_mean"],
+            "optimization_loss_last": train_result["optimization_loss_last"],
             "epochs": int(epochs),
             "learning_rate": float(learning_rate),
+            "batch_budget": train_result["batch_budget"],
+            "budget_policy": train_result["budget_policy"],
+            "loss_normalization": train_result["loss_normalization"],
+            "micro_batch_count_per_epoch": train_result["micro_batch_count_per_epoch"],
         },
         "artifacts": {
             "materialized_sample_artifact": "codex/outputs/G7_training/g7_prealign_smoke_samples.jsonl",

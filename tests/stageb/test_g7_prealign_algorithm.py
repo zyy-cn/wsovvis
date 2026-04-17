@@ -60,6 +60,13 @@ def _prepare_fixture(root: Path) -> None:
         frame_dir / "frame_records.jsonl",
         [{"clip_id": "1", "frame_index": 0, "feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
     )
+    pooled_vec = np.eye(1, 768, 0, dtype=np.float32)[0]
+    np.savez(frame_dir / "payload" / "clip_1_pooled.npz", frame_pooled=np.stack([pooled_vec], axis=0).astype(np.float16))
+    _write_jsonl(
+        frame_dir / "pooled_frame_records.jsonl",
+        [{"trajectory_id": "traj_1", "clip_id": "1", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"}],
+    )
+
     _write_jsonl(
         frame_dir / "frame_geom_records.jsonl",
         [
@@ -96,6 +103,7 @@ def test_train_prealign_writes_canonical_stage_local_artifacts(tmp_path: Path) -
         "trajectory_record": {"video_id": 1},
         "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
         "weak_label_record": {"observed_raw_ids": [3], "clip_id": "1", "video_id": 1},
+        "pooled_frame_record": {"frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
         "frame_feature_rows": [{"feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
         "frame_geometry_rows": [
             {
@@ -134,12 +142,29 @@ def test_train_prealign_writes_canonical_stage_local_artifacts(tmp_path: Path) -
     result = train_prealign(
         output_root=tmp_path,
         materialized_samples=[sample],
-        config=PrealignConfig(dataset_name="lvvis_train_base", smoke=True, epochs=1, seed=0, device="cpu"),
+        config=PrealignConfig(
+            dataset_name="lvvis_train_base",
+            smoke=True,
+            epochs=1,
+            seed=0,
+            device="cpu",
+            runtime_asset_source="authoritative_remote_canonical_assets",
+            runtime_asset_source_local_incomplete=True,
+            runtime_asset_output_root="/remote/wsovvis",
+            batch_budget=1,
+        ),
     )
     assert result["record_count_output"] == 1
     train_state = json.loads((tmp_path / "train" / "prealign" / "train_state.json").read_text(encoding="utf-8"))
     assert train_state["stage_id"] == "prealign"
     assert train_state["selected_for_infer"] == "prealign_only"
+    assert train_state["runtime_asset_source"] == "authoritative_remote_canonical_assets"
+    assert train_state["runtime_asset_source_local_incomplete"] is True
+    assert train_state["runtime_asset_output_root"] == "/remote/wsovvis"
+    assert result["batch_budget"] == 1
+    assert result["budget_policy"] == "dynamic_sum_Tv_times_Kv"
+    assert result["loss_normalization"] == "effective_trajectory_count"
+    assert result["micro_batch_count_per_epoch"] == 1
     proxy_lines = (tmp_path / "train" / "prealign" / "proxy_records.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(proxy_lines) == 1
     proxy = json.loads(proxy_lines[0])

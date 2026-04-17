@@ -9,9 +9,16 @@ import torch.nn.functional as F
 
 @dataclass(frozen=True)
 class ProjectorConfig:
-    input_dim: int = 768
-    hidden_dim: int = 512
-    output_dim: int = 512
+    """Historical filename, current authority: text-side projector.
+
+    Under the current G7 authority this module maps CLIP text features into the
+    frozen DINO feature space. It must not be interpreted as a visual-side
+    projector.
+    """
+
+    input_dim: int = 512
+    hidden_dim: int = 1024
+    output_dim: int = 768
     dropout: float = 0.0
     use_layernorm: bool = True
 
@@ -43,4 +50,3 @@ class Projector(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         outputs = self.net(inputs)
         return F.normalize(outputs, p=2.0, dim=-1)
-

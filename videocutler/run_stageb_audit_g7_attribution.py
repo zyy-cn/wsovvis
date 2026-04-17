@@ -37,7 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base_learning_rate", type=float, default=None)
     parser.add_argument("--aug_learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
-    parser.add_argument("--temperature", type=float, default=0.07)
+    parser.add_argument("--t_dis_init", type=float, default=0.07)
+    parser.add_argument("--b_u_init", type=float, default=0.0)
     parser.add_argument("--em_subiterations", type=int, default=None)
     parser.add_argument("--mode", default="base_then_aug", choices=("base_only", "aug_only", "base_then_aug"))
     return parser.parse_args()
@@ -123,7 +124,8 @@ def main() -> int:
             epochs=int(prealign_epochs),
             learning_rate=float(prealign_lr),
             weight_decay=float(args.weight_decay),
-            temperature=float(args.temperature),
+            t_dis_init=float(args.t_dis_init),
+            b_u_init=float(args.b_u_init),
         ),
         audit_callback=audit,
     )
@@ -138,7 +140,8 @@ def main() -> int:
             device=str(args.device),
             seed=int(args.seed),
             smoke=smoke,
-            temperature=float(args.temperature),
+            t_dis_init=float(args.t_dis_init),
+            b_u_init=float(args.b_u_init),
             weight_decay=float(args.weight_decay),
             em_subiterations=int(em_subiterations),
             base_epochs=int(base_epochs),

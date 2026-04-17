@@ -6,6 +6,18 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
+import sys
+
+
+def _bootstrap_repo_root_for_direct_cli() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_root_str = str(repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+
+
+_bootstrap_repo_root_for_direct_cli()
+
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import SoftEMConfig, run_soft_em
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
     Phase1MaterializationConfig,
@@ -29,8 +41,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base_learning_rate", type=float, default=None)
     parser.add_argument("--aug_learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
-    parser.add_argument("--temperature", type=float, default=0.07)
+    parser.add_argument("--t_dis_init", type=float, default=0.07)
+    parser.add_argument("--b_u_init", type=float, default=0.0)
     parser.add_argument("--em_subiterations", type=int, default=None)
+    parser.add_argument("--k_extra", type=int, default=2)
+    parser.add_argument("--extra_alpha", type=float, default=0.25)
+    parser.add_argument("--extra_refresh_interval_iters", type=int, default=None)
+    parser.add_argument("--batch_budget", type=int, default=None)
     return parser.parse_args()
 
 
@@ -95,7 +112,7 @@ def _write_contract_check(repo_root: Path, *, softem_result: Dict[str, Any], sum
         "selected_checkpoint_path": str(softem_result.get("selected_checkpoint_path", "")).strip(),
         "consumer_ready": bool(summary.get("status") == "PASS" and not str(run_scope) == "smoke"),
     }
-    contract_path = repo_root / "codex" / "outputs" / "g7_training" / "softem_contract_check.json"
+    contract_path = repo_root / "codex" / "outputs" / "G7_training" / "softem_contract_check.json"
     _write_json(contract_path, contract_check)
     return contract_path
 
@@ -149,13 +166,21 @@ def main() -> int:
             device=str(args.device),
             seed=int(args.seed),
             smoke=bool(args.smoke),
-            temperature=float(args.temperature),
+            t_dis_init=float(args.t_dis_init),
+            b_u_init=float(args.b_u_init),
             weight_decay=float(args.weight_decay),
             em_subiterations=int(em_subiterations),
             base_epochs=int(base_epochs),
             aug_epochs=int(aug_epochs),
             base_learning_rate=float(base_lr),
             aug_learning_rate=float(aug_lr),
+            k_extra=int(args.k_extra),
+            extra_alpha=float(args.extra_alpha),
+            extra_refresh_interval_iters=(int(args.extra_refresh_interval_iters) if args.extra_refresh_interval_iters is not None else None),
+            runtime_asset_source=str(materialized['resolution'].get('runtime_asset_source', 'local_canonical_assets')),
+            runtime_asset_source_local_incomplete=bool(materialized['resolution'].get('local_incomplete', False)),
+            runtime_asset_output_root=str(materialized['resolution'].get('runtime_output_root', str(output_root))),
+            batch_budget=(int(args.batch_budget) if args.batch_budget is not None else None),
         ),
     )
 

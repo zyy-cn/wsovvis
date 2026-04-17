@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_combined_evidence, load_text_vocab
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_text_vocab
 
 
 Record = Dict[str, Any]
@@ -21,27 +22,6 @@ class Phase1MaterializationConfig:
     smoke: bool = False
     smoke_max_trajectories: int = 128
 
-
-def _normalize(vec: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:
-    arr = np.asarray(vec, dtype=np.float32)
-    norm = float(np.linalg.norm(arr))
-    if norm <= eps:
-        return None
-    return (arr / norm).astype(np.float32)
-
-
-def _project_evidence_to_text_dim(evidence_vector: np.ndarray, text_dim: int) -> Optional[np.ndarray]:
-    evidence = _normalize(evidence_vector)
-    if evidence is None:
-        return None
-    target_dim = int(text_dim)
-    if target_dim <= 0:
-        return None
-    projected = np.zeros(target_dim, dtype=np.float32)
-    width = min(int(evidence.shape[0]), target_dim)
-    if width > 0:
-        projected[:width] = evidence[:width]
-    return _normalize(projected)
 
 
 def _load_json(path: Path) -> Any:
@@ -75,15 +55,11 @@ def _carrier_base_for_branch(branch: str) -> str:
     raise ValueError(f"unsupported trajectory_source_branch: {branch}")
 
 
-def resolve_runtime_assets(
-    output_root: Path,
-    *,
-    dataset_name: str,
-    trajectory_source_branch: str,
-) -> Dict[str, Any]:
-    if dataset_name not in {"lvvis_train_base", "lvvis_val"}:
-        raise ValueError(f"unsupported dataset_name: {dataset_name}")
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
 
+
+def _asset_relpaths(*, dataset_name: str, trajectory_source_branch: str) -> Dict[str, str]:
     if trajectory_source_branch == "mainline":
         trajectory_rel = f"exports/{dataset_name}/trajectory_records.jsonl"
     elif trajectory_source_branch == "gt_upper_bound":
@@ -92,20 +68,18 @@ def resolve_runtime_assets(
         raise ValueError(f"unsupported trajectory_source_branch: {trajectory_source_branch}")
 
     carrier_base = _carrier_base_for_branch(trajectory_source_branch)
-    carrier_rel = f"{carrier_base}/{dataset_name}/carrier_records.jsonl"
-    frame_rel = f"frame_bank/{dataset_name}/frame_records.jsonl"
-    geom_rel = f"frame_bank/{dataset_name}/frame_geom_records.jsonl"
-    weak_rel = "weak_labels/weak_labels_train.json"
-    text_rel = "text_bank/text_prototype_records.jsonl"
-
-    rels = {
+    return {
         "trajectory_records": trajectory_rel,
-        "carrier_records": carrier_rel,
-        "frame_records": frame_rel,
-        "frame_geom_records": geom_rel,
-        "weak_labels": weak_rel,
-        "text_prototypes": text_rel,
+        "carrier_records": f"{carrier_base}/{dataset_name}/carrier_records.jsonl",
+        "frame_records": f"frame_bank/{dataset_name}/frame_records.jsonl",
+        "frame_geom_records": f"frame_bank/{dataset_name}/frame_geom_records.jsonl",
+        "pooled_frame_records": f"frame_bank/{dataset_name}/pooled_frame_records.jsonl",
+        "weak_labels": "weak_labels/weak_labels_train.json",
+        "text_prototypes": "text_bank/text_prototype_records.jsonl",
     }
+
+
+def _scan_asset_root(output_root: Path, rels: Mapping[str, str]) -> Dict[str, Any]:
     assets: Dict[str, Dict[str, Any]] = {}
     for key, rel in rels.items():
         path = output_root / rel
@@ -129,22 +103,36 @@ def resolve_runtime_assets(
     frame_count = int(assets["frame_records"]["line_count"] or 0)
     geom_count = int(assets["frame_geom_records"]["line_count"] or 0)
     frame_geom_parity = bool(frame_count > 0 and frame_count == geom_count)
-
+    usable = {
+        "trajectory_view": bool(assets["trajectory_records"]["non_empty"]),
+        "carrier_view": bool(assets["carrier_records"]["non_empty"]),
+        "weak_label_view": bool(assets["weak_labels"]["non_empty"]),
+        "frame_feature_view": bool(assets["frame_records"]["non_empty"]),
+        "frame_geometry_view": bool(assets["frame_geom_records"]["non_empty"] and frame_geom_parity),
+        "pooled_frame_view": bool(assets["pooled_frame_records"]["non_empty"]),
+        "text_bank_view": bool(assets["text_prototypes"]["non_empty"]),
+    }
+    required_view_keys = [
+        "trajectory_view",
+        "carrier_view",
+        "weak_label_view",
+        "pooled_frame_view",
+        "text_bank_view",
+    ]
+    upstream_asset_view_keys = [
+        "frame_feature_view",
+        "frame_geometry_view",
+    ]
     return {
         "output_root": str(output_root),
-        "dataset_name": dataset_name,
-        "trajectory_source_branch": trajectory_source_branch,
         "assets": assets,
         "carrier_completeness_ratio": carrier_ratio,
         "frame_geom_parity": frame_geom_parity,
-        "usable": {
-            "trajectory_view": bool(assets["trajectory_records"]["non_empty"]),
-            "carrier_view": bool(assets["carrier_records"]["non_empty"]),
-            "weak_label_view": bool(assets["weak_labels"]["non_empty"]),
-            "frame_feature_view": bool(assets["frame_records"]["non_empty"]),
-            "frame_geometry_view": bool(assets["frame_geom_records"]["non_empty"] and frame_geom_parity),
-            "text_bank_view": bool(assets["text_prototypes"]["non_empty"]),
-        },
+        "usable": usable,
+        "required_view_keys": required_view_keys,
+        "upstream_asset_view_keys": upstream_asset_view_keys,
+        "complete_required_views": all(bool(usable.get(key, False)) for key in required_view_keys),
+        "complete_upstream_asset_views": all(bool(usable.get(key, False)) for key in upstream_asset_view_keys),
         "branch_truth": {
             "carrier_partial_or_missing": bool(carrier_ratio < 1.0),
             "carrier_count": carrier_count,
@@ -152,6 +140,88 @@ def resolve_runtime_assets(
         },
     }
 
+
+def _read_remote_repo_dir(repo_root: Path) -> str:
+    explicit_repo = str(os.environ.get("WSOVVIS_AUTHORITATIVE_REMOTE_REPO_DIR", "")).strip()
+    if explicit_repo:
+        return explicit_repo
+    profile_path = repo_root / "profiles" / "local_remote.active.json"
+    if not profile_path.is_file():
+        return ""
+    try:
+        payload = _load_json(profile_path)
+    except Exception:
+        return ""
+    return str(payload.get("REMOTE_REPO_DIR", "")).strip()
+
+
+def _infer_remote_output_root(requested_output_root: Path, repo_root: Path) -> Optional[Path]:
+    explicit_output_root = str(os.environ.get("WSOVVIS_AUTHORITATIVE_REMOTE_OUTPUT_ROOT", "")).strip()
+    if explicit_output_root:
+        return Path(explicit_output_root).expanduser()
+    remote_repo_dir = _read_remote_repo_dir(repo_root)
+    if not remote_repo_dir:
+        return None
+    try:
+        rel_output = requested_output_root.resolve().relative_to(repo_root.resolve())
+    except Exception:
+        return None
+    return Path(remote_repo_dir).expanduser() / rel_output
+
+
+def resolve_runtime_assets(
+    output_root: Path,
+    *,
+    dataset_name: str,
+    trajectory_source_branch: str,
+) -> Dict[str, Any]:
+    if dataset_name not in {"lvvis_train_base", "lvvis_val"}:
+        raise ValueError(f"unsupported dataset_name: {dataset_name}")
+
+    repo_root = _repo_root()
+    rels = _asset_relpaths(dataset_name=dataset_name, trajectory_source_branch=trajectory_source_branch)
+    local_scan = _scan_asset_root(output_root, rels)
+    remote_output_root = _infer_remote_output_root(output_root, repo_root)
+    remote_scan = _scan_asset_root(remote_output_root, rels) if remote_output_root is not None else None
+
+    local_incomplete = not bool(local_scan["complete_required_views"])
+    runtime_asset_source = "local_canonical_assets"
+    runtime_source_resolution = "local_complete"
+    chosen_scan = local_scan
+    if local_incomplete:
+        if remote_scan is not None and bool(remote_scan["complete_required_views"]):
+            runtime_asset_source = "authoritative_remote_canonical_assets"
+            runtime_source_resolution = "remote_fallback_from_local_incomplete"
+            chosen_scan = remote_scan
+        else:
+            runtime_asset_source = "local_incomplete_unresolved"
+            runtime_source_resolution = "local_incomplete_without_resolved_authoritative_remote"
+            chosen_scan = local_scan
+
+    return {
+        "policy": "authoritative_remote_canonical_when_local_incomplete",
+        "reporting_requirement": "train_state_or_run_meta_must_record_runtime_asset_source",
+        "requested_output_root": str(output_root),
+        "output_root": str(chosen_scan["output_root"]),
+        "runtime_output_root": str(chosen_scan["output_root"]),
+        "dataset_name": dataset_name,
+        "trajectory_source_branch": trajectory_source_branch,
+        "assets": chosen_scan["assets"],
+        "carrier_completeness_ratio": chosen_scan["carrier_completeness_ratio"],
+        "frame_geom_parity": chosen_scan["frame_geom_parity"],
+        "usable": chosen_scan["usable"],
+        "branch_truth": chosen_scan["branch_truth"],
+        "runtime_asset_source": runtime_asset_source,
+        "runtime_source_resolution": runtime_source_resolution,
+        "local_incomplete": bool(local_incomplete),
+        "required_canonical_views": list(chosen_scan["required_view_keys"]),
+        "upstream_asset_only_views": list(chosen_scan.get("upstream_asset_view_keys", [])),
+        "local_candidate": local_scan,
+        "remote_candidate": {
+            "available": bool(remote_scan is not None),
+            **(remote_scan if remote_scan is not None else {"output_root": str(remote_output_root) if remote_output_root is not None else ""}),
+        },
+    }
 
 def _build_lookup_by_key(records: Iterable[Record], key_fn) -> Dict[Any, Record]:
     output: Dict[Any, Record] = {}
@@ -167,79 +237,17 @@ def _stable_trajectory_order(records: Iterable[Record]) -> List[Record]:
 def _candidate_domain(
     weak_label_record: Optional[Record],
     text_by_raw: Mapping[int, Record],
-    *,
-    text_vocab_ids: Sequence[int],
-    text_vocab_matrix: np.ndarray,
-    sample_evidence_vector: Optional[np.ndarray],
-    clip_evidence_vector: Optional[np.ndarray],
 ) -> Tuple[List[int], List[int], List[int], List[Record], List[str], List[Record], str]:
     if weak_label_record is None:
-        return [], [], [], [], ["missing_weak_label_record"], [], "missing_weak_label_record"
-    observed = sorted({int(x) for x in list(weak_label_record.get("observed_raw_ids", []))})
-    observed_set = set(observed)
+        return [], [], [], [], ['missing_weak_label_record'], [], 'missing_weak_label_record'
+    observed = sorted({int(x) for x in list(weak_label_record.get('observed_raw_ids', []))})
     known = [raw_id for raw_id in observed if raw_id in text_by_raw]
     missing = [raw_id for raw_id in observed if raw_id not in text_by_raw]
-    extra_pool = [raw_id for raw_id in list(text_vocab_ids) if int(raw_id) not in observed_set]
-    extra_cap = min(2, max(1, len(known))) if extra_pool else 0
-    extra: List[int] = []
-    provenance: List[Record] = []
-    proposal_source = "no_extra_candidates_available"
-    if extra_pool:
-        proposal_source = "static_fallback_missing_clip_and_sample_evidence"
-        ranked_sources = [
-            ("clip_evidence", clip_evidence_vector, "topk_non_observed_by_clip_evidence"),
-            ("sample_evidence", sample_evidence_vector, "topk_non_observed_by_sample_evidence"),
-        ]
-        for source_name, current_evidence, admission_reason in ranked_sources:
-            if current_evidence is None:
-                continue
-            evidence = _project_evidence_to_text_dim(current_evidence, int(np.asarray(text_vocab_matrix).shape[1]))
-            if evidence is None:
-                evidence_scores = None
-            else:
-                evidence_scores = np.asarray(text_vocab_matrix, dtype=np.float32) @ np.asarray(evidence, dtype=np.float32)
-            if evidence_scores is not None and int(np.asarray(evidence_scores).shape[0]) == len(text_vocab_ids):
-                scored_pool = [
-                    (float(evidence_scores[idx]), int(raw_id))
-                    for idx, raw_id in enumerate(list(text_vocab_ids))
-                    if int(raw_id) not in observed_set
-                ]
-                scored_pool.sort(key=lambda item: (-item[0], item[1]))
-                selected = scored_pool[:extra_cap]
-                extra = [raw_id for _, raw_id in selected]
-                provenance = [
-                    {
-                        "raw_id": int(raw_id),
-                        "score": float(score),
-                        "rank": int(rank) + 1,
-                        "admission_reason": str(admission_reason),
-                        "proposal_source": str(source_name),
-                    }
-                    for rank, (score, raw_id) in enumerate(selected)
-                ]
-                proposal_source = str(source_name)
-                break
-            else:
-                provenance = []
-        if not extra:
-            extra = extra_pool[:extra_cap]
-            provenance = [
-                {
-                    "raw_id": int(raw_id),
-                    "score": None,
-                    "rank": int(rank) + 1,
-                    "admission_reason": "static_fallback_missing_clip_and_sample_evidence",
-                    "proposal_source": "fallback",
-                }
-                for rank, raw_id in enumerate(extra)
-            ]
-    candidates = [text_by_raw[raw_id] for raw_id in [*known, *extra]]
+    candidates = [text_by_raw[raw_id] for raw_id in known]
     errors: List[str] = []
     if missing:
-        errors.append("missing_text_prototype_for_observed_raw_id")
-    if extra_pool and not extra:
-        errors.append("no_extra_candidates_selected")
-    return observed, known, extra, candidates, errors, provenance, proposal_source
+        errors.append('missing_text_prototype_for_observed_raw_id')
+    return observed, known, [], candidates, errors, [], 'phase1_extra_superseded_runtime_only'
 
 
 def _required_sample_fields() -> List[str]:
@@ -247,8 +255,7 @@ def _required_sample_fields() -> List[str]:
         "trajectory_record",
         "carrier_record",
         "weak_label_record",
-        "frame_feature_rows",
-        "frame_geometry_rows",
+        "pooled_frame_record",
         "candidate_text_prototypes",
         "observed_raw_ids",
         "candidate_ids_known",
@@ -260,10 +267,8 @@ def _required_sample_fields() -> List[str]:
 
 def _validate_sample_shape(sample: Record) -> List[str]:
     missing = [field for field in _required_sample_fields() if field not in sample]
-    if not isinstance(sample.get("frame_feature_rows"), list):
-        missing.append("frame_feature_rows_type")
-    if not isinstance(sample.get("frame_geometry_rows"), list):
-        missing.append("frame_geometry_rows_type")
+    if not isinstance(sample.get("pooled_frame_record"), Mapping):
+        missing.append("pooled_frame_record_type")
     if not isinstance(sample.get("candidate_text_prototypes"), list):
         missing.append("candidate_text_prototypes_type")
     if not isinstance(sample.get("candidate_ids_known"), list):
@@ -287,26 +292,6 @@ def _sample_fingerprint(records: Sequence[Record]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _aggregate_clip_evidence(sample_evidence_by_traj: Mapping[str, Optional[np.ndarray]], partial_samples: Sequence[Record]) -> Dict[str, np.ndarray]:
-    grouped: Dict[str, List[np.ndarray]] = {}
-    for sample in partial_samples:
-        clip_id = str(sample.get("clip_id", ""))
-        traj_id = str(sample.get("trajectory_id", ""))
-        evidence = sample_evidence_by_traj.get(traj_id)
-        if evidence is None:
-            continue
-        grouped.setdefault(clip_id, []).append(np.asarray(evidence, dtype=np.float32))
-    clip_evidence: Dict[str, np.ndarray] = {}
-    for clip_id, vectors in grouped.items():
-        if not vectors:
-            continue
-        stacked = np.stack(vectors, axis=0).astype(np.float32)
-        mean_vec = np.mean(stacked, axis=0).astype(np.float32)
-        normalized = _normalize(mean_vec)
-        if normalized is not None:
-            clip_evidence[clip_id] = normalized.astype(np.float32)
-    return clip_evidence
-
 
 def materialize_phase1_training_samples(
     output_root: Path,
@@ -317,35 +302,33 @@ def materialize_phase1_training_samples(
         dataset_name=config.dataset_name,
         trajectory_source_branch=config.trajectory_source_branch,
     )
+    runtime_output_root = Path(str(resolution["runtime_output_root"]))
     assets = resolution["assets"]
-    for key in ("trajectory_records", "carrier_records", "frame_records", "frame_geom_records", "weak_labels", "text_prototypes"):
+    for key in ("trajectory_records", "carrier_records", "pooled_frame_records", "weak_labels", "text_prototypes"):
         if not assets[key]["exists"]:
             raise FileNotFoundError(f"missing required canonical input: {assets[key]['path']}")
 
     traj_limit = int(config.smoke_max_trajectories) if config.smoke else None
     trajectory_records = _stable_trajectory_order(
-        _load_jsonl(output_root / assets["trajectory_records"]["path"], limit=traj_limit)
+        _load_jsonl(runtime_output_root / assets["trajectory_records"]["path"], limit=traj_limit)
     )
-    carrier_records = _load_jsonl(output_root / assets["carrier_records"]["path"])
-    frame_records = _load_jsonl(output_root / assets["frame_records"]["path"])
-    geom_records = _load_jsonl(output_root / assets["frame_geom_records"]["path"])
-    weak_records = _load_json(output_root / assets["weak_labels"]["path"])
-    text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(output_root)
+    carrier_records = _load_jsonl(runtime_output_root / assets["carrier_records"]["path"])
+    pooled_frame_records = _load_jsonl(runtime_output_root / assets["pooled_frame_records"]["path"])
+    weak_records = _load_json(runtime_output_root / assets["weak_labels"]["path"])
+    text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(runtime_output_root)
 
     if not isinstance(weak_records, list):
         raise ValueError("weak_labels_train must be a JSON array")
 
     carrier_by_tid = _build_lookup_by_key(carrier_records, lambda rec: str(rec["trajectory_id"]))
-    frame_by_key = _build_lookup_by_key(frame_records, lambda rec: (str(rec["clip_id"]), int(rec["frame_index"])))
-    geom_by_key = _build_lookup_by_key(geom_records, lambda rec: (str(rec["clip_id"]), int(rec["frame_index"])))
-    weak_by_clip = _build_lookup_by_key(weak_records, lambda rec: str(rec.get("clip_id", "")))
-    weak_by_video = _build_lookup_by_key(weak_records, lambda rec: int(rec.get("video_id", -1)))
-    text_by_raw = _build_lookup_by_key(text_records, lambda rec: int(rec["raw_id"]))
+    weak_by_clip = _build_lookup_by_key(weak_records, lambda rec: str(rec.get('clip_id', '')))
+    weak_by_video = _build_lookup_by_key(weak_records, lambda rec: int(rec.get('video_id', -1)))
+    text_by_raw = _build_lookup_by_key(text_records, lambda rec: int(rec['raw_id']))
+    pooled_frame_by_tid = _build_lookup_by_key(pooled_frame_records, lambda rec: str(rec['trajectory_id']))
 
     materialized: List[Record] = []
     partial_samples: List[Record] = []
     skip_reason_histogram: Dict[str, int] = {}
-    sample_evidence_by_traj: Dict[str, Optional[np.ndarray]] = {}
 
     def bump(reason: str) -> None:
         skip_reason_histogram[reason] = int(skip_reason_histogram.get(reason, 0)) + 1
@@ -361,10 +344,9 @@ def materialize_phase1_training_samples(
         if weak_rec is None:
             weak_rec = weak_by_video.get(video_id)
 
-        frame_rows: List[Record] = []
-        geom_rows: List[Record] = []
         missing_views: List[str] = []
         invalid_reasons: List[str] = []
+        pooled_frame_rec = pooled_frame_by_tid.get(trajectory_id)
 
         if carrier_rec is None:
             missing_views.append("carrier_view")
@@ -373,53 +355,20 @@ def materialize_phase1_training_samples(
             missing_views.append("clip_weak_label_view")
             invalid_reasons.append("missing_weak_label_record")
 
-        for frame_index in frame_indices:
-            key = (clip_id_text, int(frame_index))
-            fr = frame_by_key.get(key)
-            gm = geom_by_key.get(key)
-            if fr is None:
-                if "frame_feature_view" not in missing_views:
-                    missing_views.append("frame_feature_view")
-                invalid_reasons.append("missing_frame_feature_row")
-            else:
-                frame_rows.append(fr)
-            if gm is None:
-                if "frame_geometry_view" not in missing_views:
-                    missing_views.append("frame_geometry_view")
-                invalid_reasons.append("missing_frame_geometry_row")
-            else:
-                geom_rows.append(gm)
+        if pooled_frame_rec is None:
+            missing_views.append("pooled_frame_view")
+            invalid_reasons.append("missing_pooled_frame_record")
 
-        evidence_vector = None
-        if carrier_rec is not None and frame_rows and geom_rows:
-            try:
-                _, _, _, evidence_vector = load_combined_evidence(
-                    {
-                        "carrier_record": carrier_rec,
-                        "frame_feature_rows": frame_rows,
-                        "frame_geometry_rows": geom_rows,
-                    },
-                    output_root=output_root,
-                    dataset_name=config.dataset_name,
-                    trajectory_source_branch=config.trajectory_source_branch,
-                )
-            except Exception:
-                evidence_vector = None
-                invalid_reasons.append("missing_sample_evidence_for_extra_proposal")
-        sample_evidence_by_traj[trajectory_id] = evidence_vector
         partial_samples.append({
             "trajectory_id": trajectory_id,
             "clip_id": clip_id_text,
             "trajectory_record": traj,
             "carrier_record": carrier_rec,
             "weak_label_record": weak_rec,
-            "frame_feature_rows": frame_rows,
-            "frame_geometry_rows": geom_rows,
+            "pooled_frame_record": pooled_frame_rec,
             "missing_views": sorted(set(missing_views)),
             "invalid_reasons": sorted(set(invalid_reasons)),
         })
-
-    clip_evidence_by_clip = _aggregate_clip_evidence(sample_evidence_by_traj, partial_samples)
 
     for partial in partial_samples:
         trajectory_id = str(partial["trajectory_id"])
@@ -430,10 +379,6 @@ def materialize_phase1_training_samples(
         observed_raw_ids, candidate_ids_known, candidate_ids_extra, candidate_text, candidate_errors, candidate_provenance, candidate_source = _candidate_domain(
             weak_rec,
             text_by_raw,
-            text_vocab_ids=text_vocab_ids,
-            text_vocab_matrix=text_vocab_matrix,
-            sample_evidence_vector=sample_evidence_by_traj.get(trajectory_id),
-            clip_evidence_vector=clip_evidence_by_clip.get(clip_id_text),
         )
         invalid_reasons.extend(candidate_errors)
         if candidate_errors and "class_text_bank_view" not in missing_views:
@@ -447,12 +392,13 @@ def materialize_phase1_training_samples(
             "trajectory_record": partial["trajectory_record"],
             "carrier_record": partial["carrier_record"],
             "weak_label_record": weak_rec,
-            "frame_feature_rows": partial["frame_feature_rows"],
-            "frame_geometry_rows": partial["frame_geometry_rows"],
+            "pooled_frame_record": partial["pooled_frame_record"],
             "candidate_text_prototypes": candidate_text,
             "observed_raw_ids": observed_raw_ids,
             "candidate_ids_known": candidate_ids_known,
             "candidate_ids_extra": candidate_ids_extra,
+            "candidate_ids_extra_phase1_placeholder": list(candidate_ids_extra),
+            "candidate_ids_extra_authority": "runtime_refresh_cache_only",
             "candidate_ids_extra_provenance": candidate_provenance,
             "candidate_proposal_source": candidate_source,
             "missing_views": sorted(set(missing_views)),

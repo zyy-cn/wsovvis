@@ -12,8 +12,10 @@ import torch.nn.functional as F
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     build_stage_domain_indices,
     fuse_carrier_frame_logits,
+    fuse_carrier_frame_logits_torch,
     load_combined_evidence,
     load_text_vocab,
+    _project_candidate_matrix,
 )
 from videocutler.ext_stageb_ovvis.audit.trajectory_gt_audit import (
     _STAGE_ORDER,  # reuse stable ordering for summaries
@@ -59,21 +61,34 @@ def _load_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _load_projector_from_checkpoint(checkpoint_path: Path, *, device: torch.device) -> Projector:
+def _load_projector_from_checkpoint(checkpoint_path: Path, *, device: torch.device) -> tuple[Projector, float]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    config_payload = dict(checkpoint.get("projector_config", {}))
+    if "text_projector_state_dict" not in checkpoint or "text_projector_config" not in checkpoint:
+        raise RuntimeError(f"incompatible checkpoint for stagewise text-projector audit: {checkpoint_path}")
+    config_payload = dict(checkpoint.get("text_projector_config", {}))
     projector = Projector(
         ProjectorConfig(
-            input_dim=int(config_payload.get("input_dim", 768)),
-            hidden_dim=int(config_payload.get("hidden_dim", 512)),
-            output_dim=int(config_payload.get("output_dim", 512)),
+            input_dim=int(config_payload.get("input_dim", 512)),
+            hidden_dim=int(config_payload.get("hidden_dim", 1024)),
+            output_dim=int(config_payload.get("output_dim", 768)),
             dropout=float(config_payload.get("dropout", 0.0)),
             use_layernorm=bool(config_payload.get("use_layernorm", True)),
         )
     ).to(device)
-    projector.load_state_dict(checkpoint["projector_state_dict"])
+    projector.load_state_dict(checkpoint["text_projector_state_dict"])
     projector.eval()
-    return projector
+    theta_t = float(checkpoint.get("theta_T", 0.07))
+    t_dis = float(torch.nn.functional.softplus(torch.tensor(theta_t, dtype=torch.float32)).item() + 1e-4)
+    return projector, t_dis
+
+
+def _candidate_domain_from_sample(sample: Mapping[str, Any]) -> tuple[list[int], list[int], list[int], bool]:
+    candidate_ids_known = [int(x) for x in list(sample.get("candidate_ids_known", []))]
+    proposal_source = str(sample.get("candidate_proposal_source", sample.get("candidate_source", ""))).strip()
+    extra_is_authoritative = proposal_source not in {"phase1_extra_superseded_runtime_only", ""}
+    candidate_ids_extra = [int(x) for x in list(sample.get("candidate_ids_extra", []))] if extra_is_authoritative else []
+    candidate_ids_union = sorted(dict.fromkeys([*candidate_ids_known, *candidate_ids_extra]))
+    return candidate_ids_known, candidate_ids_extra, candidate_ids_union, extra_is_authoritative
 
 
 def _stage_checkpoint_specs(output_root: Path) -> List[StageCheckpointSpec]:
@@ -132,27 +147,28 @@ def _compute_query_and_scores(
     lambda_frame: float = 0.25,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     device = next(projector.parameters()).device if hasattr(projector, "parameters") else torch.device("cpu")
+    carrier_logits_t, frame_logits_t, fused_logits_t = fuse_carrier_frame_logits_torch(
+        projector=projector,
+        carrier_vec=np.asarray(carrier_vec, dtype=np.float32),
+        frame_vec=np.asarray(frame_vec, dtype=np.float32),
+        candidate_matrix=np.asarray(text_matrix, dtype=np.float32),
+        temperature=float(temperature),
+        lambda_frame=float(lambda_frame),
+        frame_vectors=frame_vectors if frame_vectors else None,
+    )
+    candidate_tensor = _project_candidate_matrix(projector=projector, candidate_matrix=np.asarray(text_matrix, dtype=np.float32), device=device)
     carrier_tensor = torch.from_numpy(np.asarray(carrier_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-    if frame_vectors:
-        frame_tensor = torch.from_numpy(np.stack([np.asarray(vec, dtype=np.float32) for vec in frame_vectors], axis=0)).to(device=device, dtype=torch.float32)
-        frame_q = projector(frame_tensor).mean(dim=0, keepdim=True)
-    else:
-        frame_tensor = torch.from_numpy(np.asarray(frame_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-        frame_q = projector(frame_tensor)
-    carrier_q = projector(carrier_tensor)
-    fused_q = (1.0 - float(lambda_frame)) * carrier_q + float(lambda_frame) * frame_q
-    candidate_tensor = torch.from_numpy(np.asarray(text_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
-    candidate_tensor = F.normalize(candidate_tensor, p=2.0, dim=-1)
-    carrier_logits = torch.matmul(carrier_q, candidate_tensor.t()).squeeze(0) / float(temperature)
-    frame_logits = torch.matmul(frame_q, candidate_tensor.t()).squeeze(0) / float(temperature)
-    fused_logits = torch.matmul(fused_q, candidate_tensor.t()).squeeze(0) / float(temperature)
-    cosine_scores = torch.matmul(F.normalize(fused_q, p=2.0, dim=-1), candidate_tensor.t()).squeeze(0)
+    carrier_tensor = F.normalize(carrier_tensor, p=2.0, dim=-1)
+    frame_tensor = torch.from_numpy(np.asarray(frame_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
+    frame_tensor = F.normalize(frame_tensor, p=2.0, dim=-1)
+    fused_visual = F.normalize((1.0 - float(lambda_frame)) * carrier_tensor + float(lambda_frame) * frame_tensor, p=2.0, dim=-1)
+    cosine_scores = torch.matmul(fused_visual, candidate_tensor.t()).squeeze(0)
     return (
-        carrier_logits.detach().cpu().numpy().astype(np.float32),
-        frame_logits.detach().cpu().numpy().astype(np.float32),
-        fused_logits.detach().cpu().numpy().astype(np.float32),
+        carrier_logits_t.detach().cpu().numpy().astype(np.float32),
+        frame_logits_t.detach().cpu().numpy().astype(np.float32),
+        fused_logits_t.detach().cpu().numpy().astype(np.float32),
         cosine_scores.detach().cpu().numpy().astype(np.float32),
-        fused_q.detach().cpu().numpy().astype(np.float32),
+        fused_visual.detach().cpu().numpy().astype(np.float32),
     )
 
 
@@ -167,9 +183,12 @@ def build_projector_quality_rows(
     projector: Projector,
     topk: int,
     gt_sidecar_lookup: Mapping[str, Mapping[str, Any]],
-    temperature: float,
+    temperature: float | None = None,
+    t_dis_init: float | None = None,
     previous_by_trajectory: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> List[Record]:
+    if temperature is None:
+        temperature = 0.07 if t_dis_init is None else float(t_dis_init)
     previous_by_trajectory = dict(previous_by_trajectory or {})
     text_vocab_ids, _text_records, text_matrix = load_text_vocab(output_root)
     text_id_to_index = {int(raw_id): idx for idx, raw_id in enumerate(text_vocab_ids)}
@@ -184,9 +203,7 @@ def build_projector_quality_rows(
         missing_views = [str(x) for x in list(sample.get("missing_views", []))]
         invalid_reasons = [str(x) for x in list(sample.get("invalid_reasons", []))]
         observed_raw_ids = [int(x) for x in list(sample.get("observed_raw_ids", []))]
-        candidate_ids_known = [int(x) for x in list(sample.get("candidate_ids_known", []))]
-        candidate_ids_extra = [int(x) for x in list(sample.get("candidate_ids_extra", []))]
-        candidate_ids_union = sorted(dict.fromkeys([*candidate_ids_known, *candidate_ids_extra]))
+        candidate_ids_known, candidate_ids_extra, candidate_ids_union, candidate_ids_extra_authoritative = _candidate_domain_from_sample(sample)
 
         gt_record = gt_sidecar_lookup.get(trajectory_id, {})
         gt_class_id = _extract_gt_class_id(gt_record) if gt_record else None
@@ -204,6 +221,7 @@ def build_projector_quality_rows(
             "candidate_ids_known": candidate_ids_known,
             "candidate_ids_extra": candidate_ids_extra,
             "candidate_ids_union": candidate_ids_union,
+            "candidate_ids_extra_authoritative": bool(candidate_ids_extra_authoritative),
             "gt_available_for_audit": gt_available_for_audit,
             "gt_class_id": gt_class_id,
             "gt_in_known_domain": bool(gt_class_id is not None and gt_class_id in candidate_ids_known),
@@ -253,7 +271,7 @@ def build_projector_quality_rows(
                     frame_vectors=frame_vectors,
                     frame_vec=frame_vec,
                     text_matrix=text_matrix,
-                    temperature=temperature,
+                    temperature=float(temperature),
                 )
                 probs = torch.softmax(torch.from_numpy(fused_logits), dim=0).detach().cpu().numpy().astype(np.float64)
                 order = np.argsort(-np.asarray(fused_logits, dtype=np.float64), kind="mergesort")
@@ -449,7 +467,7 @@ def run_projector_quality_audit(
     smoke_max_trajectories: int,
     topk: int = 5,
     gt_sidecar_dir: str = "audit",
-    temperature: float = 0.07,
+    t_dis_override: float | None = None,
 ) -> Dict[str, Any]:
     if dataset_name != "lvvis_train_base":
         raise ValueError("projector quality audit currently supports dataset_name=lvvis_train_base only")
@@ -482,8 +500,9 @@ def run_projector_quality_audit(
     for spec in _stage_checkpoint_specs(output_root):
         ckpt_path = output_root / spec.checkpoint_path
         if not ckpt_path.is_file():
-            raise FileNotFoundError(f"missing projector checkpoint for stage {spec.stage_id}: {ckpt_path}")
-        projector = _load_projector_from_checkpoint(ckpt_path, device=torch.device("cpu"))
+            raise FileNotFoundError(f"missing text-projector checkpoint for stage {spec.stage_id}: {ckpt_path}")
+        projector, checkpoint_t_dis = _load_projector_from_checkpoint(ckpt_path, device=torch.device("cpu"))
+        current_t_dis = float(t_dis_override) if t_dis_override is not None else float(checkpoint_t_dis)
         rows = build_projector_quality_rows(
             output_root=output_root,
             dataset_name=dataset_name,
@@ -494,7 +513,7 @@ def run_projector_quality_audit(
             projector=projector,
             topk=topk,
             gt_sidecar_lookup=gt_lookup,
-            temperature=temperature,
+            temperature=float(current_t_dis),
             previous_by_trajectory=previous_by_trajectory,
         )
         previous_by_trajectory = {str(row.get("trajectory_id", "")): dict(row) for row in rows if row.get("trajectory_id")}
@@ -539,13 +558,14 @@ def run_projector_quality_audit(
             "casebook": "train/audit/projector_quality_casebook.jsonl",
         },
         "training_semantics_changed": False,
+        "t_dis_override": None if t_dis_override is None else float(t_dis_override),
         "formal_training_ready": False,
     }
     _write_json(output_root / "codex" / "outputs" / "G7_training" / "g7_stagewise_projector_quality_latest.json", payload)
     _write_md(
         output_root / "codex" / "outputs" / "G7_training" / "g7_stagewise_projector_quality_latest.md",
         [
-            "# G7 Stagewise Projector Quality Audit",
+            "# G7 Stagewise Text-Projector Quality Audit",
             "",
             f"- status: {payload['status']}",
             f"- dataset_name: {dataset_name}",

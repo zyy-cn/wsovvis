@@ -48,8 +48,8 @@
     "videocutler/run_stageb_audit_g7_extra_recovery.py"
   ],
   "canonical_small_artifacts": [
-    "codex/outputs/g7_training/prealign_contract_check.json",
-    "codex/outputs/g7_training/softem_contract_check.json",
+    "codex/outputs/G7_training/prealign_contract_check.json",
+    "codex/outputs/G7_training/softem_contract_check.json",
     "train/prealign/train_state.json",
     "train/prealign/proxy_records.jsonl",
     "train/softem_base/train_state.json",

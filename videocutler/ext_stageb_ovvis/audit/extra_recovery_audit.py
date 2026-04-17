@@ -190,9 +190,11 @@ def _resolve_responsibility_records(output_root: Path) -> Dict[str, Record]:
     return by_tid
 
 
-def _candidate_domain_from_sample(sample: Mapping[str, Any]) -> Tuple[List[int], List[int], List[int]]:
+def _candidate_domain_from_sample(sample: Mapping[str, Any]) -> Tuple[List[int], List[int], List[int], bool]:
     known = _unique_ints(list(sample.get("candidate_ids_known", [])))
-    extra = _unique_ints(list(sample.get("candidate_ids_extra", [])))
+    proposal_source = str(sample.get("candidate_proposal_source", sample.get("candidate_source", ""))).strip()
+    extra_authoritative = proposal_source not in {"phase1_extra_superseded_runtime_only", ""}
+    extra = _unique_ints(list(sample.get("candidate_ids_extra", []))) if extra_authoritative else []
     union: List[int] = []
     seen: set[int] = set()
     for raw_id in [*known, *extra]:
@@ -200,7 +202,7 @@ def _candidate_domain_from_sample(sample: Mapping[str, Any]) -> Tuple[List[int],
             continue
         seen.add(raw_id)
         union.append(raw_id)
-    return known, extra, union
+    return known, extra, union, extra_authoritative
 
 
 def _sidecar_match_rows(
@@ -434,8 +436,9 @@ def build_extra_recovery_rows(
             continue
 
         observed_raw_ids = _unique_ints(list(sample.get("observed_raw_ids", [])))
-        candidate_ids_known = _unique_ints(list(resp.get("candidate_ids_known", sample.get("candidate_ids_known", []))))
-        candidate_ids_extra = _unique_ints(list(resp.get("candidate_ids_extra", sample.get("candidate_ids_extra", []))))
+        sample_known, sample_extra, _sample_union, sample_extra_authoritative = _candidate_domain_from_sample(sample)
+        candidate_ids_known = _unique_ints(list(resp.get("candidate_ids_known", sample_known)))
+        candidate_ids_extra = _unique_ints(list(resp.get("candidate_ids_extra", sample_extra if sample_extra_authoritative else [])))
         candidate_ids_union = _unique_ints([*candidate_ids_known, *candidate_ids_extra])
         r_final = dict(resp.get("r_final", {}))
         r_known_extra = []
@@ -478,6 +481,7 @@ def build_extra_recovery_rows(
             "candidate_ids_known": candidate_ids_known,
             "candidate_ids_extra": candidate_ids_extra,
             "candidate_ids_union": candidate_ids_union,
+            "candidate_ids_extra_authoritative": bool(sample_extra_authoritative or bool(resp.get("candidate_ids_extra", []))),
             "top1_id": top1_id,
             "top1_score": top1_score,
             "topk_ids": topk_ids,

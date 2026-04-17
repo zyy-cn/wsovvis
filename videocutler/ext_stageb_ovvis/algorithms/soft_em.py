@@ -17,10 +17,12 @@ from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     fuse_carrier_frame_logits,
     fuse_carrier_frame_logits_torch,
     load_combined_evidence,
+    load_text_vocab,
     refine_responsibilities,
 )
 from videocutler.ext_stageb_ovvis.banks.text_bank import resolve_text_prototype
 from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
+from videocutler.ext_stageb_ovvis.algorithms._training_budget import build_dynamic_microbatches, resolve_default_batch_budget
 
 
 Record = Dict[str, Any]
@@ -40,12 +42,13 @@ class SoftEMStageConfig:
 @dataclass(frozen=True)
 class SoftEMConfig:
     dataset_name: str
-    trajectory_source_branch: str = "mainline"
-    mode: str = "base_then_aug"
-    device: str = "cpu"
+    trajectory_source_branch: str = 'mainline'
+    mode: str = 'base_then_aug'
+    device: str = 'cpu'
     seed: int = 0
     smoke: bool = False
-    temperature: float = 0.07
+    t_dis_init: float = 0.07
+    b_u_init: float = 0.0
     weight_decay: float = 1e-2
     em_subiterations: int = 2
     projector: ProjectorConfig = ProjectorConfig()
@@ -53,6 +56,13 @@ class SoftEMConfig:
     aug_epochs: int = 1
     base_learning_rate: float = 5e-5
     aug_learning_rate: float = 5e-5
+    k_extra: int = 2
+    extra_alpha: float = 0.25
+    extra_refresh_interval_iters: Optional[int] = None
+    runtime_asset_source: str = 'local_canonical_assets'
+    runtime_asset_source_local_incomplete: bool = False
+    runtime_asset_output_root: str = ''
+    batch_budget: int | None = None
 
 
 def _set_seed(seed: int) -> None:
@@ -63,14 +73,9 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(int(seed))
 
 
-def _load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def _load_jsonl(path: Path) -> List[Record]:
     rows: List[Record] = []
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open('r', encoding='utf-8') as handle:
         for line in handle:
             line = line.strip()
             if not line:
@@ -81,15 +86,7 @@ def _load_jsonl(path: Path) -> List[Record]:
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _carrier_artifact_parent(output_root: Path, dataset_name: str, branch: str) -> Path:
-    if branch == "mainline":
-        return output_root / "carrier_bank" / dataset_name
-    if branch == "gt_upper_bound":
-        return output_root / "carrier_bank_gt" / dataset_name
-    raise ValueError(f"unsupported trajectory_source_branch: {branch}")
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
 def _prepare_examples(
@@ -101,14 +98,14 @@ def _prepare_examples(
 ) -> Dict[str, Any]:
     examples: List[Dict[str, Any]] = []
     skipped: Dict[str, int] = {}
-    text_records_path = output_root / "text_bank" / "text_prototype_records.jsonl"
+    text_records_path = output_root / 'text_bank' / 'text_prototype_records.jsonl'
 
     def bump(reason: str) -> None:
         skipped[reason] = int(skipped.get(reason, 0)) + 1
 
     for sample in materialized_samples:
-        if not bool(sample.get("sample_valid", False)):
-            bump("sample_not_valid_from_phase1")
+        if not bool(sample.get('sample_valid', False)):
+            bump('sample_not_valid_from_phase1')
             continue
         try:
             carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
@@ -118,59 +115,79 @@ def _prepare_examples(
                 trajectory_source_branch=trajectory_source_branch,
             )
         except Exception:
-            bump("missing_frame_evidence")
+            bump('missing_frame_evidence')
             continue
-        candidate_records = list(sample.get("candidate_text_prototypes", []))
+        candidate_records = list(sample.get('candidate_text_prototypes', []))
         if not candidate_records:
-            bump("empty_candidate_text_prototypes")
+            bump('empty_candidate_text_prototypes')
             continue
-        candidate_ids_known = [int(x) for x in list(sample.get("candidate_ids_known", []))]
-        candidate_ids_extra = [int(x) for x in list(sample.get("candidate_ids_extra", []))]
+        candidate_ids_known = [int(x) for x in list(sample.get('candidate_ids_known', []))]
+        candidate_ids_extra = [int(x) for x in list(sample.get('candidate_ids_extra', []))]
         if len(candidate_ids_known) + len(candidate_ids_extra) != len(candidate_records):
-            bump("candidate_id_vector_length_mismatch")
+            bump('candidate_id_vector_length_mismatch')
             continue
-        observed_set = {int(x) for x in list(sample.get("observed_raw_ids", []))}
+        observed_set = {int(x) for x in list(sample.get('observed_raw_ids', []))}
         if not candidate_ids_known:
-            bump("empty_candidate_ids_known")
+            bump('empty_candidate_ids_known')
             continue
         try:
             candidate_matrix = [resolve_text_prototype(text_records_path, rec) for rec in candidate_records]
         except Exception:
-            bump("invalid_text_prototype_locator")
+            bump('invalid_text_prototype_locator')
             continue
         examples.append(
             {
-                "trajectory_id": str(sample.get("trajectory_id", "")),
-                "clip_id": int(sample.get("clip_id", -1)),
-                "video_id": int(sample.get("trajectory_record", {}).get("video_id", -1)),
-                "observed_raw_ids": sorted(observed_set),
-                "candidate_ids_known": candidate_ids_known,
-                "candidate_ids_extra": candidate_ids_extra,
-                "candidate_matrix": np.asarray(candidate_matrix, dtype=np.float32),
-                "carrier_vec": np.asarray(carrier_vec, dtype=np.float32),
-                "frame_vectors": [np.asarray(vec, dtype=np.float32) for vec in frame_vectors],
-                "frame_vec": np.asarray(frame_vec, dtype=np.float32),
-                "combined_vec": np.asarray(combined_vec, dtype=np.float32),
-                "candidate_records": candidate_records,
+                'trajectory_id': str(sample.get('trajectory_id', '')),
+                'clip_id': int(sample.get('clip_id', -1)),
+                'video_id': int(sample.get('trajectory_record', {}).get('video_id', -1)),
+                'observed_raw_ids': sorted(observed_set),
+                'candidate_ids_known': candidate_ids_known,
+                'candidate_ids_extra': candidate_ids_extra,
+                'candidate_matrix': np.asarray(candidate_matrix, dtype=np.float32),
+                'carrier_vec': np.asarray(carrier_vec, dtype=np.float32),
+                'frame_vectors': None,
+                'frame_vec': np.asarray(frame_vec, dtype=np.float32),
+                'combined_vec': np.asarray(combined_vec, dtype=np.float32),
+                'candidate_records': candidate_records,
             }
         )
-    return {"examples": examples, "skipped_reason_histogram": skipped}
+    return {'examples': examples, 'skipped_reason_histogram': skipped}
 
 
-def _load_projector_from_checkpoint(checkpoint_path: Path, *, device: torch.device) -> Tuple[Projector, Dict[str, Any]]:
+def _inverse_softplus(value: float) -> float:
+    target = max(float(value), 1e-6)
+    return float(math.log(math.expm1(target)))
+
+
+def _compute_t_dis(theta_t: torch.nn.Parameter) -> torch.Tensor:
+    return F.softplus(theta_t) + 1e-4
+
+
+
+def _load_projector_from_checkpoint(
+    checkpoint_path: Path,
+    *,
+    device: torch.device,
+) -> Tuple[Projector, torch.nn.Parameter, torch.nn.Parameter, Dict[str, Any]]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    config_payload = dict(checkpoint.get("projector_config", {}))
+    if 'text_projector_state_dict' not in checkpoint or 'text_projector_config' not in checkpoint:
+        raise RuntimeError(
+            f'incompatible checkpoint at {checkpoint_path}: expected text_projector_state_dict/text_projector_config under the new authority'
+        )
+    config_payload = dict(checkpoint.get('text_projector_config', {}))
     projector = Projector(
         ProjectorConfig(
-            input_dim=int(config_payload.get("input_dim", 768)),
-            hidden_dim=int(config_payload.get("hidden_dim", 512)),
-            output_dim=int(config_payload.get("output_dim", 512)),
-            dropout=float(config_payload.get("dropout", 0.0)),
-            use_layernorm=bool(config_payload.get("use_layernorm", True)),
+            input_dim=int(config_payload.get('input_dim', 512)),
+            hidden_dim=int(config_payload.get('hidden_dim', 1024)),
+            output_dim=int(config_payload.get('output_dim', 768)),
+            dropout=float(config_payload.get('dropout', 0.0)),
+            use_layernorm=bool(config_payload.get('use_layernorm', True)),
         )
     ).to(device)
-    projector.load_state_dict(checkpoint["projector_state_dict"])
-    return projector, checkpoint
+    projector.load_state_dict(checkpoint['text_projector_state_dict'])
+    theta_t = torch.nn.Parameter(torch.tensor(float(checkpoint.get('theta_T', _inverse_softplus(0.07))), device=device, dtype=torch.float32))
+    b_u = torch.nn.Parameter(torch.tensor(float(checkpoint.get('b_u', 0.0)), device=device, dtype=torch.float32))
+    return projector, theta_t, b_u, checkpoint
 
 
 def _normalize_mass(mass: Mapping[str, float]) -> Dict[str, float]:
@@ -181,190 +198,428 @@ def _normalize_mass(mass: Mapping[str, float]) -> Dict[str, float]:
         out[str(key)] = v
         total += v
     if total <= 0.0:
-        return {"unknown": 1.0}
+        return {'unknown': 1.0}
     return {key: float(value / total) for key, value in out.items()}
 
 
 def _stage_cfg(config: SoftEMConfig) -> List[SoftEMStageConfig]:
-    if config.mode == "base_only":
+    if config.mode == 'base_only':
         return [
             SoftEMStageConfig(
-                stage_id="softem_base",
-                selected_for_infer="base_only",
-                checkpoint_name="softem_base_last.pth",
-                responsibility_relpath="train/softem_base/responsibility_records.jsonl",
-                train_state_relpath="train/softem_base/train_state.json",
+                stage_id='softem_base',
+                selected_for_infer='base_only',
+                checkpoint_name='softem_base_last.pth',
+                responsibility_relpath='train/softem_base/responsibility_records.jsonl',
+                train_state_relpath='train/softem_base/train_state.json',
                 learning_rate=float(config.base_learning_rate),
                 epochs=int(config.base_epochs),
             )
         ]
-    if config.mode == "aug_only":
+    if config.mode == 'aug_only':
         return [
             SoftEMStageConfig(
-                stage_id="softem_aug",
-                selected_for_infer="augmented",
-                checkpoint_name="softem_aug_last.pth",
-                responsibility_relpath="train/softem_aug/responsibility_records.jsonl",
-                train_state_relpath="train/softem_aug/train_state.json",
+                stage_id='softem_aug',
+                selected_for_infer='augmented',
+                checkpoint_name='softem_aug_last.pth',
+                responsibility_relpath='train/softem_aug/responsibility_records.jsonl',
+                train_state_relpath='train/softem_aug/train_state.json',
                 learning_rate=float(config.aug_learning_rate),
                 epochs=int(config.aug_epochs),
             )
         ]
-    if config.mode == "base_then_aug":
+    if config.mode == 'base_then_aug':
         return [
             SoftEMStageConfig(
-                stage_id="softem_base",
-                selected_for_infer="base_only",
-                checkpoint_name="softem_base_last.pth",
-                responsibility_relpath="train/softem_base/responsibility_records.jsonl",
-                train_state_relpath="train/softem_base/train_state.json",
+                stage_id='softem_base',
+                selected_for_infer='base_only',
+                checkpoint_name='softem_base_last.pth',
+                responsibility_relpath='train/softem_base/responsibility_records.jsonl',
+                train_state_relpath='train/softem_base/train_state.json',
                 learning_rate=float(config.base_learning_rate),
                 epochs=int(config.base_epochs),
             ),
             SoftEMStageConfig(
-                stage_id="softem_aug",
-                selected_for_infer="augmented",
-                checkpoint_name="softem_aug_last.pth",
-                responsibility_relpath="train/softem_aug/responsibility_records.jsonl",
-                train_state_relpath="train/softem_aug/train_state.json",
+                stage_id='softem_aug',
+                selected_for_infer='augmented',
+                checkpoint_name='softem_aug_last.pth',
+                responsibility_relpath='train/softem_aug/responsibility_records.jsonl',
+                train_state_relpath='train/softem_aug/train_state.json',
                 learning_rate=float(config.aug_learning_rate),
                 epochs=int(config.aug_epochs),
             ),
         ]
-    raise ValueError(f"unsupported soft-em mode: {config.mode}")
+    raise ValueError(f'unsupported soft-em mode: {config.mode}')
 
 
 def _stage_domain_for_stage(stage_id: str, example: Mapping[str, Any]) -> Tuple[List[int], List[int], List[int]]:
     return build_stage_domain_indices(
-        example.get("candidate_ids_known", []),
-        example.get("candidate_ids_extra", []),
+        example.get('candidate_ids_known', []),
+        example.get('candidate_ids_extra', []),
         stage_id=stage_id,
     )
 
 
-def _stage_mass_from_logits(
+def _build_runtime_extra_cache(
     *,
-    stage_id: str,
-    candidate_ids_known: Sequence[int],
-    candidate_ids_extra: Sequence[int],
-    initial_mass: Mapping[str, float],
-    stage_logits: np.ndarray,
-    coverage_bonus: float = 0.1,
-    extra_penalty: float = 0.1,
-    coverage_context: Optional[Mapping[str, float]] = None,
-) -> Tuple[Dict[str, float], Dict[str, float], List[int]]:
-    return _stage_mass_from_logits_iterative(
-        stage_id=stage_id,
-        candidate_ids_known=candidate_ids_known,
-        candidate_ids_extra=candidate_ids_extra,
-        initial_mass=initial_mass,
-        stage_logits=stage_logits,
-        coverage_bonus=coverage_bonus,
-        extra_penalty=extra_penalty,
-        coverage_context=coverage_context,
-        em_subiterations=1,
-    )[:3]
-
-
-def _stage_mass_from_logits_iterative(
-    *,
-    stage_id: str,
-    candidate_ids_known: Sequence[int],
-    candidate_ids_extra: Sequence[int],
-    initial_mass: Mapping[str, float],
-    stage_logits: np.ndarray,
-    coverage_bonus: float = 0.1,
-    extra_penalty: float = 0.1,
-    coverage_context: Optional[Mapping[str, float]] = None,
-    em_subiterations: int = 1,
-) -> Tuple[Dict[str, float], Dict[str, float], List[int], List[Dict[str, Any]]]:
-    domain_ids, known_ids, extra_ids = build_stage_domain_indices(
-        candidate_ids_known,
-        candidate_ids_extra,
-        stage_id=stage_id,
-    )
-    logits = np.asarray(stage_logits, dtype=np.float64)
-    if logits.ndim != 1 or int(logits.shape[0]) != len(domain_ids) + 1:
-        raise ValueError("stage logits shape mismatch")
-    current_mass = _normalize_mass(initial_mass)
-    keys: List[str] = ["unknown", *[str(int(raw_id)) for raw_id in domain_ids]]
-    model_probs = torch.softmax(torch.tensor(logits[1:], dtype=torch.float64), dim=0).cpu().numpy().astype(np.float64)
-    trace: List[Dict[str, Any]] = []
-    coverage_bonus_applied_to: List[int] = []
-    final_mass = dict(current_mass)
-    init_mass = dict(current_mass)
-
-    for subiter_index in range(max(1, int(em_subiterations))):
-        current_unknown = float(current_mass.get("unknown", 0.0))
-        current_known_mass = float(sum(float(current_mass.get(str(int(raw_id)), 0.0)) for raw_id in known_ids))
-        current_extra_mass = float(sum(float(current_mass.get(str(int(raw_id)), 0.0)) for raw_id in extra_ids))
-        refined_init, refined_final, coverage_bonus_applied_to = refine_responsibilities(
-            initial_mass=current_mass,
-            model_probs=model_probs,
-            candidate_ids_known=known_ids,
-            candidate_ids_extra=extra_ids,
-            stage_id=stage_id,
-            coverage_bonus=coverage_bonus,
-            coverage_epsilon=1.0,
-            extra_penalty=extra_penalty,
-            coverage_context=coverage_context,
-        )
-        trace.append(
-            {
-                "subiteration_index": int(subiter_index),
-                "current_round_mass": dict(current_mass),
-                "current_round_unknown_mass": current_unknown,
-                "current_round_known_mass": current_known_mass,
-                "current_round_extra_mass": current_extra_mass,
-                "r_init": refined_init,
-                "r_final": refined_final,
-                "coverage_context": dict(coverage_context or {}),
-                "coverage_bonus_applied_to": list(coverage_bonus_applied_to),
+    examples: Sequence[Mapping[str, Any]],
+    text_projector: Projector,
+    theta_t: torch.nn.Parameter,
+    output_root: Path,
+    k_extra: int,
+    alpha: float,
+    lambda_frame: float,
+    device: torch.device,
+) -> Dict[int, Dict[str, Any]]:
+    if int(k_extra) <= 0:
+        return {}
+    vocab_ids, vocab_records, vocab_matrix = load_text_vocab(output_root)
+    idx_by_raw = {int(raw_id): idx for idx, raw_id in enumerate(vocab_ids)}
+    text_lookup = {int(rec['raw_id']): dict(rec) for rec in vocab_records}
+    t_dis = _compute_t_dis(theta_t)
+    t_dis_value = float(t_dis.detach().cpu().item())
+    with torch.no_grad():
+        text_tensor = torch.from_numpy(np.asarray(vocab_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
+        projected_text = F.normalize(text_projector(text_tensor), p=2.0, dim=-1)
+        text_text_sim = torch.matmul(projected_text, projected_text.t()).detach().cpu().numpy().astype(np.float32)
+        carrier_matrix = F.normalize(torch.from_numpy(np.stack([np.asarray(ex['carrier_vec'], dtype=np.float32) for ex in examples], axis=0)).to(device=device, dtype=torch.float32), p=2.0, dim=-1)
+        frame_matrix = F.normalize(torch.from_numpy(np.stack([np.asarray(ex['frame_vec'], dtype=np.float32) for ex in examples], axis=0)).to(device=device, dtype=torch.float32), p=2.0, dim=-1)
+        carrier_scores = torch.matmul(carrier_matrix, projected_text.t()).detach().cpu().numpy().astype(np.float32) / max(t_dis_value, 1e-12)
+        frame_scores = torch.matmul(frame_matrix, projected_text.t()).detach().cpu().numpy().astype(np.float32) / max(t_dis_value, 1e-12)
+    fused_scores = (1.0 - float(lambda_frame)) * carrier_scores + float(lambda_frame) * frame_scores
+    examples_by_clip: Dict[int, List[Tuple[int, Mapping[str, Any]]]] = {}
+    for row_idx, ex in enumerate(examples):
+        examples_by_clip.setdefault(int(ex['clip_id']), []).append((row_idx, ex))
+    cache: Dict[int, Dict[str, Any]] = {}
+    for clip_id, grouped in examples_by_clip.items():
+        observed = sorted({int(x) for _, ex in grouped for x in list(ex.get('observed_raw_ids', []))})
+        observed_set = set(observed)
+        candidate_ids = [int(raw_id) for raw_id in vocab_ids if int(raw_id) not in observed_set]
+        if not candidate_ids:
+            cache[int(clip_id)] = {
+                'candidate_ids_extra': [],
+                'candidate_ids_extra_provenance': [],
+                'candidate_ids_extra_runtime_authoritative': [],
+                'candidate_ids_extra_authority': 'runtime_refresh_cache_only',
+                'text_lookup': text_lookup,
             }
-        )
-        init_mass = refined_init
-        final_mass = refined_final
-        current_mass = refined_final
+            continue
+        row_indices = [row_idx for row_idx, _ in grouped]
+        score_slice = np.asarray(fused_scores[row_indices, :], dtype=np.float32)
+        support_count: Dict[int, int] = {}
+        non_observed_indices = [idx_by_raw[int(raw_id)] for raw_id in candidate_ids]
+        for local_row in score_slice:
+            local_non_observed = local_row[non_observed_indices]
+            winner_raw = int(candidate_ids[int(np.argmax(local_non_observed))])
+            support_count[winner_raw] = int(support_count.get(winner_raw, 0)) + 1
+        per_class: List[Tuple[float, int, int]] = []
+        for raw_id in candidate_ids:
+            vocab_idx = idx_by_raw[int(raw_id)]
+            class_scores = score_slice[:, vocab_idx]
+            argmax_local = int(np.argmax(class_scores))
+            s_max = float(class_scores[argmax_local])
+            debias = 0.0
+            if observed:
+                debias = float(max(text_text_sim[vocab_idx, idx_by_raw[int(obs)]] for obs in observed if int(obs) in idx_by_raw))
+            per_class.append((float(s_max - float(alpha) * debias), int(raw_id), int(row_indices[argmax_local])))
+        per_class.sort(key=lambda item: (-item[0], item[1]))
+        selected = per_class[: int(k_extra)]
+        cache[int(clip_id)] = {
+            'candidate_ids_extra': [int(raw_id) for _, raw_id, _ in selected],
+            'candidate_ids_extra_provenance': [
+                {
+                    'raw_id': int(raw_id),
+                    'score': float(score),
+                    'argmax_trajectory_id': str(examples[argmax_row]['trajectory_id']),
+                    'support_count': int(support_count.get(int(raw_id), 0)),
+                    'admission_reason': 'fused_score_class_level_max_with_observed_neighbor_penalty',
+                }
+                for score, raw_id, argmax_row in selected
+            ],
+            'candidate_ids_extra_runtime_authoritative': [int(raw_id) for _, raw_id, _ in selected],
+            'candidate_ids_extra_authority': 'runtime_refresh_cache_only',
+            'text_lookup': text_lookup,
+        }
+    return cache
 
-    # Ensure the returned dictionaries include all expected keys even when the stage domain is empty.
-    init_mass = _normalize_mass({key: float(init_mass.get(key, 0.0)) for key in keys})
-    final_mass = _normalize_mass({key: float(final_mass.get(key, 0.0)) for key in keys})
-    return init_mass, final_mass, sorted(set(coverage_bonus_applied_to)), trace
 
-
-
-
-def _compute_clip_known_coverage_context(
+def _apply_runtime_extra_cache(
+    examples: Sequence[Mapping[str, Any]],
     *,
-    cache: ResponsibilityCache,
-    examples_by_clip: Mapping[int, Sequence[Mapping[str, Any]]],
-    clip_id: int,
-    known_ids: Sequence[int],
-) -> Dict[str, float]:
-    context: Dict[str, float] = {}
-    clip_examples = list(examples_by_clip.get(int(clip_id), []))
-    for raw_id in known_ids:
-        key = str(int(raw_id))
-        total = 0.0
-        for ex in clip_examples:
-            init_mass = cache.get_init_mass(str(ex["trajectory_id"]))
-            total += float(init_mass.get(key, 0.0))
-        context[key] = float(total)
-    return context
+    runtime_extra_cache: Mapping[int, Mapping[str, Any]],
+    output_root: Path,
+) -> List[Dict[str, Any]]:
+    augmented: List[Dict[str, Any]] = []
+    text_records_path = output_root / 'text_bank' / 'text_prototype_records.jsonl'
+    for ex in examples:
+        cache_entry = dict(runtime_extra_cache.get(int(ex['clip_id']), {}))
+        extra_ids = [int(x) for x in list(cache_entry.get('candidate_ids_extra', []))]
+        text_lookup = dict(cache_entry.get('text_lookup', {}))
+        extra_records = [dict(text_lookup[int(raw_id)]) for raw_id in extra_ids if int(raw_id) in text_lookup]
+        if extra_records:
+            extra_matrix = np.asarray([resolve_text_prototype(text_records_path, rec) for rec in extra_records], dtype=np.float32)
+            candidate_matrix = np.concatenate([np.asarray(ex['candidate_matrix'], dtype=np.float32), extra_matrix], axis=0)
+        else:
+            candidate_matrix = np.asarray(ex['candidate_matrix'], dtype=np.float32)
+        row = dict(ex)
+        row['candidate_ids_extra_phase1_placeholder'] = list(ex.get('candidate_ids_extra', []))
+        row['candidate_ids_extra'] = list(extra_ids)
+        row['candidate_ids_extra_runtime_authoritative'] = list(cache_entry.get('candidate_ids_extra_runtime_authoritative', extra_ids))
+        row['candidate_ids_extra_authority'] = str(cache_entry.get('candidate_ids_extra_authority', 'runtime_refresh_cache_only'))
+        row['candidate_records'] = [*list(ex['candidate_records']), *extra_records]
+        row['candidate_matrix'] = candidate_matrix
+        row['candidate_ids_extra_provenance'] = list(cache_entry.get('candidate_ids_extra_provenance', []))
+        augmented.append(row)
+    return augmented
+
 
 def _load_proxy_rows(output_root: Path) -> List[Record]:
-    proxy_path = output_root / "train" / "prealign" / "proxy_records.jsonl"
+    proxy_path = output_root / 'train' / 'prealign' / 'proxy_records.jsonl'
     if not proxy_path.is_file():
-        raise FileNotFoundError("missing prealign proxy records: train/prealign/proxy_records.jsonl")
+        raise FileNotFoundError('missing prealign proxy records: train/prealign/proxy_records.jsonl')
     return _load_jsonl(proxy_path)
 
 
 def _initial_checkpoint_path(output_root: Path, *, mode: str) -> Path:
-    if mode == "aug_only":
-        aug_path = output_root / "train" / "softem_aug" / "checkpoints" / "softem_aug_last.pth"
+    if mode == 'aug_only':
+        aug_path = output_root / 'train' / 'softem_aug' / 'checkpoints' / 'softem_aug_last.pth'
         if aug_path.is_file():
             return aug_path
-    return output_root / "train" / "prealign" / "checkpoints" / "prealign_last.pth"
+    return output_root / 'train' / 'prealign' / 'checkpoints' / 'prealign_last.pth'
+
+
+def _project_init_mass_to_domain(init_mass: Mapping[str, float], domain_ids: Sequence[int]) -> Dict[str, float]:
+    projected = {'unknown': float(init_mass.get('unknown', 0.0))}
+    for raw_id in domain_ids:
+        projected[str(int(raw_id))] = float(init_mass.get(str(int(raw_id)), 0.0))
+    return _normalize_mass(projected)
+
+
+def _explicit_init_mass_for_aug_stage(
+    *,
+    domain_ids: Sequence[int],
+    known_ids: Sequence[int],
+    extra_ids: Sequence[int],
+    stage_logits_candidates: torch.Tensor,
+    b_u: torch.nn.Parameter,
+    delta_extra: float = 0.1,
+) -> Dict[str, float]:
+    ordered_scores: List[float] = [float(b_u.detach().cpu().item())]
+    ordered_keys: List[str] = ['unknown']
+    domain_id_list = [int(raw_id) for raw_id in domain_ids]
+    known_set = {int(raw_id) for raw_id in known_ids}
+    extra_set = {int(raw_id) for raw_id in extra_ids}
+    for idx, raw_id in enumerate(domain_id_list):
+        score = float(stage_logits_candidates[idx].detach().cpu().item())
+        if int(raw_id) in extra_set and int(raw_id) not in known_set:
+            score -= float(delta_extra)
+        ordered_scores.append(score)
+        ordered_keys.append(str(int(raw_id)))
+    probs = torch.softmax(torch.tensor(ordered_scores, dtype=torch.float64), dim=0).cpu().numpy().astype(np.float64)
+    return _normalize_mass({key: float(prob) for key, prob in zip(ordered_keys, probs.tolist())})
+
+
+def _compute_initial_mass_for_stage(
+    *,
+    stage_id: str,
+    base_cache: ResponsibilityCache,
+    trajectory_id: str,
+    domain_ids: Sequence[int],
+    known_ids: Sequence[int],
+    extra_ids: Sequence[int],
+    stage_logits_candidates: torch.Tensor,
+    b_u: torch.nn.Parameter,
+) -> Dict[str, float]:
+    if str(stage_id) == 'softem_aug' and len(extra_ids) > 0:
+        return _explicit_init_mass_for_aug_stage(
+            domain_ids=domain_ids,
+            known_ids=known_ids,
+            extra_ids=extra_ids,
+            stage_logits_candidates=stage_logits_candidates,
+            b_u=b_u,
+        )
+    return _project_init_mass_to_domain(base_cache.get_init_mass(trajectory_id), domain_ids)
+
+
+def _build_clip_coverage_context(current_masses_by_tid: Mapping[str, Mapping[str, float]], clip_examples: Sequence[Mapping[str, Any]], known_ids: Sequence[int]) -> Dict[str, float]:
+    context: Dict[str, float] = {}
+    for raw_id in known_ids:
+        key = str(int(raw_id))
+        total = 0.0
+        for ex in clip_examples:
+            total += float(current_masses_by_tid[str(ex['trajectory_id'])].get(key, 0.0))
+        context[key] = float(total)
+    return context
+
+
+def _compute_clip_refinement_rows(
+    *,
+    stage_id: str,
+    clip_examples: Sequence[Mapping[str, Any]],
+    base_cache: ResponsibilityCache,
+    text_projector: Projector,
+    theta_t: torch.nn.Parameter,
+    b_u: torch.nn.Parameter,
+    em_subiterations: int,
+    lambda_frame: float,
+    device: torch.device,
+) -> Tuple[List[Record], List[Dict[str, Any]]]:
+    t_dis = _compute_t_dis(theta_t)
+    per_tid_model_probs: Dict[str, np.ndarray] = {}
+    per_tid_domain_ids: Dict[str, List[int]] = {}
+    per_tid_known_ids: Dict[str, List[int]] = {}
+    per_tid_extra_ids: Dict[str, List[int]] = {}
+    initial_masses_by_tid: Dict[str, Dict[str, float]] = {}
+    trace_by_tid: Dict[str, List[Dict[str, Any]]] = {str(ex['trajectory_id']): [] for ex in clip_examples}
+
+    with torch.no_grad():
+        for ex in clip_examples:
+            tid = str(ex['trajectory_id'])
+            domain_ids, known_ids, extra_ids = build_stage_domain_indices(ex.get('candidate_ids_known', []), ex.get('candidate_ids_extra', []), stage_id=stage_id)
+            _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
+                projector=text_projector,
+                carrier_vec=ex['carrier_vec'],
+                frame_vec=ex['frame_vec'],
+                candidate_matrix=ex['candidate_matrix'],
+                temperature=t_dis,
+                lambda_frame=lambda_frame,
+                frame_vectors=ex.get('frame_vectors'),
+            )
+            stage_logits_candidates = logits_known_extra[: len(domain_ids)]
+            model_probs = torch.softmax(stage_logits_candidates, dim=0).detach().cpu().numpy().astype(np.float64)
+            per_tid_model_probs[tid] = model_probs
+            per_tid_domain_ids[tid] = list(domain_ids)
+            per_tid_known_ids[tid] = list(known_ids)
+            per_tid_extra_ids[tid] = list(extra_ids)
+            initial_masses_by_tid[tid] = _compute_initial_mass_for_stage(
+                stage_id=stage_id,
+                base_cache=base_cache,
+                trajectory_id=tid,
+                domain_ids=domain_ids,
+                known_ids=known_ids,
+                extra_ids=extra_ids,
+                stage_logits_candidates=stage_logits_candidates,
+                b_u=b_u,
+            )
+
+    current_masses_by_tid = {tid: dict(mass) for tid, mass in initial_masses_by_tid.items()}
+    b_u_value = float(b_u.detach().cpu().item())
+    subiterations = max(1, int(em_subiterations))
+
+    for subiter_idx in range(subiterations):
+        next_masses_by_tid: Dict[str, Dict[str, float]] = {}
+        for ex in clip_examples:
+            tid = str(ex['trajectory_id'])
+            coverage_context = _build_clip_coverage_context(
+                current_masses_by_tid=current_masses_by_tid,
+                clip_examples=clip_examples,
+                known_ids=per_tid_known_ids[tid],
+            )
+            refined_init, refined_final, refine_trace = refine_responsibilities(
+                initial_mass=current_masses_by_tid[tid],
+                model_probs=per_tid_model_probs[tid],
+                candidate_ids_known=per_tid_known_ids[tid],
+                candidate_ids_extra=per_tid_extra_ids[tid],
+                stage_id=stage_id,
+                coverage_bonus=0.1,
+                coverage_epsilon=1.0,
+                extra_penalty=0.1,
+                coverage_context=coverage_context,
+                b_u_value=b_u_value,
+            )
+            trace_by_tid[tid].append(
+                {
+                    'subiteration_index': int(subiter_idx),
+                    'r_init': dict(refined_init),
+                    'r_final': dict(refined_final),
+                    'coverage_context': dict(coverage_context),
+                    'coverage_bonus_applied_to': list(refine_trace.get('coverage_bonus_applied_to', [])),
+                    'refine_trace': dict(refine_trace),
+                }
+            )
+            next_masses_by_tid[tid] = dict(refined_final)
+        current_masses_by_tid = next_masses_by_tid
+
+    rows: List[Record] = []
+    for ex in clip_examples:
+        tid = str(ex['trajectory_id'])
+        rows.append(
+            {
+                'dataset_name': str(ex.get('dataset_name', 'lvvis_train_base')),
+                'clip_id': int(ex['clip_id']),
+                'video_id': int(ex['video_id']),
+                'trajectory_id': tid,
+                'candidate_ids_known': [int(x) for x in ex['candidate_ids_known']],
+                'candidate_ids_extra': [int(x) for x in ex['candidate_ids_extra']],
+                'unknown_slot': 'unknown',
+                'r_init': dict(initial_masses_by_tid[tid]),
+                'r_final': dict(current_masses_by_tid[tid]),
+                'coverage_bonus_applied_to': list(trace_by_tid[tid][-1]['coverage_bonus_applied_to']) if trace_by_tid[tid] else [],
+                'refine_trace': dict(trace_by_tid[tid][-1]['refine_trace']) if trace_by_tid[tid] else {},
+                'em_subiterations': int(subiterations),
+                'em_subiteration_count': int(len(trace_by_tid[tid])),
+                'join_key': tid,
+                'subiteration_trace': list(trace_by_tid[tid]),
+            }
+        )
+    sample_trace = list(trace_by_tid[str(clip_examples[0]['trajectory_id'])]) if clip_examples else []
+    return rows, sample_trace
+
+
+def _refresh_stage_runtime_state(
+    *,
+    stage_id: str,
+    base_examples: Sequence[Mapping[str, Any]],
+    base_cache: ResponsibilityCache,
+    text_projector: Projector,
+    theta_t: torch.nn.Parameter,
+    b_u: torch.nn.Parameter,
+    output_root: Path,
+    k_extra: int,
+    extra_alpha: float,
+    lambda_frame: float,
+    em_subiterations: int,
+    device: torch.device,
+) -> Tuple[Dict[str, Dict[str, Any]], ResponsibilityCache, Dict[int, Dict[str, Any]], List[Dict[str, Any]]]:
+    runtime_extra_cache: Dict[int, Dict[str, Any]] = {}
+    stage_examples = list(base_examples)
+    if str(stage_id) == 'softem_aug':
+        runtime_extra_cache = _build_runtime_extra_cache(
+            examples=base_examples,
+            text_projector=text_projector,
+            theta_t=theta_t,
+            output_root=output_root,
+            k_extra=int(k_extra),
+            alpha=float(extra_alpha),
+            lambda_frame=float(lambda_frame),
+            device=device,
+        )
+        stage_examples = _apply_runtime_extra_cache(base_examples, runtime_extra_cache=runtime_extra_cache, output_root=output_root)
+
+    stage_examples_by_clip: Dict[int, List[Dict[str, Any]]] = {}
+    stage_examples_by_tid: Dict[str, Dict[str, Any]] = {}
+    for ex in stage_examples:
+        stage_examples_by_clip.setdefault(int(ex['clip_id']), []).append(dict(ex))
+        stage_examples_by_tid[str(ex['trajectory_id'])] = dict(ex)
+
+    refreshed_rows: List[Record] = []
+    stage_trace_sample: List[Dict[str, Any]] = []
+    for clip_id in sorted(stage_examples_by_clip.keys()):
+        rows, sample_trace = _compute_clip_refinement_rows(
+            stage_id=stage_id,
+            clip_examples=stage_examples_by_clip[int(clip_id)],
+            base_cache=base_cache,
+            text_projector=text_projector,
+            theta_t=theta_t,
+            b_u=b_u,
+            em_subiterations=em_subiterations,
+            lambda_frame=lambda_frame,
+            device=device,
+        )
+        refreshed_rows.extend(rows)
+        if not stage_trace_sample:
+            stage_trace_sample = sample_trace
+    refreshed_cache = ResponsibilityCache.from_records(stage_id=str(stage_id), records=refreshed_rows)
+    return stage_examples_by_tid, refreshed_cache, runtime_extra_cache, stage_trace_sample
 
 
 def run_soft_em(
@@ -374,8 +629,8 @@ def run_soft_em(
     config: SoftEMConfig,
     audit_callback: Any = None,
 ) -> Dict[str, Any]:
-    if config.dataset_name != "lvvis_train_base":
-        raise ValueError("soft-EM implementation currently supports dataset_name=lvvis_train_base only")
+    if config.dataset_name != 'lvvis_train_base':
+        raise ValueError('soft-EM implementation currently supports dataset_name=lvvis_train_base only')
     _set_seed(int(config.seed))
     device = torch.device(str(config.device))
     prepared = _prepare_examples(
@@ -384,139 +639,184 @@ def run_soft_em(
         dataset_name=config.dataset_name,
         trajectory_source_branch=config.trajectory_source_branch,
     )
-    examples = list(prepared["examples"])
-    skipped = dict(prepared["skipped_reason_histogram"])
-    examples_by_clip: Dict[int, List[Dict[str, Any]]] = {}
-    for ex in examples:
-        examples_by_clip.setdefault(int(ex["clip_id"]), []).append(ex)
+    examples = list(prepared['examples'])
+    skipped = dict(prepared['skipped_reason_histogram'])
     if not examples:
-        raise RuntimeError("no trainable examples available for soft-EM")
+        raise RuntimeError('no trainable examples available for soft-EM')
+    batch_budget = resolve_default_batch_budget(smoke=bool(config.smoke), explicit=config.batch_budget)
     proxy_rows = _load_proxy_rows(output_root)
-    cache = ResponsibilityCache.from_proxy_records(proxy_rows, stage_id="prealign_proxy")
+    cache = ResponsibilityCache.from_proxy_records(proxy_rows, stage_id='prealign_proxy')
     stage_reports: List[Dict[str, Any]] = []
     current_checkpoint = _initial_checkpoint_path(output_root, mode=config.mode)
     if not current_checkpoint.is_file():
-        raise FileNotFoundError(f"missing prealign checkpoint for soft-EM bootstrap: {current_checkpoint}")
+        raise FileNotFoundError(f'missing prealign checkpoint for soft-EM bootstrap: {current_checkpoint}')
 
     for stage in _stage_cfg(config):
-        projector, _ckpt = _load_projector_from_checkpoint(current_checkpoint, device=device)
-        projector.train()
+        text_projector, theta_t, b_u, ckpt = _load_projector_from_checkpoint(current_checkpoint, device=device)
+        text_projector.train()
         optimizer = torch.optim.AdamW(
-            projector.parameters(),
+            [*text_projector.parameters(), theta_t, b_u],
             lr=float(stage.learning_rate),
             weight_decay=float(config.weight_decay),
         )
         losses: List[float] = []
-        iteration_index = 0
+        optimization_losses: List[float] = []
+        iteration_index = int(ckpt.get('global_step', 0))
+        refresh_interval = int(config.extra_refresh_interval_iters) if config.extra_refresh_interval_iters is not None else max(len(examples), 1)
+        refresh_interval = max(int(refresh_interval), 1)
         stage_trace_sample: List[Dict[str, Any]] = []
+
+        active_examples_by_tid, cache, runtime_extra_cache, stage_trace_sample = _refresh_stage_runtime_state(
+            stage_id=stage.stage_id,
+            base_examples=examples,
+            base_cache=cache,
+            text_projector=text_projector,
+            theta_t=theta_t,
+            b_u=b_u,
+            output_root=output_root,
+            k_extra=int(config.k_extra),
+            extra_alpha=float(config.extra_alpha),
+            lambda_frame=0.25,
+            em_subiterations=max(1, int(config.em_subiterations)),
+            device=device,
+        )
 
         if audit_callback is not None:
             audit_callback(
                 {
-                    "dataset_name": str(config.dataset_name),
-                    "trajectory_source_branch": str(config.trajectory_source_branch),
-                    "stage_id": str(stage.stage_id),
-                    "snapshot_id": "stage_start",
-                    "phase": "stage_start",
-                    "output_root": output_root,
-                    "materialized_samples": materialized_samples,
-                    "projector": projector,
-                    "responsibility_cache": cache,
-                    "device": str(device),
-                    "temperature": float(config.temperature),
-                    "seed": int(config.seed),
-                    "mode": str(config.mode),
+                    'dataset_name': str(config.dataset_name),
+                    'trajectory_source_branch': str(config.trajectory_source_branch),
+                    'stage_id': str(stage.stage_id),
+                    'snapshot_id': 'stage_start',
+                    'phase': 'stage_start',
+                    'output_root': output_root,
+                    'materialized_samples': materialized_samples,
+                    'text_projector': text_projector,
+                    'projector': text_projector,
+                    'theta_T': theta_t,
+                    'b_u': b_u,
+                    'responsibility_cache': cache,
+                    'device': str(device),
+                    'temperature': float(_compute_t_dis(theta_t).detach().cpu().item()),
+                    'seed': int(config.seed),
+                    'mode': str(config.mode),
                 }
             )
 
-        for _epoch in range(int(stage.epochs)):
-            random.Random(int(config.seed)).shuffle(examples)
-            for ex in examples:
-                ex_tid = str(ex["trajectory_id"])
-                init_mass = cache.get_init_mass(ex_tid)
-                domain_ids, known_ids, extra_ids = _stage_domain_for_stage(stage.stage_id, ex)
-                _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
-                    projector=projector,
-                    carrier_vec=ex["carrier_vec"],
-                    frame_vec=ex["frame_vec"],
-                    candidate_matrix=ex["candidate_matrix"],
-                    temperature=float(config.temperature),
-                    frame_vectors=ex["frame_vectors"],
-                )
-                stage_candidate_count = len(domain_ids)
-                if stage_candidate_count <= 0:
-                    raise RuntimeError(f"empty candidate domain for stage {stage.stage_id}")
-                stage_logits_candidates = logits_known_extra[:stage_candidate_count]
-                stage_logits = torch.cat([torch.zeros(1, device=device, dtype=torch.float32), stage_logits_candidates], dim=0)
-                init_domain = {"unknown": float(init_mass.get("unknown", 1.0))}
-                for raw_id in domain_ids:
-                    init_domain[str(int(raw_id))] = float(init_mass.get(str(int(raw_id)), 0.0))
-                coverage_context = _compute_clip_known_coverage_context(
-                    cache=cache,
-                    examples_by_clip=examples_by_clip,
-                    clip_id=int(ex["clip_id"]),
-                    known_ids=ex["candidate_ids_known"],
-                )
-                refined_init, refined_final, coverage_bonus_applied_to, trace = _stage_mass_from_logits_iterative(
-                    stage_id=stage.stage_id,
-                    candidate_ids_known=ex["candidate_ids_known"],
-                    candidate_ids_extra=ex["candidate_ids_extra"],
-                    initial_mass=init_domain,
-                    stage_logits=stage_logits.detach().cpu().numpy(),
-                    coverage_context=coverage_context,
-                    em_subiterations=max(1, int(config.em_subiterations)),
-                )
-                if not stage_trace_sample:
-                    stage_trace_sample = list(trace)
-                target = torch.tensor(
-                    [refined_final["unknown"], *[refined_final[str(int(raw_id))] for raw_id in domain_ids]],
-                    device=device,
-                    dtype=torch.float32,
-                )
-                loss = -(target * torch.log_softmax(stage_logits, dim=0)).sum()
+        since_refresh = 0
+        current_refresh_interval = int(refresh_interval)
+        final_epoch_plan = None
+        for epoch_index in range(int(stage.epochs)):
+            stage_examples = [active_examples_by_tid[tid] for tid in active_examples_by_tid.keys()]
+            random.Random(int(config.seed) + int(epoch_index)).shuffle(stage_examples)
+            epoch_plan = build_dynamic_microbatches(
+                stage_examples,
+                batch_budget=batch_budget,
+                cost_fn=lambda ex: len(_stage_domain_for_stage(stage.stage_id, ex)[0]),
+                bucket_key_fn=lambda ex: (1, len(_stage_domain_for_stage(stage.stage_id, ex)[0])),
+            )
+            final_epoch_plan = epoch_plan
+            current_refresh_interval = int(config.extra_refresh_interval_iters) if config.extra_refresh_interval_iters is not None else max(1, int(epoch_plan.batch_count))
+            for batch_indices in epoch_plan.batches:
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                batch_loss_accum: torch.Tensor | None = None
+                effective_responsibility_unit_count = 0
+                for batch_index in batch_indices:
+                    ex = stage_examples[int(batch_index)]
+                    tid = str(ex['trajectory_id'])
+                    domain_ids, _, _ = _stage_domain_for_stage(stage.stage_id, ex)
+                    current_t_dis = _compute_t_dis(theta_t)
+                    _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
+                        projector=text_projector,
+                        carrier_vec=ex['carrier_vec'],
+                        frame_vec=ex['frame_vec'],
+                        candidate_matrix=ex['candidate_matrix'],
+                        temperature=current_t_dis,
+                        frame_vectors=ex['frame_vectors'],
+                    )
+                    stage_candidate_count = len(domain_ids)
+                    if stage_candidate_count <= 0:
+                        raise RuntimeError(f'empty candidate domain for stage {stage.stage_id}')
+                    stage_logits_candidates = logits_known_extra[:stage_candidate_count]
+                    stage_logits = torch.cat([b_u.reshape(1), stage_logits_candidates], dim=0)
+                    target_row = cache.by_trajectory_id[str(tid)]
+                    target = torch.tensor(
+                        [target_row['r_final']['unknown'], *[target_row['r_final'][str(int(raw_id))] for raw_id in domain_ids]],
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    sample_loss = -(target * torch.log_softmax(stage_logits, dim=0)).sum()
+                    losses.append(float(sample_loss.detach().cpu().item()))
+                    batch_loss_accum = sample_loss if batch_loss_accum is None else (batch_loss_accum + sample_loss)
+                    effective_responsibility_unit_count += 1
+                if batch_loss_accum is None or effective_responsibility_unit_count <= 0:
+                    continue
+                batch_loss = batch_loss_accum / float(effective_responsibility_unit_count)
+                batch_loss.backward()
                 optimizer.step()
-                losses.append(float(loss.detach().cpu().item()))
-                row = {
-                    "dataset_name": str(config.dataset_name),
-                    "clip_id": int(ex["clip_id"]),
-                    "video_id": int(ex["video_id"]),
-                    "trajectory_id": ex_tid,
-                    "candidate_ids_known": [int(x) for x in ex["candidate_ids_known"]],
-                    "candidate_ids_extra": [int(x) for x in ex["candidate_ids_extra"]],
-                    "unknown_slot": "unknown",
-                    "r_init": refined_init,
-                    "r_final": refined_final,
-                    "coverage_bonus_applied_to": coverage_bonus_applied_to,
-                    "em_subiterations": int(max(1, int(config.em_subiterations))),
-                    "em_subiteration_count": int(len(trace)),
-                    "iteration_index": int(iteration_index),
-                    "join_key": str(ex_tid),
-                }
-                cache.update(ex_tid, row)
+                optimization_losses.append(float(batch_loss.detach().cpu().item()))
                 iteration_index += 1
+                since_refresh += 1
+                if since_refresh >= current_refresh_interval:
+                    active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state(
+                        stage_id=stage.stage_id,
+                        base_examples=examples,
+                        base_cache=cache,
+                        text_projector=text_projector,
+                        theta_t=theta_t,
+                        b_u=b_u,
+                        output_root=output_root,
+                        k_extra=int(config.k_extra),
+                        extra_alpha=float(config.extra_alpha),
+                        lambda_frame=0.25,
+                        em_subiterations=max(1, int(config.em_subiterations)),
+                        device=device,
+                    )
+                    if not stage_trace_sample:
+                        stage_trace_sample = refreshed_trace
+                    since_refresh = 0
             if audit_callback is not None:
                 audit_callback(
                     {
-                        "dataset_name": str(config.dataset_name),
-                        "trajectory_source_branch": str(config.trajectory_source_branch),
-                        "stage_id": str(stage.stage_id),
-                        "snapshot_id": f"epoch_{int(_epoch) + 1:03d}",
-                        "phase": "epoch_end",
-                        "output_root": output_root,
-                        "materialized_samples": materialized_samples,
-                        "projector": projector,
-                        "responsibility_cache": cache,
-                        "device": str(device),
-                        "temperature": float(config.temperature),
-                        "seed": int(config.seed),
-                        "mode": str(config.mode),
+                        'dataset_name': str(config.dataset_name),
+                        'trajectory_source_branch': str(config.trajectory_source_branch),
+                        'stage_id': str(stage.stage_id),
+                        'snapshot_id': f'epoch_{int(epoch_index) + 1:03d}',
+                        'phase': 'epoch_end',
+                        'output_root': output_root,
+                        'materialized_samples': materialized_samples,
+                        'text_projector': text_projector,
+                        'projector': text_projector,
+                        'theta_T': theta_t,
+                        'b_u': b_u,
+                        'responsibility_cache': cache,
+                        'device': str(device),
+                        'temperature': float(_compute_t_dis(theta_t).detach().cpu().item()),
+                        'seed': int(config.seed),
+                        'mode': str(config.mode),
                     }
                 )
 
-        stage_dir = output_root / "train" / stage.stage_id
-        ckpt_dir = stage_dir / "checkpoints"
+        if since_refresh > 0:
+            active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state(
+                stage_id=stage.stage_id,
+                base_examples=examples,
+                base_cache=cache,
+                text_projector=text_projector,
+                theta_t=theta_t,
+                b_u=b_u,
+                output_root=output_root,
+                k_extra=int(config.k_extra),
+                extra_alpha=float(config.extra_alpha),
+                lambda_frame=0.25,
+                em_subiterations=max(1, int(config.em_subiterations)),
+                device=device,
+            )
+            if not stage_trace_sample:
+                stage_trace_sample = refreshed_trace
+
+        stage_dir = output_root / 'train' / stage.stage_id
+        ckpt_dir = stage_dir / 'checkpoints'
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         responsibility_path = output_root / stage.responsibility_relpath
         train_state_path = output_root / stage.train_state_relpath
@@ -524,73 +824,94 @@ def run_soft_em(
         cache.stage_id = stage.stage_id
         cache.write_jsonl(responsibility_path)
         train_state = {
-            "stage_id": stage.stage_id,
-            "epoch": int(stage.epochs),
-            "selected_for_infer": stage.selected_for_infer,
-            "selected_for_infer_authority": "explicit_train_state_field",
-            "checkpoint_last": str((Path("train") / stage.stage_id / "checkpoints" / stage.checkpoint_name).as_posix()),
-            "checkpoint_selected": str((Path("train") / stage.stage_id / "checkpoints" / stage.checkpoint_name).as_posix()),
+            'stage_id': stage.stage_id,
+            'epoch': int(stage.epochs),
+            'selected_for_infer': stage.selected_for_infer,
+            'selected_for_infer_authority': 'explicit_train_state_field',
+            'checkpoint_last': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()),
+            'checkpoint_selected': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()),
+            'global_step': int(iteration_index),
+            'extra_refresh_interval_iters': int(current_refresh_interval),
+            'runtime_asset_source': str(config.runtime_asset_source),
+            'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete),
+            'runtime_asset_output_root': str(config.runtime_asset_output_root),
         }
         _write_json(train_state_path, train_state)
         torch.save(
             {
-                "stage_id": stage.stage_id,
-                "epoch": int(stage.epochs),
-                "projector_state_dict": projector.state_dict(),
-                "projector_config": {
-                    "input_dim": int(config.projector.input_dim),
-                    "hidden_dim": int(config.projector.hidden_dim),
-                    "output_dim": int(config.projector.output_dim),
-                    "dropout": float(config.projector.dropout),
-                    "use_layernorm": bool(config.projector.use_layernorm),
+                'stage_id': stage.stage_id,
+                'epoch': int(stage.epochs),
+                'text_projector_state_dict': text_projector.state_dict(),
+                'text_projector_config': {
+                    'input_dim': int(config.projector.input_dim),
+                    'hidden_dim': int(config.projector.hidden_dim),
+                    'output_dim': int(config.projector.output_dim),
+                    'dropout': float(config.projector.dropout),
+                    'use_layernorm': bool(config.projector.use_layernorm),
                 },
-                "seed": int(config.seed),
-                "mode": str(config.mode),
+                'theta_T': float(theta_t.detach().cpu().item()),
+                'b_u': float(b_u.detach().cpu().item()),
+                'seed': int(config.seed),
+                'mode': str(config.mode),
+                'global_step': int(iteration_index),
+                'extra_refresh_interval_iters': int(current_refresh_interval),
             },
             checkpoint_path,
         )
         stage_reports.append(
-                {
-                    "stage_id": stage.stage_id,
-                    "responsibility_records_path": stage.responsibility_relpath,
-                    "train_state_path": stage.train_state_relpath,
-                    "checkpoint_last_path": str((Path("train") / stage.stage_id / "checkpoints" / stage.checkpoint_name).as_posix()),
-                    "record_count_output": int(len(cache.by_trajectory_id)),
-                    "loss_mean": float(np.mean(losses)) if losses else 0.0,
-                    "loss_last": float(losses[-1]) if losses else 0.0,
-                    "em_subiterations": int(max(1, int(config.em_subiterations))),
-                    "subiteration_trace_sample": stage_trace_sample,
-                }
+            {
+                'stage_id': stage.stage_id,
+                'responsibility_records_path': stage.responsibility_relpath,
+                'train_state_path': stage.train_state_relpath,
+                'checkpoint_last_path': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()),
+                'record_count_output': int(len(cache.by_trajectory_id)),
+                'loss_mean': float(np.mean(losses)) if losses else 0.0,
+                'loss_last': float(losses[-1]) if losses else 0.0,
+                'optimization_loss_mean': float(np.mean(optimization_losses)) if optimization_losses else 0.0,
+                'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0,
+                'em_subiterations': int(max(1, int(config.em_subiterations))),
+                'subiteration_trace_sample': stage_trace_sample,
+                'runtime_extra_cache_enabled': bool(str(stage.stage_id) == 'softem_aug'),
+                'runtime_extra_cache_clip_count': int(len(runtime_extra_cache)),
+                'extra_refresh_interval_iters': int(current_refresh_interval),
+                'batch_budget': int(batch_budget),
+                'budget_policy': 'dynamic_sum_Tv_times_Kv',
+                'loss_normalization': 'effective_responsibility_unit_count',
+                'micro_batch_count_per_epoch': int(final_epoch_plan.batch_count) if final_epoch_plan is not None else 0,
+            }
         )
         current_checkpoint = checkpoint_path
 
         if audit_callback is not None:
             audit_callback(
                 {
-                    "dataset_name": str(config.dataset_name),
-                    "trajectory_source_branch": str(config.trajectory_source_branch),
-                    "stage_id": str(stage.stage_id),
-                    "snapshot_id": "stage_end",
-                    "phase": "stage_end",
-                    "output_root": output_root,
-                    "materialized_samples": materialized_samples,
-                    "projector": projector,
-                    "responsibility_cache": cache,
-                    "device": str(device),
-                    "temperature": float(config.temperature),
-                    "seed": int(config.seed),
-                    "mode": str(config.mode),
-                    "train_state": train_state,
+                    'dataset_name': str(config.dataset_name),
+                    'trajectory_source_branch': str(config.trajectory_source_branch),
+                    'stage_id': str(stage.stage_id),
+                    'snapshot_id': 'stage_end',
+                    'phase': 'stage_end',
+                    'output_root': output_root,
+                    'materialized_samples': materialized_samples,
+                    'text_projector': text_projector,
+                    'projector': text_projector,
+                    'theta_T': theta_t,
+                    'b_u': b_u,
+                    'responsibility_cache': cache,
+                    'device': str(device),
+                    'temperature': float(_compute_t_dis(theta_t).detach().cpu().item()),
+                    'seed': int(config.seed),
+                    'mode': str(config.mode),
+                    'train_state': train_state,
                 }
             )
 
-    selected_checkpoint_path = stage_reports[-1]["checkpoint_last_path"] if stage_reports else ""
+    selected_checkpoint_path = stage_reports[-1]['checkpoint_last_path'] if stage_reports else ''
     return {
-        "stage_reports": stage_reports,
-        "record_count_input": int(len(materialized_samples)),
-        "record_count_trainable": int(len(examples)),
-        "record_count_output": int(len(cache.by_trajectory_id)),
-        "coverage_ratio_trainable": float(len(examples) / float(len(materialized_samples))) if materialized_samples else 0.0,
-        "skipped_reason_histogram": skipped,
-        "selected_checkpoint_path": selected_checkpoint_path,
+        'stage_reports': stage_reports,
+        'record_count_input': int(len(materialized_samples)),
+        'record_count_trainable': int(len(examples)),
+        'record_count_output': int(len(cache.by_trajectory_id)),
+        'coverage_ratio_trainable': float(len(examples) / float(len(materialized_samples))) if materialized_samples else 0.0,
+        'skipped_reason_histogram': skipped,
+        'selected_checkpoint_path': selected_checkpoint_path,
     }

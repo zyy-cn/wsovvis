@@ -128,6 +128,7 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
     carrier_rows: List[Record] = []
     frame_rows: List[Record] = []
     geom_rows: List[Record] = []
+    pooled_rows: List[Record] = []
     weak_rows: List[Record] = []
     gt_rows: List[Record] = []
 
@@ -144,6 +145,11 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
         frame_payload[0, 0, idx % 6] = 1.0
         frame_path = frame_dir / "payload" / f"clip_{clip_id:03d}.npz"
         np.savez(frame_path, slot_0=frame_payload[0])
+        pooled_payload = np.zeros((1, 768), dtype=np.float16)
+        pooled_payload[0, idx % 6] = 1.0
+        pooled_path = frame_dir / "payload" / f"clip_{clip_id:03d}_pooled.npz"
+        np.savez(pooled_path, frame_pooled=pooled_payload)
+        pooled_rows.append({"trajectory_id": trajectory_id, "clip_id": str(clip_id), "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": f"payload/{pooled_path.name}#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"})
 
         carrier_rows.append(
             {
@@ -236,6 +242,7 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
     _write_jsonl(carrier_dir / "carrier_records.jsonl", carrier_rows)
     _write_jsonl(frame_dir / "frame_records.jsonl", frame_rows)
     _write_jsonl(frame_dir / "frame_geom_records.jsonl", geom_rows)
+    _write_jsonl(frame_dir / "pooled_frame_records.jsonl", pooled_rows)
     _write_json(root / "weak_labels" / "weak_labels_train.json", weak_rows)
     _write_jsonl(exports_dir / "trajectory_records.jsonl", trajectory_rows)
     _write_jsonl(audit_dir / "trajectory_gt_match_train_mainline.jsonl", gt_rows)
@@ -451,17 +458,17 @@ def _derive_closed_set_samples(
 
 def _load_projector_from_checkpoint(checkpoint_path: Path, device: str = "cpu") -> Projector:
     checkpoint = torch.load(checkpoint_path, map_location=torch.device(device))
-    config_payload = dict(checkpoint.get("projector_config", {}))
+    config_payload = dict(checkpoint.get("text_projector_config", {}))
     projector = Projector(
         ProjectorConfig(
-            input_dim=int(config_payload.get("input_dim", 768)),
-            hidden_dim=int(config_payload.get("hidden_dim", 512)),
-            output_dim=int(config_payload.get("output_dim", 512)),
+            input_dim=int(config_payload.get("input_dim", 512)),
+            hidden_dim=int(config_payload.get("hidden_dim", 1024)),
+            output_dim=int(config_payload.get("output_dim", 768)),
             dropout=float(config_payload.get("dropout", 0.0)),
             use_layernorm=bool(config_payload.get("use_layernorm", True)),
         )
     ).to(device)
-    projector.load_state_dict(checkpoint["projector_state_dict"])
+    projector.load_state_dict(checkpoint["text_projector_state_dict"])
     projector.eval()
     return projector
 
@@ -486,7 +493,7 @@ def _evaluate_closed_set_rows(
         projector=projector,
         topk=TOPK,
         gt_sidecar_lookup=gt_lookup,
-        temperature=TEMPERATURE,
+        t_dis_init=TEMPERATURE,
         previous_by_trajectory=previous_by_trajectory,
     )
     for row in rows:
@@ -631,7 +638,7 @@ def _make_summary(
             "aug_epochs": SMOKE_AUG_EPOCHS,
             "aug_lr": SMOKE_AUG_LR,
             "em_subiterations": SMOKE_EM_SUBITERATIONS,
-            "temperature": TEMPERATURE,
+            "t_dis": TEMPERATURE,
             "topk": TOPK,
         },
         "stage_summaries": {
@@ -961,7 +968,7 @@ def test_closed_set_bounded_experiment_smoke(tmp_path: Path) -> None:
             smoke=True,
             epochs=SMOKE_PREALIGN_EPOCHS,
             learning_rate=SMOKE_PREALIGN_LR,
-            temperature=TEMPERATURE,
+            t_dis_init=TEMPERATURE,
         ),
     )
     softem_result = run_soft_em(
@@ -974,7 +981,7 @@ def test_closed_set_bounded_experiment_smoke(tmp_path: Path) -> None:
             device="cpu",
             seed=0,
             smoke=True,
-            temperature=TEMPERATURE,
+            t_dis_init=TEMPERATURE,
             em_subiterations=SMOKE_EM_SUBITERATIONS,
             base_epochs=SMOKE_BASE_EPOCHS,
             aug_epochs=SMOKE_AUG_EPOCHS,

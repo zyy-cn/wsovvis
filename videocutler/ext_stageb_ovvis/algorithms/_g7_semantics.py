@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch.nn.functional as F
 
 from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_locator
-from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import (
-    read_feature_vector,
-    reconstruct_valid_token_mask_from_geometry,
-)
+from videocutler.ext_stageb_ovvis.banks.frame_pooled_bank import read_pooled_frame_vector
 from videocutler.ext_stageb_ovvis.banks.text_bank import read_text_prototype_records, resolve_text_prototype
 
 
@@ -27,11 +23,6 @@ def _normalize(vec: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:
         return None
     return (vec / norm).astype(np.float32)
 
-
-def _coerce_token_feature_matrix(feature: np.ndarray, grid_h: int, grid_w: int) -> Optional[np.ndarray]:
-    feature = np.asarray(feature, dtype=np.float32)
-    if feature.ndim != 2:
-        return None
     grid_tokens = int(grid_h) * int(grid_w)
     if int(feature.shape[0]) == grid_tokens:
         return feature
@@ -40,16 +31,52 @@ def _coerce_token_feature_matrix(feature: np.ndarray, grid_h: int, grid_w: int) 
     return None
 
 
+def _resolve_module_device(module: Any) -> torch.device:
+    if hasattr(module, 'parameters'):
+        try:
+            return next(module.parameters()).device
+        except StopIteration:
+            pass
+    return torch.device('cpu')
+
+
+def _coerce_temperature_tensor(temperature: float | torch.Tensor, *, device: torch.device) -> torch.Tensor:
+    if isinstance(temperature, torch.Tensor):
+        temp = temperature.to(device=device, dtype=torch.float32)
+    else:
+        temp = torch.tensor(float(temperature), device=device, dtype=torch.float32)
+    return torch.clamp(temp, min=1e-6)
+
+
+def _project_candidate_matrix(*, projector: Any, candidate_matrix: np.ndarray, device: torch.device) -> torch.Tensor:
+    candidate_np = np.asarray(candidate_matrix, dtype=np.float32)
+    if candidate_np.ndim != 2:
+        raise ValueError('candidate_matrix must be rank-2')
+    candidate_tensor = torch.from_numpy(candidate_np).to(device=device, dtype=torch.float32)
+    input_dim = int(getattr(getattr(projector, 'config', None), 'input_dim', candidate_tensor.shape[-1]))
+    output_dim = int(getattr(getattr(projector, 'config', None), 'output_dim', candidate_tensor.shape[-1]))
+    if int(candidate_tensor.shape[-1]) == input_dim:
+        candidate_tensor = projector(candidate_tensor)
+    elif int(candidate_tensor.shape[-1]) == output_dim:
+        candidate_tensor = F.normalize(candidate_tensor, p=2.0, dim=-1)
+    else:
+        raise ValueError(
+            f'candidate_matrix width {int(candidate_tensor.shape[-1])} does not match projector input/output dims '
+            f'({input_dim}, {output_dim})'
+        )
+    return F.normalize(candidate_tensor, p=2.0, dim=-1)
+
+
 def load_text_vocab(output_root: Path) -> Tuple[List[int], List[Record], np.ndarray]:
-    text_records_path = output_root / "text_bank" / "text_prototype_records.jsonl"
+    text_records_path = output_root / 'text_bank' / 'text_prototype_records.jsonl'
     records = read_text_prototype_records(text_records_path)
     raw_ids: List[int] = []
     vectors: List[np.ndarray] = []
     for record in records:
-        raw_ids.append(int(record["raw_id"]))
+        raw_ids.append(int(record['raw_id']))
         vectors.append(np.asarray(resolve_text_prototype(text_records_path, record), dtype=np.float32))
     if not vectors:
-        raise RuntimeError("text bank is empty")
+        raise RuntimeError('text bank is empty')
     matrix = np.stack(vectors, axis=0).astype(np.float32)
     return raw_ids, records, matrix
 
@@ -61,53 +88,36 @@ def load_combined_evidence(
     dataset_name: str,
     trajectory_source_branch: str,
 ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
-    if trajectory_source_branch == "mainline":
-        carrier_parent = output_root / "carrier_bank" / dataset_name
-    elif trajectory_source_branch == "gt_upper_bound":
-        carrier_parent = output_root / "carrier_bank_gt" / dataset_name
+    if trajectory_source_branch == 'mainline':
+        carrier_parent = output_root / 'carrier_bank' / dataset_name
+    elif trajectory_source_branch == 'gt_upper_bound':
+        carrier_parent = output_root / 'carrier_bank_gt' / dataset_name
     else:
-        raise ValueError(f"unsupported trajectory_source_branch: {trajectory_source_branch}")
-    frame_parent = output_root / "frame_bank" / dataset_name
+        raise ValueError(f'unsupported trajectory_source_branch: {trajectory_source_branch}')
+    pooled_frame_parent = output_root / 'frame_bank' / dataset_name
 
-    carrier_record = sample.get("carrier_record")
+    carrier_record = sample.get('carrier_record')
     if not isinstance(carrier_record, Mapping):
-        raise ValueError("missing carrier_record")
-    z_norm_path = str(carrier_record.get("z_norm_path", ""))
+        raise ValueError('missing carrier_record')
+    z_norm_path = str(carrier_record.get('z_norm_path', ''))
     if not z_norm_path:
-        raise ValueError("missing carrier z_norm_path")
+        raise ValueError('missing carrier z_norm_path')
     carrier_vec = np.asarray(read_vector_from_locator(carrier_parent, z_norm_path), dtype=np.float32)
 
-    frame_rows = list(sample.get("frame_feature_rows", []))
-    geom_rows = list(sample.get("frame_geometry_rows", []))
-    if not frame_rows or len(frame_rows) != len(geom_rows):
-        raise ValueError("frame evidence rows missing or mismatched")
+    pooled_frame_record = sample.get('pooled_frame_record')
+    if not isinstance(pooled_frame_record, Mapping):
+        raise ValueError('missing pooled_frame_record')
+    frame_pooled_path = str(pooled_frame_record.get('frame_pooled_path', ''))
+    if not frame_pooled_path:
+        raise ValueError('missing pooled_frame_record.frame_pooled_path')
+    frame_vec = np.asarray(read_pooled_frame_vector(pooled_frame_parent, frame_pooled_path), dtype=np.float32)
 
-    frame_vectors: List[np.ndarray] = []
-    for frame_row, geom_row in zip(frame_rows, geom_rows):
-        feat_path = str(frame_row.get("feat_path", ""))
-        if not feat_path:
-            raise ValueError("missing frame feat_path")
-        feature = read_feature_vector(frame_parent, feat_path)
-        token_matrix = _coerce_token_feature_matrix(
-            feature,
-            int(geom_row["grid_h"]),
-            int(geom_row["grid_w"]),
-        )
-        if token_matrix is None:
-            raise ValueError("frame token matrix shape mismatch")
-        valid_mask = reconstruct_valid_token_mask_from_geometry(geom_row).astype(np.float32).reshape(-1)
-        denom = float(np.sum(valid_mask))
-        if denom <= 1e-12:
-            raise ValueError("empty frame valid token mask")
-        frame_vec = np.sum(token_matrix * valid_mask[:, None], axis=0).astype(np.float32) / denom
-        frame_vectors.append(frame_vec)
-
-    frame_stack = np.stack(frame_vectors, axis=0).astype(np.float32)
-    frame_vec = np.mean(frame_stack, axis=0).astype(np.float32)
-    combined = np.mean(np.stack([_normalize(carrier_vec), _normalize(frame_vec)], axis=0), axis=0)
-    if combined is None:
-        raise ValueError("combined evidence is zero norm")
-    return carrier_vec.astype(np.float32), [np.asarray(vec, dtype=np.float32) for vec in frame_vectors], frame_vec.astype(np.float32), combined.astype(np.float32)
+    carrier_norm = _normalize(carrier_vec)
+    frame_norm = _normalize(frame_vec)
+    if carrier_norm is None or frame_norm is None:
+        raise ValueError('combined evidence is zero norm')
+    combined = np.mean(np.stack([carrier_norm, frame_norm], axis=0), axis=0).astype(np.float32)
+    return carrier_vec.astype(np.float32), [], frame_vec.astype(np.float32), combined.astype(np.float32)
 
 
 def fuse_carrier_frame_logits_torch(
@@ -116,31 +126,29 @@ def fuse_carrier_frame_logits_torch(
     carrier_vec: np.ndarray,
     frame_vec: np.ndarray,
     candidate_matrix: np.ndarray,
-    temperature: float,
+    temperature: float | torch.Tensor,
     lambda_frame: float = 0.25,
     frame_vectors: Optional[Sequence[np.ndarray]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    candidate_matrix = np.asarray(candidate_matrix, dtype=np.float32)
-    if candidate_matrix.ndim != 2:
-        raise ValueError("candidate_matrix must be rank-2")
-    device = next(projector.parameters()).device if hasattr(projector, "parameters") else torch.device("cpu")
+    device = _resolve_module_device(projector)
+    temperature_tensor = _coerce_temperature_tensor(temperature, device=device)
+    candidate_tensor = _project_candidate_matrix(projector=projector, candidate_matrix=candidate_matrix, device=device)
     carrier_tensor = torch.from_numpy(np.asarray(carrier_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-    candidate_tensor = torch.from_numpy(candidate_matrix.astype(np.float32)).to(device=device, dtype=torch.float32)
-    candidate_tensor = F.normalize(candidate_tensor, p=2.0, dim=-1)
-    carrier_q = projector(carrier_tensor)
-    carrier_logits = torch.matmul(carrier_q, candidate_tensor.t()).squeeze(0) / float(temperature)
+    carrier_tensor = F.normalize(carrier_tensor, p=2.0, dim=-1)
+    carrier_logits = torch.matmul(carrier_tensor, candidate_tensor.t()).squeeze(0) / temperature_tensor
     if frame_vectors is not None:
         frame_list = [np.asarray(vec, dtype=np.float32) for vec in frame_vectors]
-        if not frame_list:
-            raise ValueError("frame_vectors cannot be empty when provided")
-        frame_tensor = torch.from_numpy(np.stack(frame_list, axis=0).astype(np.float32)).to(device=device, dtype=torch.float32)
-        frame_q = projector(frame_tensor)
-        frame_logits = torch.matmul(frame_q, candidate_tensor.t()) / float(temperature)
-        frame_logits = frame_logits.mean(dim=0)
-    else:
+        if frame_list:
+            frame_tensor = torch.from_numpy(np.stack(frame_list, axis=0).astype(np.float32)).to(device=device, dtype=torch.float32)
+            frame_tensor = F.normalize(frame_tensor, p=2.0, dim=-1)
+            frame_logits = torch.matmul(frame_tensor, candidate_tensor.t()) / temperature_tensor
+            frame_logits = frame_logits.mean(dim=0)
+        else:
+            frame_vectors = None
+    if frame_vectors is None:
         frame_tensor = torch.from_numpy(np.asarray(frame_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-        frame_q = projector(frame_tensor)
-        frame_logits = torch.matmul(frame_q, candidate_tensor.t()).squeeze(0) / float(temperature)
+        frame_tensor = F.normalize(frame_tensor, p=2.0, dim=-1)
+        frame_logits = torch.matmul(frame_tensor, candidate_tensor.t()).squeeze(0) / temperature_tensor
     fused_logits = (1.0 - float(lambda_frame)) * carrier_logits + float(lambda_frame) * frame_logits
     return carrier_logits, frame_logits, fused_logits
 
@@ -151,7 +159,7 @@ def fuse_carrier_frame_logits(
     carrier_vec: np.ndarray,
     frame_vec: np.ndarray,
     candidate_matrix: np.ndarray,
-    temperature: float,
+    temperature: float | torch.Tensor,
     lambda_frame: float = 0.25,
     frame_vectors: Optional[Sequence[np.ndarray]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -179,17 +187,17 @@ def observed_mass_loss(
     unknown_logit: torch.Tensor,
 ) -> torch.Tensor:
     if logits.ndim != 1:
-        raise ValueError("logits must be rank-1")
+        raise ValueError('logits must be rank-1')
     observed = list(dict.fromkeys(int(i) for i in observed_indices))
     if not observed:
-        raise ValueError("observed_indices cannot be empty")
+        raise ValueError('observed_indices cannot be empty')
     observed_logits = logits[torch.tensor(observed, device=logits.device, dtype=torch.long)]
     all_logits = torch.cat([unknown_logit.reshape(1), logits], dim=0)
     return torch.logsumexp(all_logits, dim=0) - torch.logsumexp(observed_logits, dim=0)
 
 
 def _stage_allows_extra(stage_id: str) -> bool:
-    return str(stage_id) == "softem_aug"
+    return str(stage_id) == 'softem_aug'
 
 
 def build_stage_domain_indices(
@@ -219,9 +227,9 @@ def refine_responsibilities(
     coverage_bonus: float = 0.1,
     coverage_epsilon: float = 1.0,
     extra_penalty: float = 0.1,
-    unknown_bias: float = 0.0,
+    b_u_value: float = 0.0,
     coverage_context: Optional[Mapping[str, float]] = None,
-) -> Tuple[Dict[str, float], Dict[str, float], List[int]]:
+) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Any]]:
     domain_ids, known_ids, extra_ids = build_stage_domain_indices(
         candidate_ids_known,
         candidate_ids_extra,
@@ -229,37 +237,45 @@ def refine_responsibilities(
     )
     model_probs_arr = np.asarray(model_probs, dtype=np.float64)
     if model_probs_arr.ndim != 1 or int(model_probs_arr.shape[0]) != len(domain_ids):
-        raise ValueError("model probability shape mismatch")
+        raise ValueError('model probability shape mismatch')
     init = {str(key): max(0.0, float(value)) for key, value in dict(initial_mass).items()}
-    unknown_init = max(0.0, float(init.get("unknown", 0.0)))
-    base_unknown = math.log(max(unknown_init, 1e-12)) + float(unknown_bias)
-    scores: Dict[str, float] = {"unknown": base_unknown}
+    unknown_init = max(0.0, float(init.get('unknown', 0.0)))
+    base_unknown = math.log(max(unknown_init, 1e-12)) + float(b_u_value)
+    scores: Dict[str, float] = {'unknown': base_unknown}
     coverage_bonus_applied_to: List[int] = []
+    extra_penalty_applied_to: List[int] = []
     coverage_map = {str(key): max(0.0, float(value)) for key, value in dict(coverage_context or {}).items()}
-    known_total_mass = float(sum(max(0.0, float(coverage_map.get(str(int(raw_id)), init.get(str(int(raw_id)), 0.0)))) for raw_id in known_ids))
-    known_denom = float(known_total_mass if known_total_mass > 1e-12 else max(len(known_ids), 1))
-
     for raw_id, model_prob in zip(domain_ids, model_probs_arr.tolist()):
-        init_mass = max(0.0, float(init.get(str(int(raw_id)), 0.0)))
-        score = math.log(max(model_prob, 1e-12)) + math.log(max(init_mass, 1e-12))
+        init_mass_value = max(0.0, float(init.get(str(int(raw_id)), 0.0)))
+        score = math.log(max(model_prob, 1e-12)) + math.log(max(init_mass_value, 1e-12))
         if int(raw_id) in known_ids:
-            coverage_mass = max(0.0, float(coverage_map.get(str(int(raw_id)), init_mass)))
-            coverage_share = coverage_mass / known_denom
-            coverage_term = float(coverage_bonus) * math.log(float(coverage_epsilon) + max(coverage_share, 0.0))
+            coverage_mass = max(0.0, float(coverage_map.get(str(int(raw_id)), init_mass_value)))
+            coverage_term = float(coverage_bonus) * math.log(float(coverage_epsilon) + max(coverage_mass, 0.0))
             score = score + coverage_term
             coverage_bonus_applied_to.append(int(raw_id))
         elif int(raw_id) in extra_ids:
             score = score - float(extra_penalty)
+            extra_penalty_applied_to.append(int(raw_id))
         scores[str(int(raw_id))] = score
 
-    ordered_keys = ["unknown", *[str(int(raw_id)) for raw_id in domain_ids]]
+    ordered_keys = ['unknown', *[str(int(raw_id)) for raw_id in domain_ids]]
     score_tensor = torch.tensor([scores[key] for key in ordered_keys], dtype=torch.float64)
     probs = torch.softmax(score_tensor, dim=0).cpu().numpy().astype(np.float64)
-    final_mass = {key: float(prob) for key, prob in zip(ordered_keys, probs.tolist())}
-    init_mass = {key: float(max(0.0, float(init.get(key, 0.0)))) for key in ordered_keys}
-    init_mass = _normalize_mass_dict(init_mass) if init_mass else {"unknown": 1.0}
-    final_mass = _normalize_mass_dict(final_mass)
-    return final_mass, init_mass, sorted(set(coverage_bonus_applied_to))
+    refined_final_mass = {key: float(prob) for key, prob in zip(ordered_keys, probs.tolist())}
+    refined_init_mass = {key: float(max(0.0, float(init.get(key, 0.0)))) for key in ordered_keys}
+    refined_init_mass = _normalize_mass_dict(refined_init_mass) if refined_init_mass else {'unknown': 1.0}
+    refined_final_mass = _normalize_mass_dict(refined_final_mass)
+    refine_trace: Dict[str, Any] = {
+        'domain_ids': [int(x) for x in domain_ids],
+        'known_ids': [int(x) for x in known_ids],
+        'extra_ids': [int(x) for x in extra_ids],
+        'coverage_bonus_applied_to': sorted(set(int(x) for x in coverage_bonus_applied_to)),
+        'extra_penalty_applied_to': sorted(set(int(x) for x in extra_penalty_applied_to)),
+        'b_u': float(b_u_value),
+        'init_mass': dict(refined_init_mass),
+        'final_mass': dict(refined_final_mass),
+    }
+    return refined_init_mass, refined_final_mass, refine_trace
 
 
 def _normalize_mass_dict(mass: Mapping[str, float]) -> Dict[str, float]:
@@ -270,5 +286,5 @@ def _normalize_mass_dict(mass: Mapping[str, float]) -> Dict[str, float]:
         normalized[str(key)] = v
         total += v
     if total <= 0.0:
-        return {"unknown": 1.0}
+        return {'unknown': 1.0}
     return {key: float(value / total) for key, value in normalized.items()}

@@ -42,6 +42,13 @@ def _setup_minimal_softem_fixture(tmp_path: Path) -> list[dict]:
         frame_dir / "frame_records.jsonl",
         [{"clip_id": "7", "frame_index": 0, "feat_path": "payload/clip_7_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
     )
+    pooled_vec = np.eye(1, 768, 0, dtype=np.float32)[0]
+    np.savez(frame_dir / "payload" / "clip_7_pooled.npz", frame_pooled=np.stack([pooled_vec], axis=0).astype(np.float16))
+    _write_jsonl(
+        frame_dir / "pooled_frame_records.jsonl",
+        [{"trajectory_id": "traj-1", "clip_id": "7", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_7_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"}],
+    )
+
     _write_jsonl(
         frame_dir / "frame_geom_records.jsonl",
         [
@@ -76,11 +83,11 @@ def _setup_minimal_softem_fixture(tmp_path: Path) -> list[dict]:
         {
             "stage_id": "prealign",
             "epoch": 1,
-            "projector_state_dict": projector.state_dict(),
-            "projector_config": {
-                "input_dim": 768,
-                "hidden_dim": 512,
-                "output_dim": 512,
+            "text_projector_state_dict": projector.state_dict(),
+            "text_projector_config": {
+                "input_dim": 512,
+                "hidden_dim": 1024,
+                "output_dim": 768,
                 "dropout": 0.0,
                 "use_layernorm": True,
             },
@@ -110,6 +117,7 @@ def _setup_minimal_softem_fixture(tmp_path: Path) -> list[dict]:
             "trajectory_record": {"video_id": 8},
             "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
             "weak_label_record": {"observed_raw_ids": [1]},
+            "pooled_frame_record": {"frame_pooled_path": "payload/clip_7_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
             "frame_feature_rows": [{"feat_path": "payload/clip_7_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
             "frame_geometry_rows": [
                 {
@@ -163,6 +171,10 @@ def test_softem_base_then_aug_writes_canonical_artifacts(tmp_path: Path) -> None
             aug_epochs=1,
             base_learning_rate=1e-4,
             aug_learning_rate=1e-4,
+            runtime_asset_source="authoritative_remote_canonical_assets",
+            runtime_asset_source_local_incomplete=True,
+            runtime_asset_output_root="/remote/wsovvis",
+            batch_budget=1,
         ),
     )
 
@@ -175,3 +187,12 @@ def test_softem_base_then_aug_writes_canonical_artifacts(tmp_path: Path) -> None
     assert (tmp_path / "train" / "softem_aug" / "train_state.json").is_file()
     assert (tmp_path / "train" / "softem_aug" / "responsibility_records.jsonl").is_file()
     assert (tmp_path / "train" / "softem_aug" / "checkpoints" / "softem_aug_last.pth").is_file()
+    base_state = json.loads((tmp_path / "train" / "softem_base" / "train_state.json").read_text(encoding="utf-8"))
+    aug_state = json.loads((tmp_path / "train" / "softem_aug" / "train_state.json").read_text(encoding="utf-8"))
+    assert base_state["runtime_asset_source"] == "authoritative_remote_canonical_assets"
+    assert base_state["runtime_asset_source_local_incomplete"] is True
+    assert base_state["runtime_asset_output_root"] == "/remote/wsovvis"
+    assert aug_state["runtime_asset_source"] == "authoritative_remote_canonical_assets"
+    assert result["stage_reports"][0]["batch_budget"] == 1
+    assert result["stage_reports"][0]["budget_policy"] == "dynamic_sum_Tv_times_Kv"
+    assert result["stage_reports"][0]["loss_normalization"] == "effective_responsibility_unit_count"

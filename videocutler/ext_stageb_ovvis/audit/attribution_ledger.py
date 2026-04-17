@@ -64,7 +64,7 @@ class AttributionLedgerBuffer:
             raise ValueError("audit snapshot missing stage_id")
         if projector is None:
             raise ValueError("audit snapshot missing projector")
-        temperature = float(context.get("temperature", 0.07))
+        t_dis = float(context.get("t_dis", context.get("temperature", 0.07)))
         rows = build_attribution_rows(
             output_root=self.output_root,
             dataset_name=self.dataset_name,
@@ -75,7 +75,7 @@ class AttributionLedgerBuffer:
             projector=projector,
             topk=self.topk,
             gt_sidecar_lookup=self.gt_lookup,
-            temperature=temperature,
+            temperature=t_dis,
             previous_by_trajectory=self._previous_by_trajectory,
         )
         for row in rows:

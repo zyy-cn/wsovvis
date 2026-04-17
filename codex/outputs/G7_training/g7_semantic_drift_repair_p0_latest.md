@@ -25,8 +25,8 @@ Key repaired behaviors:
 - softem subiterations are now iterative rather than no-op
 
 Canonical small artifacts pulled back:
-- `codex/outputs/g7_training/prealign_contract_check.json`
-- `codex/outputs/g7_training/softem_contract_check.json`
+- `codex/outputs/G7_training/prealign_contract_check.json`
+- `codex/outputs/G7_training/softem_contract_check.json`
 - `train/prealign/train_state.json`
 - `train/prealign/proxy_records.jsonl`
 - `train/softem_base/train_state.json`

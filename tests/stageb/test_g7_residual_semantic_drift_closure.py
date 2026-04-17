@@ -68,6 +68,8 @@ def _prepare_evidence_fixture(root: Path) -> None:
     frame_b = np.zeros((1, 4, 768), dtype=np.float16)
     frame_b[0, 0, 2] = 1.0
     np.savez(frame_dir / "payload" / "clip_b_feats.npz", slot_0=frame_b[0])
+    np.savez(frame_dir / "payload" / "clip_10_pooled.npz", frame_pooled=np.asarray([[1.0, 0.0, 0.0, 0.0] + [0.0] * 764], dtype=np.float16))
+    np.savez(frame_dir / "payload" / "clip_11_pooled.npz", frame_pooled=np.asarray([[0.0, 1.0, 0.0, 0.0] + [0.0] * 764], dtype=np.float16))
 
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
@@ -95,6 +97,13 @@ def _prepare_evidence_fixture(root: Path) -> None:
         [
             {"clip_id": "10", "frame_index": 0, "feat_path": "payload/clip_a_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
             {"clip_id": "11", "frame_index": 0, "feat_path": "payload/clip_b_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
+        ],
+    )
+    _write_jsonl(
+        frame_dir / "pooled_frame_records.jsonl",
+        [
+            {"trajectory_id": "traj-a", "clip_id": "10", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_10_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
+            {"trajectory_id": "traj-b", "clip_id": "11", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_11_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
         ],
     )
     _write_jsonl(
@@ -210,7 +219,7 @@ def test_residual_closure_bounded_smoke_regression(tmp_path: Path) -> None:
             smoke=True,
             epochs=1,
             learning_rate=1e-4,
-            temperature=0.07,
+            t_dis_init=0.07,
         ),
     )
     softem_result = run_soft_em(
@@ -223,7 +232,7 @@ def test_residual_closure_bounded_smoke_regression(tmp_path: Path) -> None:
             device="cpu",
             seed=0,
             smoke=True,
-            temperature=0.07,
+            t_dis_init=0.07,
             em_subiterations=2,
             base_epochs=1,
             aug_epochs=1,

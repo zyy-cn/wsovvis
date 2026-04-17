@@ -131,6 +131,31 @@ def _prepare_fixture(root: Path) -> None:
             },
         ],
     )
+    pooled = np.zeros((2, 768), dtype=np.float16)
+    pooled[0, 4] = 1.0
+    pooled[1, 3] = 1.0
+    np.savez(frame_dir / "payload" / "clips_pooled.npz", pooled=pooled)
+    _write_jsonl(
+        frame_dir / "pooled_frame_records.jsonl",
+        [
+            {
+                "trajectory_id": "traj-a",
+                "clip_id": "10",
+                "trajectory_source_branch": "mainline",
+                "frame_count": 1,
+                "frame_pooled_path": "payload/clips_pooled.npz#pooled[0]",
+                "path_base_mode": "artifact_parent_dir",
+            },
+            {
+                "trajectory_id": "traj-b",
+                "clip_id": "11",
+                "trajectory_source_branch": "mainline",
+                "frame_count": 1,
+                "frame_pooled_path": "payload/clips_pooled.npz#pooled[1]",
+                "path_base_mode": "artifact_parent_dir",
+            },
+        ],
+    )
     _write_json(
         root / "weak_labels" / "weak_labels_train.json",
         [
@@ -191,14 +216,16 @@ def _prepare_fixture(root: Path) -> None:
             {
                 "stage_id": stage_name,
                 "epoch": 1,
-                "projector_state_dict": projector.state_dict(),
-                "projector_config": {
-                    "input_dim": 768,
-                    "hidden_dim": 512,
-                    "output_dim": 512,
+                "text_projector_state_dict": projector.state_dict(),
+                "text_projector_config": {
+                    "input_dim": 512,
+                    "hidden_dim": 1024,
+                    "output_dim": 768,
                     "dropout": 0.0,
                     "use_layernorm": True,
                 },
+                "theta_T": 0.07,
+                "b_u": 0.0,
                 "seed": 0,
             },
             stage_dir / f"{stage_name if stage_name != 'softem_base' else 'softem_base'}_last.pth",
@@ -221,7 +248,7 @@ def test_stagewise_projector_quality_audit_emits_artifacts_and_transition_summar
         smoke_max_trajectories=8,
         topk=5,
         gt_sidecar_dir="audit",
-        temperature=0.07,
+        t_dis_override=0.07,
     )
     assert payload["status"] == "PASS"
     assert (tmp_path / "train" / "audit" / "prealign_projector_quality.json").is_file()
@@ -231,3 +258,27 @@ def test_stagewise_projector_quality_audit_emits_artifacts_and_transition_summar
     assert (tmp_path / "codex" / "outputs" / "G7_training" / "g7_stagewise_projector_quality_latest.json").is_file()
     assert payload["stage_summaries"]["prealign"]["gt_row_count"] == 2
     assert payload["transition_summary"]["prealign_to_softem_base"]["compared_trajectory_count"] == 2
+
+
+def test_stagewise_projector_quality_rejects_old_checkpoint_semantics(tmp_path: Path) -> None:
+    _prepare_fixture(tmp_path)
+    ckpt = tmp_path / "train" / "prealign" / "checkpoints" / "prealign_last.pth"
+    payload = torch.load(ckpt, map_location=torch.device("cpu"))
+    payload.pop("text_projector_state_dict", None)
+    payload["projector_state_dict"] = {}
+    torch.save(payload, ckpt)
+    try:
+        run_projector_quality_audit(
+            output_root=tmp_path,
+            dataset_name="lvvis_train_base",
+            trajectory_source_branch="mainline",
+            smoke=True,
+            smoke_max_trajectories=8,
+            topk=5,
+            gt_sidecar_dir="audit",
+            t_dis_override=0.07,
+        )
+    except RuntimeError as exc:
+        assert "incompatible checkpoint" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("old checkpoint semantics should be rejected")
