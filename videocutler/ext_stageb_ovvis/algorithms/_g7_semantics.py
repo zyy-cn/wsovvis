@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -14,9 +15,11 @@ from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_loc
 from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import read_feature_vector, reconstruct_valid_token_mask_from_geometry
 from videocutler.ext_stageb_ovvis.banks.frame_pooled_bank import read_pooled_frame_vector
 from videocutler.ext_stageb_ovvis.banks.text_bank import read_text_prototype_records, resolve_text_prototype
+from videocutler.ext_stageb_ovvis.algorithms._memory_audit import timing_checkpoint
 
 
 Record = Dict[str, Any]
+_LOAD_EVIDENCE_AUDIT_COUNT = 0
 
 
 def _normalize(vec: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:
@@ -118,56 +121,35 @@ def _frame_bank_lookup(output_root_text: str, dataset_name: str) -> Tuple[Dict[T
     return frame_lookup, geom_lookup
 
 
-def _collect_runtime_frame_vectors(sample: Mapping[str, Any], *, output_root: Path, dataset_name: str) -> List[np.ndarray]:
-    frame_rows = list(sample.get('frame_feature_rows', []))
-    geom_rows = list(sample.get('frame_geometry_rows', []))
-    if frame_rows and len(frame_rows) == len(geom_rows):
-        paired_rows = [(dict(frame_row), dict(geom_row)) for frame_row, geom_row in zip(frame_rows, geom_rows)]
-    else:
-        trajectory_record = sample.get('trajectory_record')
-        carrier_record = sample.get('carrier_record')
-        frame_indices = []
-        if isinstance(trajectory_record, Mapping):
-            frame_indices = [int(x) for x in list(trajectory_record.get('frame_indices', []))]
-        if not frame_indices and isinstance(carrier_record, Mapping):
-            frame_indices = [int(x) for x in list(carrier_record.get('frame_indices', []))]
-        clip_id = None
-        if isinstance(sample.get('clip_id'), (str, int)):
-            clip_id = str(sample.get('clip_id'))
-        elif isinstance(trajectory_record, Mapping) and 'clip_id' in trajectory_record:
-            clip_id = str(trajectory_record.get('clip_id'))
-        elif isinstance(carrier_record, Mapping) and 'clip_id' in carrier_record:
-            clip_id = str(carrier_record.get('clip_id'))
-        if clip_id is None or not frame_indices:
-            return []
-        frame_lookup, geom_lookup = _frame_bank_lookup(str(output_root), dataset_name)
-        paired_rows = []
-        for frame_index in frame_indices:
-            key = (str(clip_id), int(frame_index))
-            frame_row = frame_lookup.get(key)
-            geom_row = geom_lookup.get(key)
-            if frame_row is None or geom_row is None:
-                continue
-            paired_rows.append((dict(frame_row), dict(geom_row)))
-    if not paired_rows:
-        return []
-    frame_parent = output_root / 'frame_bank' / dataset_name
-    vectors: List[np.ndarray] = []
-    for frame_row, geom_row in paired_rows:
-        feat_path = str(frame_row.get('feat_path', ''))
-        if not feat_path:
-            continue
-        feature = read_feature_vector(frame_parent, feat_path)
-        token_matrix = _coerce_token_feature_matrix(feature, int(geom_row['grid_h']), int(geom_row['grid_w']))
-        if token_matrix is None:
-            continue
-        valid_mask = reconstruct_valid_token_mask_from_geometry(geom_row).astype(np.float32).reshape(-1)
-        denom = float(np.sum(valid_mask))
-        if denom <= 1e-12:
-            continue
-        frame_vec = np.sum(token_matrix * valid_mask[:, None], axis=0).astype(np.float32) / denom
-        vectors.append(frame_vec.astype(np.float32))
-    return vectors
+def _carrier_parent_dir(output_root: Path, dataset_name: str, trajectory_source_branch: str) -> Path:
+    if trajectory_source_branch == 'mainline':
+        return output_root / 'carrier_bank' / dataset_name
+    if trajectory_source_branch == 'gt_upper_bound':
+        return output_root / 'carrier_bank_gt' / dataset_name
+    raise ValueError(f'unsupported trajectory_source_branch: {trajectory_source_branch}')
+
+
+def _collect_runtime_frame_vectors(
+    sample: Mapping[str, Any],
+    *,
+    output_root: Path,
+    dataset_name: str,
+    trajectory_source_branch: str,
+) -> List[np.ndarray]:
+    carrier_record = sample.get('carrier_record')
+    if not isinstance(carrier_record, Mapping):
+        raise ValueError('missing carrier_record')
+    carrier_frame_paths = carrier_record.get('frame_carriers_norm_paths', None)
+    if carrier_frame_paths is not None:
+        frame_locators = [str(locator) for locator in list(carrier_frame_paths)]
+        if not frame_locators:
+            raise ValueError('empty carrier_record.frame_carriers_norm_paths')
+        carrier_parent = _carrier_parent_dir(output_root, dataset_name, trajectory_source_branch)
+        return [
+            np.asarray(read_vector_from_locator(carrier_parent, locator), dtype=np.float32)
+            for locator in frame_locators
+        ]
+    return []
 
 
 def load_combined_evidence(
@@ -177,13 +159,13 @@ def load_combined_evidence(
     dataset_name: str,
     trajectory_source_branch: str,
 ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
-    if trajectory_source_branch == 'mainline':
-        carrier_parent = output_root / 'carrier_bank' / dataset_name
-    elif trajectory_source_branch == 'gt_upper_bound':
-        carrier_parent = output_root / 'carrier_bank_gt' / dataset_name
-    else:
-        raise ValueError(f'unsupported trajectory_source_branch: {trajectory_source_branch}')
+    global _LOAD_EVIDENCE_AUDIT_COUNT
+    carrier_parent = _carrier_parent_dir(output_root, dataset_name, trajectory_source_branch)
     pooled_frame_parent = output_root / 'frame_bank' / dataset_name
+    audit_index = int(_LOAD_EVIDENCE_AUDIT_COUNT)
+    _LOAD_EVIDENCE_AUDIT_COUNT += 1
+    audit_enabled = audit_index < 3
+    audit_t0 = time.perf_counter()
 
     carrier_record = sample.get('carrier_record')
     if not isinstance(carrier_record, Mapping):
@@ -191,13 +173,40 @@ def load_combined_evidence(
     z_norm_path = str(carrier_record.get('z_norm_path', ''))
     if not z_norm_path:
         raise ValueError('missing carrier z_norm_path')
+    if audit_enabled:
+        timing_checkpoint(
+            'load_combined_evidence_before_carrier_vec',
+            started_at=audit_t0,
+            trajectory_id=str(sample.get('trajectory_id', '')),
+            z_norm_path=z_norm_path,
+        )
     carrier_vec = np.asarray(read_vector_from_locator(carrier_parent, z_norm_path), dtype=np.float32)
+    if audit_enabled:
+        timing_checkpoint(
+            'load_combined_evidence_after_carrier_vec',
+            started_at=audit_t0,
+            trajectory_id=str(sample.get('trajectory_id', '')),
+            carrier_vec_shape=getattr(carrier_vec, 'shape', None),
+        )
 
-    frame_vectors = _collect_runtime_frame_vectors(sample, output_root=output_root, dataset_name=dataset_name)
+    frame_vectors = _collect_runtime_frame_vectors(
+        sample,
+        output_root=output_root,
+        dataset_name=dataset_name,
+        trajectory_source_branch=trajectory_source_branch,
+    )
+    if audit_enabled:
+        timing_checkpoint(
+            'load_combined_evidence_after_frame_vectors',
+            started_at=audit_t0,
+            trajectory_id=str(sample.get('trajectory_id', '')),
+            frame_vectors_count=len(frame_vectors),
+        )
     if frame_vectors:
         frame_stack = np.stack([np.asarray(vec, dtype=np.float32) for vec in frame_vectors], axis=0).astype(np.float32)
         frame_vec = np.mean(frame_stack, axis=0).astype(np.float32)
     else:
+        # Compatibility-side sidecar only. The authoritative runtime path is carrier_record.frame_carriers_norm_paths.
         pooled_frame_record = sample.get('pooled_frame_record')
         if not isinstance(pooled_frame_record, Mapping):
             raise ValueError('missing pooled_frame_record')
@@ -205,12 +214,27 @@ def load_combined_evidence(
         if not frame_pooled_path:
             raise ValueError('missing pooled_frame_record.frame_pooled_path')
         frame_vec = np.asarray(read_pooled_frame_vector(pooled_frame_parent, frame_pooled_path), dtype=np.float32)
+    if audit_enabled:
+        timing_checkpoint(
+            'load_combined_evidence_after_frame_vec',
+            started_at=audit_t0,
+            trajectory_id=str(sample.get('trajectory_id', '')),
+            frame_vec_shape=getattr(frame_vec, 'shape', None),
+            frame_vectors_count=len(frame_vectors),
+        )
 
     carrier_norm = _normalize(carrier_vec)
     frame_norm = _normalize(frame_vec)
     if carrier_norm is None or frame_norm is None:
         raise ValueError('combined evidence is zero norm')
     combined = np.mean(np.stack([carrier_norm, frame_norm], axis=0), axis=0).astype(np.float32)
+    if audit_enabled:
+        timing_checkpoint(
+            'load_combined_evidence_after_combined_vec',
+            started_at=audit_t0,
+            trajectory_id=str(sample.get('trajectory_id', '')),
+            combined_shape=getattr(combined, 'shape', None),
+        )
     return carrier_vec.astype(np.float32), [np.asarray(vec, dtype=np.float32) for vec in frame_vectors], frame_vec.astype(np.float32), combined.astype(np.float32)
 
 

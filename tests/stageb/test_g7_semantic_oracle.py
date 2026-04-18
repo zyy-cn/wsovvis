@@ -8,6 +8,7 @@ import torch
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     fuse_carrier_frame_logits_torch,
+    load_combined_evidence,
     observed_mass_loss,
     refine_responsibilities,
 )
@@ -78,11 +79,19 @@ def _prepare_evidence_fixture(root: Path) -> None:
     traj_b[0, 3] = 0.7
     np.savez(carrier_dir / "carrier_vectors_a.npz", z_norm=traj_a)
     np.savez(carrier_dir / "carrier_vectors_b.npz", z_norm=traj_b)
+    frame_a = np.zeros((1, 768), dtype=np.float16)
+    frame_a[0, 6] = 1.0
+    frame_a[0, 7] = 0.5
+    frame_b = np.zeros((1, 768), dtype=np.float16)
+    frame_b[0, 8] = 1.0
+    frame_b[0, 9] = 0.5
+    np.savez(carrier_dir / "carrier_vectors_frame_a.npz", z_norm=frame_a)
+    np.savez(carrier_dir / "carrier_vectors_frame_b.npz", z_norm=frame_b)
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
         [
-            {"trajectory_id": "traj-a", "clip_id": "10", "z_norm_path": "carrier_vectors_a.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": [], "path_base_mode": "artifact_parent_dir"},
-            {"trajectory_id": "traj-b", "clip_id": "11", "z_norm_path": "carrier_vectors_b.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": [], "path_base_mode": "artifact_parent_dir"},
+            {"trajectory_id": "traj-a", "clip_id": "10", "z_norm_path": "carrier_vectors_a.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": ["carrier_vectors_frame_a.npz#z_norm[0]"], "path_base_mode": "artifact_parent_dir"},
+            {"trajectory_id": "traj-b", "clip_id": "11", "z_norm_path": "carrier_vectors_b.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": ["carrier_vectors_frame_b.npz#z_norm[0]"], "path_base_mode": "artifact_parent_dir"},
         ],
     )
 
@@ -346,6 +355,46 @@ def test_runtime_extra_cache_marks_runtime_authority_enum(tmp_path: Path) -> Non
     )
     assert cache[10]["candidate_ids_extra_authority"] == "runtime_refresh_cache_only"
     assert cache[10]["candidate_ids_extra_runtime_authoritative"] == cache[10]["candidate_ids_extra"]
+
+
+def test_runtime_frame_evidence_comes_from_carrier_locators_not_frame_average(tmp_path: Path) -> None:
+    _prepare_evidence_fixture(tmp_path)
+    sample_a = {
+        "clip_id": "10",
+        "trajectory_record": {"clip_id": 10, "frame_indices": [0]},
+        "carrier_record": {
+            "clip_id": "10",
+            "z_norm_path": "carrier_vectors_a.npz#z_norm[0]",
+            "frame_indices": [0],
+            "frame_carriers_norm_paths": ["carrier_vectors_frame_a.npz#z_norm[0]"],
+        },
+    }
+    sample_b = {
+        "clip_id": "11",
+        "trajectory_record": {"clip_id": 11, "frame_indices": [0]},
+        "carrier_record": {
+            "clip_id": "11",
+            "z_norm_path": "carrier_vectors_b.npz#z_norm[0]",
+            "frame_indices": [0],
+            "frame_carriers_norm_paths": ["carrier_vectors_frame_b.npz#z_norm[0]"],
+        },
+    }
+    _, frame_vectors_a, frame_vec_a, _ = load_combined_evidence(
+        sample_a,
+        output_root=tmp_path,
+        dataset_name="lvvis_train_base",
+        trajectory_source_branch="mainline",
+    )
+    _, frame_vectors_b, frame_vec_b, _ = load_combined_evidence(
+        sample_b,
+        output_root=tmp_path,
+        dataset_name="lvvis_train_base",
+        trajectory_source_branch="mainline",
+    )
+    assert len(frame_vectors_a) == 1
+    assert len(frame_vectors_b) == 1
+    assert not np.allclose(frame_vectors_a[0], frame_vectors_b[0])
+    assert not np.allclose(frame_vec_a, frame_vec_b)
 
 
 def test_refine_responsibilities_uses_raw_coverage_mass_not_normalized_share() -> None:

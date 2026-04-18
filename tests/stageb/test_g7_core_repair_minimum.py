@@ -42,9 +42,13 @@ def _prepare_fixture(root: Path) -> None:
     traj = np.zeros((1, 768), dtype=np.float16)
     traj[0, 0] = 1.0
     np.savez(carrier_dir / "carrier_vectors_traj.npz", z_norm=traj)
+    frame_a = np.zeros((1, 768), dtype=np.float16)
+    frame_a[0, 6] = 1.0
+    frame_a[0, 7] = 0.5
+    np.savez(carrier_dir / "carrier_vectors_frame_a.npz", z_norm=frame_a)
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
-        [{"trajectory_id": "traj-1", "clip_id": "1", "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": [], "path_base_mode": "artifact_parent_dir"}],
+        [{"trajectory_id": "traj-1", "clip_id": "1", "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": ["carrier_vectors_frame_a.npz#z_norm[0]"], "path_base_mode": "artifact_parent_dir"}],
     )
 
 
@@ -157,8 +161,7 @@ def test_frame_and_carrier_evidence_combine_with_runtime_frame_logits_average(tm
     sample = {
         "clip_id": "1",
         "trajectory_record": {"clip_id": 1, "frame_indices": [0]},
-        "carrier_record": {"clip_id": "1", "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]", "frame_indices": [0]},
-        "pooled_frame_record": {"frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
+        "carrier_record": {"clip_id": "1", "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]", "frame_indices": [0], "frame_carriers_norm_paths": ["carrier_vectors_frame_a.npz#z_norm[0]"]},
     }
     carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
         sample,
@@ -175,6 +178,50 @@ def test_frame_and_carrier_evidence_combine_with_runtime_frame_logits_average(tm
     )
     assert len(frame_vectors) == 1
     assert carrier_vec[0] > 0.0
-    assert frame_vec[1] > 0.0
-    assert combined_vec[0] > 0.0 and combined_vec[1] > 0.0
+    assert frame_vec[6] > 0.0 and frame_vec[7] > 0.0
+    assert combined_vec[0] > 0.0 and combined_vec[6] > 0.0
     assert fused_logits.shape == (2,)
+
+
+def test_runtime_frame_evidence_comes_from_carrier_locators_not_frame_average(tmp_path: Path) -> None:
+    _prepare_fixture(tmp_path)
+    sample_a = {
+        "clip_id": "1",
+        "trajectory_record": {"clip_id": 1, "frame_indices": [0]},
+        "carrier_record": {
+            "clip_id": "1",
+            "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]",
+            "frame_indices": [0],
+            "frame_carriers_norm_paths": ["carrier_vectors_frame_a.npz#z_norm[0]"],
+        },
+    }
+    sample_b = {
+        "clip_id": "1",
+        "trajectory_record": {"clip_id": 1, "frame_indices": [0]},
+        "carrier_record": {
+            "clip_id": "1",
+            "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]",
+            "frame_indices": [0],
+            "frame_carriers_norm_paths": ["carrier_vectors_frame_b.npz#z_norm[0]"],
+        },
+    }
+    frame_b = np.zeros((1, 768), dtype=np.float16)
+    frame_b[0, 8] = 1.0
+    frame_b[0, 9] = 0.5
+    np.savez(tmp_path / "carrier_bank" / "lvvis_train_base" / "carrier_vectors_frame_b.npz", z_norm=frame_b)
+    _, frame_vectors_a, frame_vec_a, _ = load_combined_evidence(
+        sample_a,
+        output_root=tmp_path,
+        dataset_name="lvvis_train_base",
+        trajectory_source_branch="mainline",
+    )
+    _, frame_vectors_b, frame_vec_b, _ = load_combined_evidence(
+        sample_b,
+        output_root=tmp_path,
+        dataset_name="lvvis_train_base",
+        trajectory_source_branch="mainline",
+    )
+    assert len(frame_vectors_a) == 1
+    assert len(frame_vectors_b) == 1
+    assert not np.allclose(frame_vectors_a[0], frame_vectors_b[0])
+    assert not np.allclose(frame_vec_a, frame_vec_b)

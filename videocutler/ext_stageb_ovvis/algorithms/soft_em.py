@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import math
 import random
+import sys
+import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -10,6 +13,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+try:
+    from tqdm.auto import tqdm as _tqdm_cls
+except Exception:  # pragma: no cover - tqdm is optional in smoke environments
+    _tqdm_cls = None
 
 from videocutler.ext_stageb_ovvis.banks.responsibility_cache import ResponsibilityCache
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
@@ -20,6 +28,7 @@ from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     load_text_vocab,
     refine_responsibilities,
 )
+from videocutler.ext_stageb_ovvis.algorithms._memory_audit import memory_checkpoint, shallow_size_bytes, timing_checkpoint
 from videocutler.ext_stageb_ovvis.banks.text_bank import resolve_text_prototype
 from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
 from videocutler.ext_stageb_ovvis.algorithms._training_budget import build_dynamic_microbatches, resolve_default_batch_budget
@@ -47,6 +56,8 @@ class SoftEMConfig:
     device: str = 'cpu'
     seed: int = 0
     smoke: bool = False
+    lambda_frame: float = 0.25
+    lambda_cov: float = 1.0
     t_dis_init: float = 0.07
     b_u_init: float = 0.0
     weight_decay: float = 1e-2
@@ -63,6 +74,10 @@ class SoftEMConfig:
     runtime_asset_source_local_incomplete: bool = False
     runtime_asset_output_root: str = ''
     batch_budget: int | None = None
+    show_progress: bool = True
+    log_every: int = 10
+    write_runtime_metrics_jsonl: bool = True
+    print_epoch_summary: bool = True
 
 
 def _set_seed(seed: int) -> None:
@@ -89,6 +104,124 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
+def _append_jsonl(path: Path, row: Record) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + '\n')
+
+
+def _make_progress_bar(*, total: int, desc: str, enabled: bool):
+    if enabled and _tqdm_cls is not None and sys.stderr.isatty():
+        return _tqdm_cls(total=max(1, int(total)), unit='batch', dynamic_ncols=True, leave=True, desc=desc)
+
+    class _SilentProgress:
+        def __init__(self, total: int, desc: str) -> None:
+            self.total = max(1, int(total))
+            self.desc = desc
+            self.n = 0
+
+        def __enter__(self) -> '_SilentProgress':
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def update(self, n: int = 1) -> None:
+            self.n += int(n)
+
+        def set_postfix(self, values: Optional[Dict[str, Any]] = None, refresh: bool = True) -> None:  # noqa: ARG002
+            return None
+
+    return _SilentProgress(total=total, desc=desc)
+
+
+def _should_log_microbatch(log_every: int, microbatch_index: int, total_microbatches: int) -> bool:
+    if int(log_every) <= 0:
+        return False
+    if int(microbatch_index) <= 1:
+        return True
+    if int(microbatch_index) >= int(total_microbatches):
+        return True
+    return int(microbatch_index) % int(log_every) == 0
+
+
+def _runtime_metrics_path(output_root: Path, stage_id: str) -> Path:
+    return output_root / 'train' / stage_id / 'runtime_metrics.jsonl'
+
+
+def _quantile_snapshot(values: Sequence[float]) -> Dict[str, float]:
+    arr = np.asarray(list(values), dtype=np.float32)
+    if arr.size <= 0:
+        return {
+            'min': 0.0,
+            'p10': 0.0,
+            'p50': 0.0,
+            'p90': 0.0,
+            'max': 0.0,
+        }
+    return {
+        'min': float(np.min(arr)),
+        'p10': float(np.quantile(arr, 0.10)),
+        'p50': float(np.quantile(arr, 0.50)),
+        'p90': float(np.quantile(arr, 0.90)),
+        'max': float(np.max(arr)),
+    }
+
+
+def _mean_or_zero(values: Sequence[float]) -> float:
+    return float(np.mean(np.asarray(list(values), dtype=np.float32))) if values else 0.0
+
+
+def _format_epoch_summary(stage_id: str, summary: Mapping[str, Any]) -> str:
+    keys = [
+        'epoch',
+        'microbatch_count',
+        'loss_mean',
+        'loss_last',
+        'optimization_loss_mean',
+        'optimization_loss_last',
+        'effective_responsibility_unit_count_total',
+        'effective_responsibility_unit_count_mean',
+        'unknown_mean_responsibility_epoch',
+        'observed_mean_responsibility_epoch',
+        'responsibility_entropy_epoch',
+    ]
+    if str(stage_id) == 'softem_aug':
+        keys.insert(11, 'extra_mean_responsibility_epoch')
+    keys.extend([
+        'unknown_resp_min',
+        'unknown_resp_p10',
+        'unknown_resp_p50',
+        'unknown_resp_p90',
+        'unknown_resp_max',
+        'observed_resp_min',
+        'observed_resp_p10',
+        'observed_resp_p50',
+        'observed_resp_p90',
+        'observed_resp_max',
+    ])
+    if str(stage_id) == 'softem_aug':
+        keys.extend([
+            'extra_resp_min',
+            'extra_resp_p10',
+            'extra_resp_p50',
+            'extra_resp_p90',
+            'extra_resp_max',
+        ])
+    keys.extend([
+        'responsibility_entropy_min',
+        'responsibility_entropy_p10',
+        'responsibility_entropy_p50',
+        'responsibility_entropy_p90',
+        'responsibility_entropy_max',
+    ])
+    parts = [f'[{stage_id}] epoch_summary']
+    for key in keys:
+        if key in summary:
+            parts.append(f'{key}={summary[key]}')
+    return ' '.join(parts)
+
+
 def _prepare_examples(
     materialized_samples: Sequence[Record],
     *,
@@ -108,11 +241,25 @@ def _prepare_examples(
             bump('sample_not_valid_from_phase1')
             continue
         try:
+            memory_checkpoint(
+                "softem_prepare_before_load_combined_evidence",
+                trajectory_id=str(sample.get('trajectory_id', '')),
+                observed_raw_ids=len(list(sample.get('observed_raw_ids', []))),
+            )
             carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
                 sample,
                 output_root=output_root,
                 dataset_name=dataset_name,
                 trajectory_source_branch=trajectory_source_branch,
+            )
+            memory_checkpoint(
+                "softem_prepare_after_load_combined_evidence",
+                trajectory_id=str(sample.get('trajectory_id', '')),
+                carrier_vec_shallow_size=shallow_size_bytes(carrier_vec),
+                frame_vectors_count=len(frame_vectors),
+                frame_vectors_total_shallow_size=sum(shallow_size_bytes(vec) for vec in frame_vectors),
+                frame_vec_shallow_size=shallow_size_bytes(frame_vec),
+                combined_vec_shallow_size=shallow_size_bytes(combined_vec),
             )
         except Exception:
             bump('missing_frame_evidence')
@@ -272,6 +419,7 @@ def _build_runtime_extra_cache(
 ) -> Dict[int, Dict[str, Any]]:
     if int(k_extra) <= 0:
         return {}
+    audit_t0 = time.perf_counter()
     vocab_ids, vocab_records, vocab_matrix = load_text_vocab(output_root)
     idx_by_raw = {int(raw_id): idx for idx, raw_id in enumerate(vocab_ids)}
     text_lookup = {int(rec['raw_id']): dict(rec) for rec in vocab_records}
@@ -280,22 +428,24 @@ def _build_runtime_extra_cache(
         text_tensor = torch.from_numpy(np.asarray(vocab_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
         projected_text = F.normalize(text_projector(text_tensor), p=2.0, dim=-1)
         text_text_sim = torch.matmul(projected_text, projected_text.t()).detach().cpu().numpy().astype(np.float32)
-        fused_rows: List[np.ndarray] = []
-        for ex in examples:
-            _carrier_logits, _frame_logits, fused_logits = fuse_carrier_frame_logits(
-                projector=text_projector,
-                carrier_vec=np.asarray(ex['carrier_vec'], dtype=np.float32),
-                frame_vec=np.asarray(ex['frame_vec'], dtype=np.float32),
-                candidate_matrix=vocab_matrix,
-                temperature=t_dis,
-                lambda_frame=lambda_frame,
-                frame_vectors=ex.get('frame_vectors'),
-            )
-            fused_rows.append(np.asarray(fused_logits, dtype=np.float32))
-    fused_scores = np.stack(fused_rows, axis=0).astype(np.float32)
-    examples_by_clip: Dict[int, List[Tuple[int, Mapping[str, Any]]]] = {}
-    for row_idx, ex in enumerate(examples):
-        examples_by_clip.setdefault(int(ex['clip_id']), []).append((row_idx, ex))
+        examples_by_clip: Dict[int, List[Tuple[int, Mapping[str, Any]]]] = {}
+        for row_idx, ex in enumerate(examples):
+            examples_by_clip.setdefault(int(ex['clip_id']), []).append((row_idx, ex))
+    memory_checkpoint(
+        "softem_before_runtime_extra_cache_build",
+        example_count=len(examples),
+        clip_group_count=len(examples_by_clip),
+        vocab_size=len(vocab_ids),
+        text_text_sim_shape=getattr(text_text_sim, "shape", None),
+    )
+    timing_checkpoint(
+        "softem_before_runtime_extra_cache_build",
+        started_at=audit_t0,
+        example_count=len(examples),
+        clip_group_count=len(examples_by_clip),
+        vocab_size=len(vocab_ids),
+        text_text_sim_shape=getattr(text_text_sim, "shape", None),
+    )
     cache: Dict[int, Dict[str, Any]] = {}
     for clip_id, grouped in examples_by_clip.items():
         observed = sorted({int(x) for _, ex in grouped for x in list(ex.get('observed_raw_ids', []))})
@@ -311,7 +461,19 @@ def _build_runtime_extra_cache(
             }
             continue
         row_indices = [row_idx for row_idx, _ in grouped]
-        score_slice = np.asarray(fused_scores[row_indices, :], dtype=np.float32)
+        clip_fused_rows: List[np.ndarray] = []
+        for _, ex in grouped:
+            _carrier_logits, _frame_logits, fused_logits = fuse_carrier_frame_logits(
+                projector=text_projector,
+                carrier_vec=np.asarray(ex['carrier_vec'], dtype=np.float32),
+                frame_vec=np.asarray(ex['frame_vec'], dtype=np.float32),
+                candidate_matrix=vocab_matrix,
+                temperature=t_dis,
+                lambda_frame=lambda_frame,
+                frame_vectors=ex.get('frame_vectors'),
+            )
+            clip_fused_rows.append(np.asarray(fused_logits, dtype=np.float32))
+        score_slice = np.asarray(clip_fused_rows, dtype=np.float32)
         support_count: Dict[int, int] = {}
         non_observed_indices = [idx_by_raw[int(raw_id)] for raw_id in candidate_ids]
         for local_row in score_slice:
@@ -346,6 +508,19 @@ def _build_runtime_extra_cache(
             'candidate_ids_extra_authority': 'runtime_refresh_cache_only',
             'text_lookup': text_lookup,
         }
+    memory_checkpoint(
+        "softem_after_runtime_extra_cache_build",
+        clip_group_count=len(examples_by_clip),
+        example_count=len(examples),
+        runtime_extra_cache_clip_count=len(cache),
+    )
+    timing_checkpoint(
+        "softem_after_runtime_extra_cache_build",
+        started_at=audit_t0,
+        clip_group_count=len(examples_by_clip),
+        example_count=len(examples),
+        runtime_extra_cache_clip_count=len(cache),
+    )
     return cache
 
 
@@ -468,6 +643,7 @@ def _compute_clip_refinement_rows(
     b_u: torch.nn.Parameter,
     em_subiterations: int,
     lambda_frame: float,
+    lambda_cov: float = 1.0,
     device: torch.device,
 ) -> Tuple[List[Record], List[Dict[str, Any]]]:
     t_dis = _compute_t_dis(theta_t)
@@ -527,9 +703,9 @@ def _compute_clip_refinement_rows(
                 candidate_ids_known=per_tid_known_ids[tid],
                 candidate_ids_extra=per_tid_extra_ids[tid],
                 stage_id=stage_id,
-                coverage_bonus=0.1,
+                coverage_bonus=0.1 * float(lambda_cov),
                 coverage_epsilon=1.0,
-                extra_penalty=0.1,
+                extra_penalty=0.1 * float(lambda_cov),
                 coverage_context=coverage_context,
                 b_u_value=b_u_value,
             )
@@ -584,6 +760,7 @@ def _refresh_stage_runtime_state(
     k_extra: int,
     extra_alpha: float,
     lambda_frame: float,
+    lambda_cov: float,
     em_subiterations: int,
     device: torch.device,
 ) -> Tuple[Dict[str, Dict[str, Any]], ResponsibilityCache, Dict[int, Dict[str, Any]], List[Dict[str, Any]]]:
@@ -620,6 +797,7 @@ def _refresh_stage_runtime_state(
             b_u=b_u,
             em_subiterations=em_subiterations,
             lambda_frame=lambda_frame,
+            lambda_cov=lambda_cov,
             device=device,
         )
         refreshed_rows.extend(rows)
@@ -636,10 +814,20 @@ def run_soft_em(
     config: SoftEMConfig,
     audit_callback: Any = None,
 ) -> Dict[str, Any]:
-    if config.dataset_name != 'lvvis_train_base':
-        raise ValueError('soft-EM implementation currently supports dataset_name=lvvis_train_base only')
+    if config.dataset_name not in {'lvvis_train_base', 'lvvis_val'}:
+        raise ValueError("soft-EM implementation currently supports dataset_name=lvvis_train_base or lvvis_val")
     _set_seed(int(config.seed))
     device = torch.device(str(config.device))
+    audit_t0 = time.perf_counter()
+    memory_checkpoint(
+        "softem_start",
+        dataset_name=str(config.dataset_name),
+        trajectory_source_branch=str(config.trajectory_source_branch),
+        mode=str(config.mode),
+        batch_budget=(int(config.batch_budget) if config.batch_budget is not None else None),
+        lambda_frame=float(config.lambda_frame),
+        lambda_cov=float(config.lambda_cov),
+    )
     prepared = _prepare_examples(
         materialized_samples,
         output_root=output_root,
@@ -648,6 +836,23 @@ def run_soft_em(
     )
     examples = list(prepared['examples'])
     skipped = dict(prepared['skipped_reason_histogram'])
+    memory_checkpoint(
+        "softem_after_prepare_examples",
+        materialized_samples=len(materialized_samples),
+        trainable_examples=len(examples),
+        skipped_reason_histogram=skipped,
+        total_frame_vector_refs=sum(len(ex.get('frame_vectors', [])) for ex in examples),
+        total_candidate_rows=sum(int(np.asarray(ex.get('candidate_matrix')).shape[0]) if ex.get('candidate_matrix') is not None else 0 for ex in examples),
+    )
+    timing_checkpoint(
+        "softem_after_prepare_examples",
+        started_at=audit_t0,
+        materialized_samples=len(materialized_samples),
+        trainable_examples=len(examples),
+        skipped_reason_histogram=skipped,
+        total_frame_vector_refs=sum(len(ex.get('frame_vectors', [])) for ex in examples),
+        total_candidate_rows=sum(int(np.asarray(ex.get('candidate_matrix')).shape[0]) if ex.get('candidate_matrix') is not None else 0 for ex in examples),
+    )
     if not examples:
         raise RuntimeError('no trainable examples available for soft-EM')
     batch_budget = resolve_default_batch_budget(smoke=bool(config.smoke), explicit=config.batch_budget)
@@ -657,6 +862,19 @@ def run_soft_em(
     current_checkpoint = _initial_checkpoint_path(output_root, mode=config.mode)
     if not current_checkpoint.is_file():
         raise FileNotFoundError(f'missing prealign checkpoint for soft-EM bootstrap: {current_checkpoint}')
+    memory_checkpoint(
+        "softem_before_stage_loop",
+        examples=len(examples),
+        batch_budget=int(batch_budget),
+        initial_checkpoint=str(current_checkpoint),
+    )
+    timing_checkpoint(
+        "softem_before_stage_loop",
+        started_at=audit_t0,
+        examples=len(examples),
+        batch_budget=int(batch_budget),
+        initial_checkpoint=str(current_checkpoint),
+    )
 
     for stage in _stage_cfg(config):
         text_projector, theta_t, b_u, ckpt = _load_projector_from_checkpoint(current_checkpoint, device=device)
@@ -683,9 +901,27 @@ def run_soft_em(
             output_root=output_root,
             k_extra=int(config.k_extra),
             extra_alpha=float(config.extra_alpha),
-            lambda_frame=0.25,
+            lambda_frame=float(config.lambda_frame),
+            lambda_cov=float(config.lambda_cov),
             em_subiterations=max(1, int(config.em_subiterations)),
             device=device,
+        )
+        memory_checkpoint(
+            f"softem_after_stage_refresh_{stage.stage_id}",
+            stage_id=str(stage.stage_id),
+            active_examples=len(active_examples_by_tid),
+            runtime_extra_cache=len(runtime_extra_cache),
+            cache_size=len(cache.by_trajectory_id),
+            trace_sample_len=len(stage_trace_sample),
+        )
+        timing_checkpoint(
+            f"softem_after_stage_refresh_{stage.stage_id}",
+            started_at=audit_t0,
+            stage_id=str(stage.stage_id),
+            active_examples=len(active_examples_by_tid),
+            runtime_extra_cache=len(runtime_extra_cache),
+            cache_size=len(cache.by_trajectory_id),
+            trace_sample_len=len(stage_trace_sample),
         )
 
         if audit_callback is not None:
@@ -713,6 +949,7 @@ def run_soft_em(
         since_refresh = 0
         current_refresh_interval = int(refresh_interval)
         final_epoch_plan = None
+        runtime_metrics_path = _runtime_metrics_path(output_root, stage.stage_id)
         for epoch_index in range(int(stage.epochs)):
             stage_examples = [active_examples_by_tid[tid] for tid in active_examples_by_tid.keys()]
             random.Random(int(config.seed) + int(epoch_index)).shuffle(stage_examples)
@@ -724,64 +961,187 @@ def run_soft_em(
             )
             final_epoch_plan = epoch_plan
             current_refresh_interval = int(config.extra_refresh_interval_iters) if config.extra_refresh_interval_iters is not None else max(1, int(epoch_plan.batch_count))
-            for batch_indices in epoch_plan.batches:
-                optimizer.zero_grad(set_to_none=True)
-                batch_loss_accum: torch.Tensor | None = None
-                effective_responsibility_unit_count = 0
-                for batch_index in batch_indices:
-                    ex = stage_examples[int(batch_index)]
-                    tid = str(ex['trajectory_id'])
-                    domain_ids, _, _ = _stage_domain_for_stage(stage.stage_id, ex)
-                    current_t_dis = _compute_t_dis(theta_t)
-                    _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
-                        projector=text_projector,
-                        carrier_vec=ex['carrier_vec'],
-                        frame_vec=ex['frame_vec'],
-                        candidate_matrix=ex['candidate_matrix'],
-                        temperature=current_t_dis,
-                        frame_vectors=ex['frame_vectors'],
+            epoch_losses: List[float] = []
+            epoch_batch_losses: List[float] = []
+            epoch_effective_counts: List[int] = []
+            epoch_unknown_responsibilities: List[float] = []
+            epoch_observed_responsibilities: List[float] = []
+            epoch_extra_responsibilities: List[float] = []
+            epoch_entropies: List[float] = []
+            progress_enabled = bool(config.show_progress)
+            with _make_progress_bar(
+                total=int(epoch_plan.batch_count),
+                desc=f"{stage.stage_id} epoch {int(epoch_index) + 1}/{int(stage.epochs)}",
+                enabled=progress_enabled,
+            ) as progress:
+                for microbatch_index, batch_indices in enumerate(epoch_plan.batches, start=1):
+                    optimizer.zero_grad(set_to_none=True)
+                    batch_loss_accum: torch.Tensor | None = None
+                    effective_responsibility_unit_count = 0
+                    sample_losses: List[float] = []
+                    sample_unknown_responsibilities: List[float] = []
+                    sample_observed_responsibilities: List[float] = []
+                    sample_extra_responsibilities: List[float] = []
+                    sample_entropies: List[float] = []
+                    for batch_index in batch_indices:
+                        ex = stage_examples[int(batch_index)]
+                        tid = str(ex['trajectory_id'])
+                        domain_ids, known_ids, extra_ids = _stage_domain_for_stage(stage.stage_id, ex)
+                        extra_id_set = {int(x) for x in extra_ids}
+                        current_t_dis = _compute_t_dis(theta_t)
+                        _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
+                            projector=text_projector,
+                            carrier_vec=ex['carrier_vec'],
+                            frame_vec=ex['frame_vec'],
+                            candidate_matrix=ex['candidate_matrix'],
+                            temperature=current_t_dis,
+                            frame_vectors=ex['frame_vectors'],
+                        )
+                        stage_candidate_count = len(domain_ids)
+                        if stage_candidate_count <= 0:
+                            raise RuntimeError(f'empty candidate domain for stage {stage.stage_id}')
+                        stage_logits_candidates = logits_known_extra[:stage_candidate_count]
+                        stage_logits = torch.cat([b_u.reshape(1), stage_logits_candidates], dim=0)
+                        target_row = cache.by_trajectory_id[str(tid)]
+                        target = torch.tensor(
+                            [target_row['r_final']['unknown'], *[target_row['r_final'][str(int(raw_id))] for raw_id in domain_ids]],
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                        sample_loss = -(target * torch.log_softmax(stage_logits, dim=0)).sum()
+                        losses.append(float(sample_loss.detach().cpu().item()))
+                        sample_loss_value = float(sample_loss.detach().cpu().item())
+                        epoch_losses.append(sample_loss_value)
+                        batch_loss_accum = sample_loss if batch_loss_accum is None else (batch_loss_accum + sample_loss)
+                        effective_responsibility_unit_count += 1
+                        sample_losses.append(sample_loss_value)
+                        unknown_resp_value = float(target[0].detach().cpu().item())
+                        observed_resp_value = float(target[1:].mean().detach().cpu().item()) if target.shape[0] > 1 else 0.0
+                        sample_unknown_responsibilities.append(unknown_resp_value)
+                        sample_observed_responsibilities.append(observed_resp_value)
+                        extra_positions = [idx for idx, raw_id in enumerate(domain_ids) if int(raw_id) in extra_id_set]
+                        extra_resp_value = float(target[[idx + 1 for idx in extra_positions]].mean().detach().cpu().item()) if extra_positions else 0.0
+                        sample_extra_responsibilities.append(extra_resp_value)
+                        entropy_value = float((-(target * torch.log(target.clamp_min(1e-12)))).sum().detach().cpu().item())
+                        sample_entropies.append(entropy_value)
+                        epoch_unknown_responsibilities.append(unknown_resp_value)
+                        epoch_observed_responsibilities.append(observed_resp_value)
+                        epoch_extra_responsibilities.append(extra_resp_value)
+                        epoch_entropies.append(entropy_value)
+                    if batch_loss_accum is None or effective_responsibility_unit_count <= 0:
+                        continue
+                    batch_loss = batch_loss_accum / float(effective_responsibility_unit_count)
+                    batch_loss.backward()
+                    optimizer.step()
+                    batch_loss_value = float(batch_loss.detach().cpu().item())
+                    optimization_losses.append(batch_loss_value)
+                    epoch_batch_losses.append(batch_loss_value)
+                    epoch_effective_counts.append(int(effective_responsibility_unit_count))
+                    iteration_index += 1
+                    since_refresh += 1
+                    progress.update(1)
+                    progress.set_postfix(
+                        {
+                            'loss': f'{float(np.mean(sample_losses)):.4f}',
+                            'opt_loss': f'{batch_loss_value:.4f}',
+                            'units': effective_responsibility_unit_count,
+                        },
+                        refresh=False,
                     )
-                    stage_candidate_count = len(domain_ids)
-                    if stage_candidate_count <= 0:
-                        raise RuntimeError(f'empty candidate domain for stage {stage.stage_id}')
-                    stage_logits_candidates = logits_known_extra[:stage_candidate_count]
-                    stage_logits = torch.cat([b_u.reshape(1), stage_logits_candidates], dim=0)
-                    target_row = cache.by_trajectory_id[str(tid)]
-                    target = torch.tensor(
-                        [target_row['r_final']['unknown'], *[target_row['r_final'][str(int(raw_id))] for raw_id in domain_ids]],
-                        device=device,
-                        dtype=torch.float32,
-                    )
-                    sample_loss = -(target * torch.log_softmax(stage_logits, dim=0)).sum()
-                    losses.append(float(sample_loss.detach().cpu().item()))
-                    batch_loss_accum = sample_loss if batch_loss_accum is None else (batch_loss_accum + sample_loss)
-                    effective_responsibility_unit_count += 1
-                if batch_loss_accum is None or effective_responsibility_unit_count <= 0:
-                    continue
-                batch_loss = batch_loss_accum / float(effective_responsibility_unit_count)
-                batch_loss.backward()
-                optimizer.step()
-                optimization_losses.append(float(batch_loss.detach().cpu().item()))
-                iteration_index += 1
-                since_refresh += 1
-                if since_refresh >= current_refresh_interval:
-                    active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state(
-                        stage_id=stage.stage_id,
-                        base_examples=examples,
-                        base_cache=cache,
-                        text_projector=text_projector,
-                        theta_t=theta_t,
-                        b_u=b_u,
-                        output_root=output_root,
-                        k_extra=int(config.k_extra),
-                        extra_alpha=float(config.extra_alpha),
-                        lambda_frame=0.25,
-                        em_subiterations=max(1, int(config.em_subiterations)),
-                        device=device,
-                    )
-                    if not stage_trace_sample:
-                        stage_trace_sample = refreshed_trace
-                    since_refresh = 0
+                    if _should_log_microbatch(int(config.log_every), microbatch_index, int(epoch_plan.batch_count)):
+                        base_line = (
+                            f"[{stage.stage_id}] epoch={int(epoch_index) + 1}/{int(stage.epochs)} "
+                            f"microbatch={microbatch_index}/{int(epoch_plan.batch_count)} "
+                            f"loss={float(np.mean(sample_losses)):.6f} "
+                            f"opt_loss={batch_loss_value:.6f} "
+                            f"effective_responsibility_unit_count={effective_responsibility_unit_count} "
+                            f"unknown_mean_responsibility={float(np.mean(sample_unknown_responsibilities)):.6f} "
+                            f"observed_mean_responsibility={float(np.mean(sample_observed_responsibilities)):.6f} "
+                            f"responsibility_entropy={float(np.mean(sample_entropies)):.6f}"
+                        )
+                        if stage.stage_id == 'softem_aug':
+                            base_line += (
+                                f" extra_mean_responsibility={float(np.mean(sample_extra_responsibilities)):.6f}"
+                            )
+                        print(base_line, file=sys.stderr, flush=True)
+                    if bool(config.write_runtime_metrics_jsonl):
+                        metric_row = {
+                            'row_type': 'microbatch',
+                            'timestamp': datetime.now(timezone.utc).isoformat(),
+                            'stage': str(stage.stage_id),
+                            'epoch': int(epoch_index) + 1,
+                            'microbatch_idx': int(microbatch_index),
+                            'microbatch_total': int(epoch_plan.batch_count),
+                            'loss': float(np.mean(sample_losses)),
+                            'optimization_loss': float(batch_loss_value),
+                            'effective_responsibility_unit_count': int(effective_responsibility_unit_count),
+                            'unknown_mean_responsibility': float(np.mean(sample_unknown_responsibilities)),
+                            'observed_mean_responsibility': float(np.mean(sample_observed_responsibilities)),
+                            'responsibility_entropy': float(np.mean(sample_entropies)),
+                        }
+                        if stage.stage_id == 'softem_aug':
+                            metric_row['extra_mean_responsibility'] = float(np.mean(sample_extra_responsibilities))
+                        _append_jsonl(runtime_metrics_path, metric_row)
+                    if since_refresh >= current_refresh_interval:
+                        active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state(
+                            stage_id=stage.stage_id,
+                            base_examples=examples,
+                            base_cache=cache,
+                            text_projector=text_projector,
+                            theta_t=theta_t,
+                            b_u=b_u,
+                            output_root=output_root,
+                            k_extra=int(config.k_extra),
+                            extra_alpha=float(config.extra_alpha),
+                            lambda_frame=float(config.lambda_frame),
+                            lambda_cov=float(config.lambda_cov),
+                            em_subiterations=max(1, int(config.em_subiterations)),
+                            device=device,
+                        )
+                        if not stage_trace_sample:
+                            stage_trace_sample = refreshed_trace
+                        since_refresh = 0
+            epoch_summary = {
+                'stage': str(stage.stage_id),
+                'epoch': int(epoch_index) + 1,
+                'microbatch_count': int(len(epoch_batch_losses)),
+                'loss_mean': float(np.mean(epoch_losses)) if epoch_losses else 0.0,
+                'loss_last': float(epoch_losses[-1]) if epoch_losses else 0.0,
+                'optimization_loss_mean': float(np.mean(epoch_batch_losses)) if epoch_batch_losses else 0.0,
+                'optimization_loss_last': float(epoch_batch_losses[-1]) if epoch_batch_losses else 0.0,
+                'effective_responsibility_unit_count_total': int(np.sum(epoch_effective_counts)) if epoch_effective_counts else 0,
+                'effective_responsibility_unit_count_mean': float(np.mean(epoch_effective_counts)) if epoch_effective_counts else 0.0,
+                'unknown_mean_responsibility_epoch': float(np.mean(epoch_unknown_responsibilities)) if epoch_unknown_responsibilities else 0.0,
+                'observed_mean_responsibility_epoch': float(np.mean(epoch_observed_responsibilities)) if epoch_observed_responsibilities else 0.0,
+                'responsibility_entropy_epoch': float(np.mean(epoch_entropies)) if epoch_entropies else 0.0,
+            }
+            if str(stage.stage_id) == 'softem_aug':
+                epoch_summary['extra_mean_responsibility_epoch'] = float(np.mean(epoch_extra_responsibilities)) if epoch_extra_responsibilities else 0.0
+            unknown_quantiles = _quantile_snapshot(epoch_unknown_responsibilities)
+            observed_quantiles = _quantile_snapshot(epoch_observed_responsibilities)
+            entropy_quantiles = _quantile_snapshot(epoch_entropies)
+            for prefix, values in (
+                ('unknown_resp', unknown_quantiles),
+                ('observed_resp', observed_quantiles),
+                ('responsibility_entropy', entropy_quantiles),
+            ):
+                for key, value in values.items():
+                    epoch_summary[f'{prefix}_{key}'] = float(value)
+            if str(stage.stage_id) == 'softem_aug':
+                extra_quantiles = _quantile_snapshot(epoch_extra_responsibilities)
+                for key, value in extra_quantiles.items():
+                    epoch_summary[f'extra_resp_{key}'] = float(value)
+            if bool(config.print_epoch_summary):
+                print(_format_epoch_summary(str(stage.stage_id), epoch_summary), file=sys.stderr, flush=True)
+            if bool(config.write_runtime_metrics_jsonl):
+                _append_jsonl(
+                    runtime_metrics_path,
+                    {
+                        'row_type': 'epoch_summary',
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        **epoch_summary,
+                    },
+                )
             if audit_callback is not None:
                 audit_callback(
                     {
@@ -803,6 +1163,25 @@ def run_soft_em(
                         'mode': str(config.mode),
                     }
                 )
+            memory_checkpoint(
+                f"softem_after_epoch_{stage.stage_id}_{int(epoch_index) + 1}",
+                stage_id=str(stage.stage_id),
+                epoch=int(epoch_index) + 1,
+                losses=len(losses),
+                optimization_losses=len(optimization_losses),
+                active_examples=len(stage_examples),
+                cache_size=len(cache.by_trajectory_id),
+            )
+            timing_checkpoint(
+                f"softem_after_epoch_{stage.stage_id}_{int(epoch_index) + 1}",
+                started_at=audit_t0,
+                stage_id=str(stage.stage_id),
+                epoch=int(epoch_index) + 1,
+                losses=len(losses),
+                optimization_losses=len(optimization_losses),
+                active_examples=len(stage_examples),
+                cache_size=len(cache.by_trajectory_id),
+            )
 
         if since_refresh > 0:
             active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state(
@@ -815,12 +1194,28 @@ def run_soft_em(
                 output_root=output_root,
                 k_extra=int(config.k_extra),
                 extra_alpha=float(config.extra_alpha),
-                lambda_frame=0.25,
+                lambda_frame=float(config.lambda_frame),
+                lambda_cov=float(config.lambda_cov),
                 em_subiterations=max(1, int(config.em_subiterations)),
                 device=device,
             )
             if not stage_trace_sample:
                 stage_trace_sample = refreshed_trace
+        memory_checkpoint(
+            f"softem_after_stage_end_{stage.stage_id}",
+            stage_id=str(stage.stage_id),
+            cache_size=len(cache.by_trajectory_id),
+            stage_reports=len(stage_reports),
+            current_checkpoint=str(current_checkpoint),
+        )
+        timing_checkpoint(
+            f"softem_after_stage_end_{stage.stage_id}",
+            started_at=audit_t0,
+            stage_id=str(stage.stage_id),
+            cache_size=len(cache.by_trajectory_id),
+            stage_reports=len(stage_reports),
+            current_checkpoint=str(current_checkpoint),
+        )
 
         stage_dir = output_root / 'train' / stage.stage_id
         ckpt_dir = stage_dir / 'checkpoints'

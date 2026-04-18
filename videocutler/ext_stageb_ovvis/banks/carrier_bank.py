@@ -8,6 +8,7 @@ import tempfile
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -17,6 +18,7 @@ from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import (
     parse_feat_path,
     reconstruct_valid_token_mask_from_geometry,
 )
+from videocutler.ext_stageb_ovvis.algorithms._memory_audit import timing_checkpoint
 
 try:
     from tqdm.auto import tqdm as _tqdm_cls
@@ -250,8 +252,10 @@ def _coerce_token_feature_matrix(feature: np.ndarray, grid_h: int, grid_w: int) 
 
 
 _VECTOR_LOCATOR_RE = re.compile(r"^(?P<path>[A-Za-z0-9_./-]+)#(?P<key>[A-Za-z0-9_]+)\[(?P<idx>[0-9]+)\]$")
+_VECTOR_LOCATOR_AUDIT_COUNT = 0
 
 
+@lru_cache(maxsize=8192)
 def parse_vector_locator(locator: str) -> Tuple[Path, str, int]:
     match = _VECTOR_LOCATOR_RE.match(locator)
     if not match:
@@ -263,17 +267,59 @@ def parse_vector_locator(locator: str) -> Tuple[Path, str, int]:
 
 
 def read_vector_from_locator(artifact_parent_dir: Path, locator: str) -> np.ndarray:
+    global _VECTOR_LOCATOR_AUDIT_COUNT
     rel_path, key, idx = parse_vector_locator(locator)
     payload_path = artifact_parent_dir / rel_path
+    audit_index = int(_VECTOR_LOCATOR_AUDIT_COUNT)
+    _VECTOR_LOCATOR_AUDIT_COUNT += 1
+    audit_enabled = audit_index < 3
+    audit_t0 = time.perf_counter()
+    if audit_enabled:
+        timing_checkpoint(
+            "carrier_read_vector_before_payload_load",
+            started_at=audit_t0,
+            locator=locator,
+            payload_path=str(payload_path),
+            key=str(key),
+            idx=int(idx),
+        )
+    arr = _load_vector_payload_array(payload_path, key)
+    if audit_enabled:
+        timing_checkpoint(
+            "carrier_read_vector_after_payload_load",
+            started_at=audit_t0,
+            locator=locator,
+            payload_path=str(payload_path),
+            key=str(key),
+            idx=int(idx),
+            payload_shape=getattr(arr, "shape", None),
+            payload_dtype=str(getattr(arr, "dtype", "")),
+        )
+    if idx < 0 or idx >= int(arr.shape[0]):
+        raise IndexError(f"index out of range for {locator}")
+    row = np.asarray(arr[idx], dtype=np.float32)
+    if audit_enabled:
+        timing_checkpoint(
+            "carrier_read_vector_after_row_materialize",
+            started_at=audit_t0,
+            locator=locator,
+            payload_path=str(payload_path),
+            key=str(key),
+            idx=int(idx),
+            row_shape=getattr(row, "shape", None),
+        )
+    return row
+
+
+@lru_cache(maxsize=4)
+def _load_vector_payload_array(payload_path: Path, key: str) -> np.ndarray:
     with np.load(payload_path, allow_pickle=False) as payload:
         if key not in payload.files:
             raise KeyError(f"missing key {key} in {payload_path}")
-        arr = np.asarray(payload[key], dtype=np.float32)
+        arr = np.asarray(payload[key])
         if arr.ndim != 2:
             raise ValueError(f"payload key {key} is not 2D in {payload_path}")
-        if idx < 0 or idx >= int(arr.shape[0]):
-            raise IndexError(f"index out of range for {locator}")
-        return np.asarray(arr[idx], dtype=np.float32)
+        return arr
 
 
 def read_carrier_records(path: Path) -> List[Record]:

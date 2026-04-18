@@ -26,6 +26,9 @@ def _prepare_fixture(root: Path) -> None:
     z_raw = np.random.RandomState(0).randn(1, 768).astype(np.float16)
     z_norm = z_raw / np.maximum(np.linalg.norm(z_raw, axis=1, keepdims=True), 1e-6)
     np.savez(carrier_dir / "carrier_vectors_traj.npz", z_raw=z_raw.astype(np.float16), z_norm=z_norm.astype(np.float16))
+    frame_vec = np.zeros((1, 768), dtype=np.float16)
+    frame_vec[0, 6] = 1.0
+    np.savez(carrier_dir / "carrier_vectors_frame.npz", z_norm=frame_vec)
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
         [
@@ -35,7 +38,7 @@ def _prepare_fixture(root: Path) -> None:
                 "frame_indices": [0],
                 "z_raw_path": "carrier_vectors_traj.npz#z_raw[0]",
                 "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]",
-                "frame_carriers_norm_paths": [],
+                "frame_carriers_norm_paths": ["carrier_vectors_frame.npz#z_norm[0]"],
                 "path_base_mode": "artifact_parent_dir",
             }
         ],
@@ -101,9 +104,8 @@ def test_train_prealign_writes_canonical_stage_local_artifacts(tmp_path: Path) -
         "trajectory_id": "traj_1",
         "clip_id": "1",
         "trajectory_record": {"video_id": 1},
-        "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
+        "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]", "frame_carriers_norm_paths": ["carrier_vectors_frame.npz#z_norm[0]"]},
         "weak_label_record": {"observed_raw_ids": [3], "clip_id": "1", "video_id": 1},
-        "pooled_frame_record": {"frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
         "frame_feature_rows": [{"feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
         "frame_geometry_rows": [
             {

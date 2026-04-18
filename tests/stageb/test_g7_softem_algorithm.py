@@ -23,6 +23,9 @@ def _setup_minimal_softem_fixture(tmp_path: Path) -> list[dict]:
     vec = np.zeros((1, 768), dtype=np.float16)
     vec[0, 0] = 1.0
     np.savez(carrier_dir / "carrier_vectors_traj.npz", z_norm=vec)
+    frame_vec = np.zeros((1, 768), dtype=np.float16)
+    frame_vec[0, 1] = 1.0
+    np.savez(carrier_dir / "carrier_vectors_frame.npz", z_norm=frame_vec)
 
     text_dir = tmp_path / "text_bank"
     (text_dir / "payload").mkdir(parents=True, exist_ok=True)
@@ -115,9 +118,8 @@ def _setup_minimal_softem_fixture(tmp_path: Path) -> list[dict]:
             "trajectory_id": "traj-1",
             "clip_id": "7",
             "trajectory_record": {"video_id": 8},
-            "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
+            "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]", "frame_carriers_norm_paths": ["carrier_vectors_frame.npz#z_norm[0]"]},
             "weak_label_record": {"observed_raw_ids": [1]},
-            "pooled_frame_record": {"frame_pooled_path": "payload/clip_7_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
             "frame_feature_rows": [{"feat_path": "payload/clip_7_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
             "frame_geometry_rows": [
                 {

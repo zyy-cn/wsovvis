@@ -42,20 +42,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--t_dis_init", type=float, default=0.07)
     parser.add_argument("--b_u_init", type=float, default=0.0)
+    parser.add_argument("--lambda_frame", type=float, default=None)
+    parser.add_argument("--subset_fraction", type=float, default=None)
     parser.add_argument("--batch_budget", type=int, default=None)
+    parser.add_argument("--show_progress", type=_parse_bool, default=True)
+    parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument("--write_runtime_metrics_jsonl", type=_parse_bool, default=True)
+    parser.add_argument("--print_epoch_summary", type=_parse_bool, default=True)
     return parser.parse_args()
+
+
+def _parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean value, got {value!r}")
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _artifact_root(repo_root: Path) -> Path:
+    override = str(os.environ.get("WSOVVIS_OUTPUT_ARTIFACT_ROOT", "")).strip()
+    if override:
+        return Path(override).expanduser()
+    return repo_root
+
+
 def _phase1_summary_path(repo_root: Path) -> Path:
-    return repo_root / "codex" / "outputs" / "G7_training" / "g7_prealign_smoke_summary.json"
+    artifact_root = _artifact_root(repo_root)
+    return artifact_root / "codex" / "outputs" / "G7_training" / "g7_prealign_smoke_summary.json"
 
 
 def _phase1_samples_path(repo_root: Path) -> Path:
-    return repo_root / "codex" / "outputs" / "G7_training" / "g7_prealign_smoke_samples.jsonl"
+    artifact_root = _artifact_root(repo_root)
+    return artifact_root / "codex" / "outputs" / "G7_training" / "g7_prealign_smoke_samples.jsonl"
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -87,7 +113,8 @@ def _write_contract_check(repo_root: Path, *, train_result: Dict[str, Any], summ
             "artifact_schema_valid",
         ],
     }
-    contract_path = repo_root / "codex" / "outputs" / "G7_training" / "prealign_contract_check.json"
+    artifact_root = _artifact_root(repo_root)
+    contract_path = artifact_root / "codex" / "outputs" / "G7_training" / "prealign_contract_check.json"
     _write_json(contract_path, contract_check)
     return contract_path
 
@@ -114,6 +141,8 @@ def main() -> int:
             trajectory_source_branch=str(args.trajectory_source_branch),
             smoke=bool(args.smoke),
             smoke_max_trajectories=int(args.smoke_max_trajectories),
+            subset_fraction=(float(args.subset_fraction) if args.subset_fraction is not None else None),
+            subset_seed=int(args.seed),
         ),
     )
 
@@ -139,10 +168,15 @@ def main() -> int:
             weight_decay=float(args.weight_decay),
             t_dis_init=float(args.t_dis_init),
             b_u_init=float(args.b_u_init),
+            lambda_frame=(float(args.lambda_frame) if args.lambda_frame is not None else 0.25),
             runtime_asset_source=str(result['resolution'].get('runtime_asset_source', 'local_canonical_assets')),
             runtime_asset_source_local_incomplete=bool(result['resolution'].get('local_incomplete', False)),
             runtime_asset_output_root=str(result['resolution'].get('runtime_output_root', str(output_root))),
             batch_budget=(int(args.batch_budget) if args.batch_budget is not None else None),
+            show_progress=bool(args.show_progress),
+            log_every=int(args.log_every),
+            write_runtime_metrics_jsonl=bool(args.write_runtime_metrics_jsonl),
+            print_epoch_summary=bool(args.print_epoch_summary),
         ),
     )
 

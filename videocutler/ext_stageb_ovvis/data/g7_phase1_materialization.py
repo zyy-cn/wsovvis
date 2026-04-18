@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -10,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_text_vocab
+from videocutler.ext_stageb_ovvis.algorithms._memory_audit import memory_checkpoint, shallow_size_bytes, timing_checkpoint
 
 
 Record = Dict[str, Any]
@@ -21,6 +23,8 @@ class Phase1MaterializationConfig:
     trajectory_source_branch: str = "mainline"
     smoke: bool = False
     smoke_max_trajectories: int = 128
+    subset_fraction: Optional[float] = None
+    subset_seed: int = 0
 
 
 
@@ -289,11 +293,63 @@ def _sample_fingerprint(records: Sequence[Record]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _deterministic_stratified_subset(
+    records: Sequence[Record],
+    *,
+    fraction: Optional[float],
+    seed: int,
+) -> List[Record]:
+    if fraction is None:
+        return list(records)
+    frac = float(fraction)
+    if frac <= 0.0 or frac >= 1.0:
+        return list(records)
+    grouped: Dict[str, List[Record]] = {}
+    for rec in records:
+        traj = rec.get("trajectory_record", {})
+        group_key = str(traj.get("video_id", rec.get("clip_id", "unknown")))
+        grouped.setdefault(group_key, []).append(rec)
+    selected: List[Record] = []
+    for group_key in sorted(grouped.keys()):
+        group = sorted(grouped[group_key], key=lambda rec: str(rec.get("trajectory_id", "")))
+        target = int(round(len(group) * frac))
+        if len(group) > 0 and target <= 0:
+            target = 1
+        if target >= len(group):
+            selected.extend(group)
+            continue
+        scored = sorted(
+            group,
+            key=lambda rec: hashlib.sha256(
+                f"{int(seed)}|{group_key}|{str(rec.get('trajectory_id', ''))}".encode("utf-8")
+            ).hexdigest(),
+        )
+        selected.extend(scored[:target])
+    selected = sorted(selected, key=lambda rec: str(rec.get("trajectory_id", "")))
+    target_total = int(round(len(records) * frac))
+    if len(records) > 0 and target_total <= 0:
+        target_total = 1
+    if len(selected) > target_total:
+        selected = selected[:target_total]
+    elif len(selected) < target_total:
+        remaining = [rec for rec in sorted(records, key=lambda rec: str(rec.get("trajectory_id", ""))) if rec not in selected]
+        selected.extend(remaining[: max(0, target_total - len(selected))])
+    return selected
+
+
 
 def materialize_phase1_training_samples(
     output_root: Path,
     config: Phase1MaterializationConfig,
 ) -> Dict[str, Any]:
+    phase_t0 = time.perf_counter()
+    memory_checkpoint(
+        "phase1_materialization_start",
+        dataset_name=str(config.dataset_name),
+        trajectory_source_branch=str(config.trajectory_source_branch),
+        smoke=bool(config.smoke),
+        subset_fraction=(float(config.subset_fraction) if config.subset_fraction is not None else None),
+    )
     resolution = resolve_runtime_assets(
         output_root,
         dataset_name=config.dataset_name,
@@ -313,6 +369,27 @@ def materialize_phase1_training_samples(
     pooled_frame_records = _load_jsonl(runtime_output_root / assets["pooled_frame_records"]["path"]) if assets["pooled_frame_records"]["exists"] else []
     weak_records = _load_json(runtime_output_root / assets["weak_labels"]["path"])
     text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(runtime_output_root)
+    timing_checkpoint(
+        "phase1_materialization_after_asset_load",
+        started_at=phase_t0,
+        trajectory_records=len(trajectory_records),
+        carrier_records=len(carrier_records),
+        pooled_frame_records=len(pooled_frame_records),
+        weak_records=len(weak_records) if isinstance(weak_records, list) else 0,
+        text_vocab_size=len(text_vocab_ids),
+        text_vocab_matrix_shape=getattr(text_vocab_matrix, "shape", None),
+        text_vocab_matrix_shallow_size=shallow_size_bytes(text_vocab_matrix),
+    )
+    memory_checkpoint(
+        "phase1_materialization_after_asset_load",
+        trajectory_records=len(trajectory_records),
+        carrier_records=len(carrier_records),
+        pooled_frame_records=len(pooled_frame_records),
+        weak_records=len(weak_records) if isinstance(weak_records, list) else 0,
+        text_vocab_size=len(text_vocab_ids),
+        text_vocab_matrix_shape=getattr(text_vocab_matrix, "shape", None),
+        text_vocab_matrix_shallow_size=shallow_size_bytes(text_vocab_matrix),
+    )
 
     if not isinstance(weak_records, list):
         raise ValueError("weak_labels_train must be a JSON array")
@@ -322,6 +399,25 @@ def materialize_phase1_training_samples(
     weak_by_video = _build_lookup_by_key(weak_records, lambda rec: int(rec.get('video_id', -1)))
     text_by_raw = _build_lookup_by_key(text_records, lambda rec: int(rec['raw_id']))
     pooled_frame_by_tid = _build_lookup_by_key(pooled_frame_records, lambda rec: str(rec['trajectory_id']))
+    timing_checkpoint(
+        "phase1_materialization_after_join_indices",
+        started_at=phase_t0,
+        carrier_by_tid=len(carrier_by_tid),
+        weak_by_clip=len(weak_by_clip),
+        weak_by_video=len(weak_by_video),
+        text_by_raw=len(text_by_raw),
+        pooled_frame_by_tid=len(pooled_frame_by_tid),
+        carrier_by_tid_shallow_size=shallow_size_bytes(carrier_by_tid),
+    )
+    memory_checkpoint(
+        "phase1_materialization_after_join_indices",
+        carrier_by_tid=len(carrier_by_tid),
+        weak_by_clip=len(weak_by_clip),
+        weak_by_video=len(weak_by_video),
+        text_by_raw=len(text_by_raw),
+        pooled_frame_by_tid=len(pooled_frame_by_tid),
+        carrier_by_tid_shallow_size=shallow_size_bytes(carrier_by_tid),
+    )
 
     materialized: List[Record] = []
     partial_samples: List[Record] = []
@@ -343,6 +439,7 @@ def materialize_phase1_training_samples(
 
         missing_views: List[str] = []
         invalid_reasons: List[str] = []
+        # Optional compatibility/audit sidecar only; not required for sample validity.
         pooled_frame_rec = pooled_frame_by_tid.get(trajectory_id)
 
         if carrier_rec is None:
@@ -406,6 +503,21 @@ def materialize_phase1_training_samples(
             for reason in sample["invalid_reasons"]:
                 bump(str(reason))
         materialized.append(sample)
+    timing_checkpoint(
+        "phase1_materialization_after_sample_build",
+        started_at=phase_t0,
+        materialized=len(materialized),
+        valid_samples=sum(1 for sample in materialized if bool(sample.get("sample_valid", False))),
+        invalid_samples=sum(1 for sample in materialized if not bool(sample.get("sample_valid", False))),
+        materialized_shallow_size=shallow_size_bytes(materialized),
+    )
+    memory_checkpoint(
+        "phase1_materialization_after_sample_build",
+        materialized=len(materialized),
+        valid_samples=sum(1 for sample in materialized if bool(sample.get("sample_valid", False))),
+        invalid_samples=sum(1 for sample in materialized if not bool(sample.get("sample_valid", False))),
+        materialized_shallow_size=shallow_size_bytes(materialized),
+    )
 
     sample_hash_a = _sample_fingerprint(materialized)
     # Determinism check: second pass using existing ordered inputs.
@@ -417,10 +529,35 @@ def materialize_phase1_training_samples(
 
     valid_samples = [sample for sample in materialized if bool(sample.get("sample_valid", False))]
     invalid_samples = [sample for sample in materialized if not bool(sample.get("sample_valid", False))]
-    if not config.smoke and invalid_samples:
-        raise RuntimeError("full-mode materialization currently requires complete views; invalid samples detected")
+    if not valid_samples:
+        raise RuntimeError("no valid samples available after phase-1 materialization")
     if config.smoke and not allow_skip_invalid and invalid_samples:
         raise RuntimeError("smoke missing-view policy forbids skipping invalid samples")
+
+    if config.subset_fraction is not None and float(config.subset_fraction) < 1.0:
+        valid_samples = _deterministic_stratified_subset(
+            valid_samples,
+            fraction=config.subset_fraction,
+            seed=int(config.subset_seed),
+        )
+        valid_sample_ids = {str(sample.get("trajectory_id", "")) for sample in valid_samples}
+        materialized = [sample for sample in materialized if str(sample.get("trajectory_id", "")) in valid_sample_ids]
+        invalid_samples = [sample for sample in invalid_samples if str(sample.get("trajectory_id", "")) in valid_sample_ids]
+    timing_checkpoint(
+        "phase1_materialization_after_subset",
+        started_at=phase_t0,
+        total_sample_count=len(materialized),
+        valid_sample_count=len(valid_samples),
+        invalid_sample_count=len(invalid_samples),
+        skip_reason_histogram=skip_reason_histogram,
+    )
+    memory_checkpoint(
+        "phase1_materialization_after_subset",
+        total_sample_count=len(materialized),
+        valid_sample_count=len(valid_samples),
+        invalid_sample_count=len(invalid_samples),
+        skip_reason_histogram=skip_reason_histogram,
+    )
 
     return {
         "resolution": resolution,
@@ -436,5 +573,7 @@ def materialize_phase1_training_samples(
             "determinism_hash_a": sample_hash_a,
             "determinism_hash_b": sample_hash_b,
             "determinism_ok": bool(sample_hash_a == sample_hash_b),
+            "subset_fraction": float(config.subset_fraction) if config.subset_fraction is not None else None,
+            "subset_seed": int(config.subset_seed),
         },
     }

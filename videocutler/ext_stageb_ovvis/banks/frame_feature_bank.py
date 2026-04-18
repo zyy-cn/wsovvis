@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, TextIO, Tuple
@@ -381,6 +382,7 @@ def write_frame_bank(
     return frame_records, geom_records
 
 
+@lru_cache(maxsize=8192)
 def parse_feat_path(feat_path: str) -> Tuple[Path, int]:
     if "#" not in feat_path:
         raise ValueError("feat_path missing #slot suffix")

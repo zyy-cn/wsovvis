@@ -4,6 +4,7 @@ import json
 import os
 import re
 import random
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -126,6 +127,17 @@ def _payload_paths(output_root: Path) -> Tuple[Path, Path]:
     return base_dir / "payload" / "text_prototypes.npz", base_dir / "text_prototype_records.jsonl"
 
 
+@lru_cache(maxsize=16)
+def _load_text_prototype_payload(payload_path_text: str) -> np.ndarray:
+    payload_path = Path(payload_path_text)
+    with np.load(payload_path, allow_pickle=False) as payload:
+        protos = np.asarray(payload["protos"], dtype=np.float32)
+    if protos.ndim != 2:
+        raise ValueError(f"payload protos must be rank-2: {payload_path}")
+    return protos
+
+
+@lru_cache(maxsize=8192)
 def parse_proto_path(proto_path: str) -> Tuple[Path, int]:
     match = _PROTO_LOCATOR_RE.match(proto_path)
     if not match:
@@ -143,10 +155,7 @@ def resolve_text_prototype(records_path: Path, record: Record) -> np.ndarray:
         raise ValueError(f"unsupported path_base_mode for raw_id={record.get('raw_id')}")
     rel_path, index = parse_proto_path(str(record["proto_path"]))
     payload_path = records_path.parent / rel_path
-    with np.load(payload_path, allow_pickle=False) as payload:
-        protos = np.asarray(payload["protos"], dtype=np.float32)
-    if protos.ndim != 2:
-        raise ValueError(f"payload protos must be rank-2: {payload_path}")
+    protos = _load_text_prototype_payload(str(payload_path))
     if index < 0 or index >= int(protos.shape[0]):
         raise IndexError(f"proto index out of range for raw_id={record['raw_id']}")
     return np.asarray(protos[index], dtype=np.float32)
@@ -172,6 +181,29 @@ def run_text_bank_reader_sanity(records_path: Path) -> List[Dict[str, Any]]:
             }
         )
     return rows
+
+
+def load_text_vocab(output_root: Path) -> Tuple[List[int], List[Record], np.ndarray]:
+    text_records_path = output_root / "text_bank" / "text_prototype_records.jsonl"
+    payload_path, _ = _payload_paths(output_root)
+    records = read_text_prototype_records(text_records_path)
+    raw_ids: List[int] = []
+    vectors: List[np.ndarray] = []
+    protos = _load_text_prototype_payload(str(payload_path))
+    for record in records:
+        raw_ids.append(int(record["raw_id"]))
+        rel_path, index = parse_proto_path(str(record["proto_path"]))
+        resolved_payload_path = text_records_path.parent / rel_path
+        if str(resolved_payload_path) != str(payload_path):
+            vectors.append(np.asarray(resolve_text_prototype(text_records_path, record), dtype=np.float32))
+            continue
+        if index < 0 or index >= int(protos.shape[0]):
+            raise IndexError(f"proto index out of range for raw_id={record['raw_id']}")
+        vectors.append(np.asarray(protos[index], dtype=np.float32))
+    if not vectors:
+        raise RuntimeError("text bank is empty")
+    matrix = np.stack(vectors, axis=0).astype(np.float32)
+    return raw_ids, records, matrix
 
 
 def build_text_bank(config: TextBankBuildConfig) -> Dict[str, Any]:
@@ -220,6 +252,8 @@ def build_text_bank(config: TextBankBuildConfig) -> Dict[str, Any]:
     payload_path, records_path = _payload_paths(config.output_root)
     payload_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(payload_path, protos=protos)
+    _load_text_prototype_payload.cache_clear()
+    _load_text_prototype_payload(str(payload_path))
     _write_jsonl(records_path, records)
 
     return {
