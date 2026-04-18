@@ -45,11 +45,17 @@ MAINLINEB_B1_CLASS_COUNT = 14
 MAINLINEB_B1_CLIP_COUNT = 48
 MAINLINEB_B2_CLASS_COUNT = 18
 MAINLINEB_B2_CLIP_COUNT = 64
+MAINLINEB_B3_CLASS_COUNT = 24
+MAINLINEB_B3_CLIP_COUNT = 96
 MAINLINEB_B1_TARGET_CLASS_IDS = list(range(1, 15))
 MAINLINEB_B2_TARGET_CLASS_IDS = list(range(1, 19))
+MAINLINEB_B3_TARGET_CLASS_IDS = list(range(1, 25))
 MAINLINEB_DISTRACTOR_CLASS_IDS = [21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51]
 MAINLINEB_B1_START_CLIP_ID = 300
 MAINLINEB_B2_START_CLIP_ID = 600
+MAINLINEB_B3_START_CLIP_ID = 900
+MAINLINEB_B3_SPLIT_IDS = ("split_3", "split_4")
+MAINLINEB_B3_DROP_RATIOS = (0.25, 0.50, 0.75)
 SMOKE_MAX_TRAJECTORIES = 32
 SMOKE_PREALIGN_EPOCHS = 1
 SMOKE_BASE_EPOCHS = 1
@@ -2154,6 +2160,7 @@ def _run_mainline_ratio_drop_stage(
     start_clip_id: int,
     prior_baselines: Mapping[str, Any],
     distractor_counts: Sequence[int],
+    drop_ratios: Sequence[float] = (0.25, 0.50),
 ) -> Dict[str, Any]:
     fixture = _write_mainline_ratio_drop_fixture(
         fixture_root,
@@ -2209,7 +2216,8 @@ def _run_mainline_ratio_drop_stage(
             "protocol_specs": [],
         }
 
-        for protocol_name, drop_ratio in [("ratio_drop_25", 0.25), ("ratio_drop_50", 0.50)]:
+        for drop_ratio in drop_ratios:
+            protocol_name = f"ratio_drop_{int(round(float(drop_ratio) * 100)):02d}"
             closed_root_name = f"{stage_label}_{split_id}_closed_set_{protocol_name}"
             matrix_run_specs.append(
                 {
@@ -2409,7 +2417,7 @@ def _run_mainline_ratio_drop_stage(
         "target_class_count": len(target_class_ids),
         "clip_count_target": clip_count_target,
         "split_ids": list(split_ids),
-        "protocol_types": ["ratio_drop_25", "ratio_drop_50"],
+        "protocol_types": [f"ratio_drop_{int(round(float(drop_ratio) * 100)):02d}" for drop_ratio in drop_ratios],
         "distractor_count_targets": list(distractor_counts),
         "settings": ["closed_set", "semi_open"],
         "closed_set_distractor_count": 0,
@@ -2418,7 +2426,7 @@ def _run_mainline_ratio_drop_stage(
         "closed_run_count": int(len([row for row in run_summaries if row.get("setting") == "closed_set"])),
         "semiopen_run_count": int(len([row for row in run_summaries if row.get("setting") == "semi_open"])),
         "run_specs": list(matrix_run_specs),
-        "recovery_protocols": ["ratio_drop_25", "ratio_drop_50"],
+        "recovery_protocols": [f"ratio_drop_{int(round(float(drop_ratio) * 100)):02d}" for drop_ratio in drop_ratios],
     }
     _emit_mainline_ratio_drop_artifacts(
         repo_root=repo_root,
@@ -2543,6 +2551,234 @@ def _emit_mainline_ratio_drop_family_artifacts(
         + "\n",
         encoding="utf-8",
     )
+
+
+def _emit_bounded_exploration_family_summary(repo_root: Path) -> None:
+    artifact_root = repo_root / "codex" / "outputs" / "G7_training"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    activation = _load_json_if_exists(repo_root / "package" / "reference" / "g7_bounded_exploration_family_activation.json")
+    current_task = _load_json_if_exists(repo_root / "codex" / "control" / "CURRENT_TASK.json")
+    preflight = _load_json_if_exists(repo_root / "codex" / "state" / "private-cache" / "preflight_result.json")
+
+    covered_families: List[str] = []
+    covered_class_counts: set[int] = set()
+    covered_clip_counts: set[int] = set()
+    covered_drop_ratios: set[float] = set()
+    covered_protocol_types: set[str] = set()
+    covered_distractor_counts: set[int] = set()
+    covered_split_ids: set[str] = set()
+    evidence_paths: List[str] = []
+
+    def _load_output(relpath: str) -> Dict[str, Any]:
+        payload = _load_json_if_exists(repo_root / relpath)
+        if payload:
+            evidence_paths.append(relpath)
+        return payload
+
+    def _add_family(name: str) -> None:
+        if name not in covered_families:
+            covered_families.append(name)
+
+    def _add_stage_coverage(payload: Mapping[str, Any]) -> None:
+        matrix = payload.get("matrix_manifest", {})
+        if not isinstance(matrix, Mapping) or matrix.get("status") != "PASS":
+            return
+        covered_class_counts.add(int(matrix.get("target_class_count", 0)))
+        covered_clip_counts.add(int(matrix.get("clip_count_target", 0)))
+        for value in matrix.get("split_ids", []):
+            covered_split_ids.add(str(value))
+        for value in matrix.get("distractor_count_targets", []):
+            covered_distractor_counts.add(int(value))
+        for value in matrix.get("run_specs", []):
+            if isinstance(value, Mapping):
+                drop_ratio = value.get("drop_ratio")
+                if drop_ratio is not None:
+                    covered_drop_ratios.add(round(float(drop_ratio), 2))
+                covered_distractor_counts.add(int(value.get("distractor_count", 0)))
+                protocol_type = str(value.get("protocol_type", "")).strip()
+                if protocol_type:
+                    covered_protocol_types.add(protocol_type)
+
+    closed_set = _load_output("codex/outputs/G7_training/g7_closed_set_drop_recovery_latest.json")
+    if closed_set.get("status") == "PASS":
+        _add_family("bounded closed-set")
+        covered_class_counts.add(int(closed_set.get("class_count_target", 0)))
+        covered_clip_counts.add(int(closed_set.get("clip_count_target", 0)))
+        covered_distractor_counts.add(0)
+
+    broader = _load_output("codex/outputs/G7_training/g7_broader_bounded_validation_latest.json")
+    if broader.get("status") == "PASS":
+        _add_family("bounded closed-set")
+        covered_class_counts.add(int(broader.get("class_count_target", 0)))
+        covered_clip_counts.add(int(broader.get("clip_count_target", 0)))
+        for value in broader.get("drop_ratio_targets", []):
+            covered_drop_ratios.add(round(float(value), 2))
+        covered_protocol_types.add("ratio_drop")
+        covered_distractor_counts.add(0)
+
+    semiopen = _load_output("codex/outputs/G7_training/g7_semiopen_bounded_validation_latest.json")
+    if semiopen.get("status") == "PASS":
+        _add_family("bounded semi-open")
+        covered_class_counts.add(int(semiopen.get("selected_class_count", 0)))
+        covered_clip_counts.add(int(semiopen.get("selected_clip_count", 0)))
+        covered_distractor_counts.add(int(semiopen.get("selected_distractor_count", 0)))
+        for protocol_summary in semiopen.get("protocol_summaries", {}).values():
+            if isinstance(protocol_summary, Mapping) and protocol_summary.get("drop_ratio") is not None:
+                covered_drop_ratios.add(round(float(protocol_summary["drop_ratio"]), 2))
+        covered_protocol_types.add("ratio_drop")
+
+    stressa = _load_output("codex/outputs/G7_training/g7_stress_validation_trancheA_latest.json")
+    if stressa.get("status") == "PASS":
+        _add_family("stronger distractor-pressure bounded validation")
+        _add_family("multi-split bounded robustness validation")
+        matrix = stressa.get("matrix_manifest", {})
+        covered_class_counts.add(int(matrix.get("target_class_count", 0)))
+        covered_clip_counts.add(int(matrix.get("clip_count_target", 0)))
+        for value in matrix.get("split_ids", []):
+            covered_split_ids.add(str(value))
+        for value in matrix.get("drop_ratio_targets", []):
+            covered_drop_ratios.add(round(float(value), 2))
+        for value in matrix.get("distractor_count_targets", []):
+            covered_distractor_counts.add(int(value))
+        for value in matrix.get("protocol_types", []):
+            covered_protocol_types.add(str(value))
+
+    mainline = _load_output("codex/outputs/G7_training/g7_mainline_bounded_trancheB_latest.json")
+    if mainline.get("status") == "PASS":
+        _add_family("stronger distractor-pressure bounded validation")
+        _add_family("multi-split bounded robustness validation")
+    for stage_relpath in [
+        "codex/outputs/G7_training/g7_mainline_bounded_trancheB1_latest.json",
+        "codex/outputs/G7_training/g7_mainline_bounded_trancheB2_latest.json",
+        "codex/outputs/G7_training/g7_mainline_bounded_trancheB3_latest.json",
+    ]:
+        _add_stage_coverage(_load_output(stage_relpath))
+
+    covered_class_counts.discard(0)
+    covered_clip_counts.discard(0)
+    covered_protocol_types.discard("")
+    covered_split_ids.discard("")
+
+    target_class_counts = [int(value) for value in activation.get("target_class_counts", [])]
+    clip_count_targets = [int(value) for value in activation.get("clip_count_targets", [])]
+    drop_ratio_targets = [round(float(value), 2) for value in activation.get("drop_ratio_targets", [])]
+    split_targets = [str(value) for value in activation.get("deterministic_split_ids", [])]
+    distractor_targets = [int(value) for value in activation.get("distractor_count_targets", [])]
+    protocol_targets = [str(value) for value in activation.get("allowed_protocol_types", [])]
+
+    task_truth_stamp = str(current_task.get("task_truth_stamp", "")).strip()
+    preflight_truth_stamp = str(preflight.get("task_truth_stamp", "")).strip()
+    preflight_pass = (
+        preflight.get("status") == "PASS"
+        and preflight.get("overall_preflight_status") == "PASS"
+        and bool(task_truth_stamp)
+        and task_truth_stamp == preflight_truth_stamp
+    )
+
+    missing_class_counts = [value for value in target_class_counts if value not in covered_class_counts]
+    missing_clip_counts = [value for value in clip_count_targets if value not in covered_clip_counts]
+    missing_drop_ratios = [value for value in drop_ratio_targets if value not in covered_drop_ratios]
+    missing_split_ids = [value for value in split_targets if value not in covered_split_ids]
+    missing_distractor_counts = [value for value in distractor_targets if value not in covered_distractor_counts]
+    missing_protocol_types = [value for value in protocol_targets if value not in covered_protocol_types]
+
+    current_blockers: List[str] = []
+    if not preflight_pass:
+        current_blockers.append("Current-task preflight PASS evidence is not present in canonical takeover/control surfaces.")
+    if missing_class_counts or missing_clip_counts or missing_drop_ratios or missing_split_ids:
+        current_blockers.append(
+            "Authorized bounded exploration coverage is partial: "
+            f"missing class_count={missing_class_counts or '[]'}, "
+            f"clip_count={missing_clip_counts or '[]'}, "
+            f"drop_ratio={missing_drop_ratios or '[]'}, "
+            f"split_ids={missing_split_ids or '[]'}."
+        )
+    if missing_distractor_counts:
+        current_blockers.append(f"Authorized distractor-count coverage remains partial: missing {missing_distractor_counts}.")
+    if missing_protocol_types:
+        current_blockers.append(f"Authorized protocol coverage remains partial: missing {missing_protocol_types}.")
+
+    bounded_family_closed = not current_blockers
+    status = "PASS" if bounded_family_closed else "BLOCKED"
+    next_action = (
+        "run current-task formal/validation/handoff closure before claiming G7 closure"
+        if bounded_family_closed
+        else "complete the remaining bounded exploration coverage and refresh current-task latest surfaces"
+    )
+    evidence_paths.append("codex/control/CURRENT_TASK.json")
+    evidence_paths.append("codex/control/VALIDATION_PLAN.json")
+    evidence_paths.append("codex/state/private-cache/preflight_result.json")
+
+    payload = {
+        "status": status,
+        "task_id": "G7_training-task",
+        "task_name": "g7_bounded_exploration_family",
+        "active_gate": "G7_training",
+        "execution_phase": str(current_task.get("execution_phase", "implementation")),
+        "deliverable_tier": str(current_task.get("deliverable_tier", "consumer_ready")),
+        "bounded_exploration_family_closed": bounded_family_closed,
+        "control_plane_truth": "machine_readable_current_task_and_validation_plan",
+        "coverage_status": {
+            "covered_families": covered_families,
+            "covered_target_class_counts": sorted(covered_class_counts),
+            "covered_clip_counts": sorted(covered_clip_counts),
+            "covered_drop_ratios": sorted(covered_drop_ratios),
+            "covered_protocol_types": sorted(covered_protocol_types),
+            "covered_distractor_counts": sorted(covered_distractor_counts),
+            "covered_split_ids": sorted(covered_split_ids, key=lambda value: int(value.split("_")[-1]) if value.startswith("split_") else value),
+        },
+        "missing_authorized_coverage": {
+            "target_class_counts": missing_class_counts,
+            "clip_counts": missing_clip_counts,
+            "drop_ratios": missing_drop_ratios,
+            "protocol_types": missing_protocol_types,
+            "distractor_counts": missing_distractor_counts,
+            "split_ids": missing_split_ids,
+        },
+        "current_blockers": current_blockers,
+        "evidence_paths": list(dict.fromkeys(evidence_paths)),
+        "next_action": next_action,
+        "summary_source": "g7_bounded_exploration_family_latest",
+    }
+    _write_json(artifact_root / "g7_bounded_exploration_family_latest.json", payload)
+
+    lines = [
+        "# G7 Bounded Exploration Family",
+        "",
+        f"- status: {status}",
+        f"- family_closure: {'achieved' if bounded_family_closed else 'not achieved'}",
+        f"- current task truth: `G7_training-task` in `{payload['execution_phase']}`",
+        f"- current-task preflight PASS: {'yes' if preflight_pass else 'no'}",
+        "",
+        "## Confirmed Coverage",
+        f"- covered families: {', '.join(covered_families) if covered_families else 'none'}",
+        f"- covered target class counts: `{sorted(covered_class_counts)}`",
+        f"- covered clip counts: `{sorted(covered_clip_counts)}`",
+        f"- covered drop ratios: `{sorted(covered_drop_ratios)}`",
+        f"- covered protocol types: `{sorted(covered_protocol_types)}`",
+        f"- covered distractor counts: `{sorted(covered_distractor_counts)}`",
+        f"- covered split ids: `{sorted(covered_split_ids, key=lambda value: int(value.split('_')[-1]) if value.startswith('split_') else value)}`",
+        "",
+        "## Remaining Gaps",
+    ]
+    if current_blockers:
+        lines.extend([f"- {blocker}" for blocker in current_blockers])
+    else:
+        lines.append("- Authorized bounded exploration coverage is complete for the package-defined matrix.")
+        lines.append("- G7 overall still requires current-task formal, validation, and handoff completion before closure can be claimed.")
+    lines.extend(
+        [
+            "",
+            "## Closure Decision",
+            (
+                "The bounded exploration family is fully covered for the authorized G7 matrix, "
+                "but G7 overall remains blocked until the current-task formal/validation/handoff chain is complete."
+                if bounded_family_closed
+                else "The bounded exploration family is still incomplete for the authorized G7 matrix, so G7 remains blocked."
+            ),
+        ]
+    )
+    (artifact_root / "g7_bounded_exploration_family_latest.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def test_tier2_selection_and_protocols_are_deterministic() -> None:
@@ -3406,3 +3642,45 @@ def test_mainline_ratio_drop_bounded_validation_tranche_b_smoke(tmp_path: Path) 
     assert (repo_root / "train" / "audit" / "mainline_ratio_drop_cross_stage_summary.json").is_file()
     assert (repo_root / "codex" / "outputs" / "G7_training" / "g7_mainline_bounded_trancheB_latest.json").is_file()
     assert (repo_root / "codex" / "outputs" / "G7_training" / "g7_mainline_bounded_trancheB_latest.md").is_file()
+
+
+def test_mainline_ratio_drop_bounded_validation_tranche_b3_authorized_gap_smoke(tmp_path: Path) -> None:
+    repo_root = _repo_root()
+    prior_baselines = _load_ratio_drop_baselines(repo_root)
+
+    b3_result = _run_mainline_ratio_drop_stage(
+        repo_root=repo_root,
+        fixture_root=tmp_path / "mainline_b3_fixture",
+        stage_label="B3",
+        split_ids=MAINLINEB_B3_SPLIT_IDS,
+        target_class_ids=MAINLINEB_B3_TARGET_CLASS_IDS,
+        distractor_class_ids=MAINLINEB_DISTRACTOR_CLASS_IDS,
+        clip_count_target=MAINLINEB_B3_CLIP_COUNT,
+        start_clip_id=MAINLINEB_B3_START_CLIP_ID,
+        prior_baselines=prior_baselines,
+        distractor_counts=MAINLINEB_DISTRACTOR_COUNTS,
+        drop_ratios=MAINLINEB_B3_DROP_RATIOS,
+    )
+
+    assert b3_result["matrix_manifest"]["status"] == "PASS"
+    assert b3_result["matrix_manifest"]["target_class_count"] == MAINLINEB_B3_CLASS_COUNT
+    assert b3_result["matrix_manifest"]["clip_count_target"] == MAINLINEB_B3_CLIP_COUNT
+    assert b3_result["matrix_manifest"]["split_ids"] == list(MAINLINEB_B3_SPLIT_IDS)
+    assert b3_result["matrix_manifest"]["recovery_protocols"] == ["ratio_drop_25", "ratio_drop_50", "ratio_drop_75"]
+    assert b3_result["cross_setting_summary"]["status"] == "PASS"
+    assert b3_result["cross_split_summary"]["status"] == "PASS"
+
+    _emit_bounded_exploration_family_summary(repo_root)
+
+    family_summary = _load_json_if_exists(repo_root / "codex" / "outputs" / "G7_training" / "g7_bounded_exploration_family_latest.json")
+    assert family_summary["coverage_status"]["covered_target_class_counts"][-1] == MAINLINEB_B3_CLASS_COUNT
+    assert family_summary["coverage_status"]["covered_clip_counts"][-1] == MAINLINEB_B3_CLIP_COUNT
+    assert family_summary["coverage_status"]["covered_drop_ratios"][-1] == 0.75
+    assert "split_3" in family_summary["coverage_status"]["covered_split_ids"]
+    assert "split_4" in family_summary["coverage_status"]["covered_split_ids"]
+    assert not family_summary["missing_authorized_coverage"]["target_class_counts"]
+    assert not family_summary["missing_authorized_coverage"]["clip_counts"]
+    assert not family_summary["missing_authorized_coverage"]["drop_ratios"]
+    assert not family_summary["missing_authorized_coverage"]["split_ids"]
+    assert (repo_root / "codex" / "outputs" / "G7_training" / "g7_mainline_bounded_trancheB3_latest.json").is_file()
+    assert (repo_root / "codex" / "outputs" / "G7_training" / "g7_mainline_bounded_trancheB3_latest.md").is_file()
