@@ -125,7 +125,7 @@ def _write_tier2_runtime_fixture(root: Path) -> Dict[str, Any]:
     text_dir = root / "text_bank"
     audit_dir = root / "audit"
     exports_dir = root / "exports" / "lvvis_train_base"
-    for path in (carrier_dir, frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
+    for path in (carrier_dir, carrier_dir / "payload", frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     class_ids = [*TIER2_TARGET_CLASS_IDS, *TIER2_DISTRACTOR_CLASS_IDS]
@@ -171,6 +171,10 @@ def _write_tier2_runtime_fixture(root: Path) -> Dict[str, Any]:
             carrier_payload[0, clip_index % 10] = 1.0
             carrier_path = carrier_dir / f"carrier_{clip_id:03d}.npz"
             np.savez(carrier_path, z_norm=carrier_payload)
+            frame_carrier_payload = np.zeros((1, 768), dtype=np.float16)
+            frame_carrier_payload[0, (clip_index + 1) % 10] = 1.0
+            frame_carrier_path = carrier_dir / "payload" / f"frame_{clip_id:03d}.npz"
+            np.savez(frame_carrier_path, z_norm=frame_carrier_payload)
 
             frame_payload = np.zeros((1, 4, 768), dtype=np.float16)
             frame_payload[0, 0, (clip_index + 1) % 10] = 1.0
@@ -189,7 +193,7 @@ def _write_tier2_runtime_fixture(root: Path) -> Dict[str, Any]:
                     "clip_id": str(clip_id),
                     "z_norm_path": f"{carrier_path.name}#z_norm[0]",
                     "frame_indices": [0],
-                    "frame_carriers_norm_paths": [],
+                    "frame_carriers_norm_paths": [f"payload/{frame_carrier_path.name}#z_norm[0]"],
                     "path_base_mode": "artifact_parent_dir",
                 }
             )
@@ -294,7 +298,7 @@ def _write_stressA_runtime_fixture(root: Path) -> Dict[str, Any]:
     text_dir = root / "text_bank"
     audit_dir = root / "audit"
     exports_dir = root / "exports" / "lvvis_train_base"
-    for path in (carrier_dir, frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
+    for path in (carrier_dir, carrier_dir / "payload", frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     class_ids = [*STRESSA_TARGET_CLASS_IDS, *STRESSA_DISTRACTOR_CLASS_IDS]
@@ -344,6 +348,10 @@ def _write_stressA_runtime_fixture(root: Path) -> Dict[str, Any]:
                 carrier_payload[0, (current_clip_id - split_start) % 10] = 1.0
                 carrier_path = carrier_dir / f"carrier_{current_clip_id:03d}.npz"
                 np.savez(carrier_path, z_norm=carrier_payload)
+                frame_carrier_payload = np.zeros((1, 768), dtype=np.float16)
+                frame_carrier_payload[0, (current_clip_id - split_start + 1) % 10] = 1.0
+                frame_carrier_path = carrier_dir / "payload" / f"frame_{current_clip_id:03d}.npz"
+                np.savez(frame_carrier_path, z_norm=frame_carrier_payload)
 
                 frame_payload = np.zeros((1, 4, 768), dtype=np.float16)
                 frame_payload[0, 0, (current_clip_id - split_start + 1) % 10] = 1.0
@@ -357,7 +365,7 @@ def _write_stressA_runtime_fixture(root: Path) -> Dict[str, Any]:
                         "clip_id": str(current_clip_id),
                         "z_norm_path": f"{carrier_path.name}#z_norm[0]",
                         "frame_indices": [0],
-                        "frame_carriers_norm_paths": [],
+                        "frame_carriers_norm_paths": [f"payload/{frame_carrier_path.name}#z_norm[0]"],
                         "path_base_mode": "artifact_parent_dir",
                     }
                 )
@@ -472,7 +480,7 @@ def _write_mainline_ratio_drop_fixture(
     text_dir = root / "text_bank"
     audit_dir = root / "audit"
     exports_dir = root / "exports" / "lvvis_train_base"
-    for path in (carrier_dir, frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
+    for path in (carrier_dir, carrier_dir / "payload", frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     class_ids = [*target_class_ids, *distractor_class_ids]
@@ -527,6 +535,10 @@ def _write_mainline_ratio_drop_fixture(
                 carrier_payload[0, (current_clip_id - split_start) % 10] = 1.0
                 carrier_path = carrier_dir / f"carrier_{current_clip_id:03d}.npz"
                 np.savez(carrier_path, z_norm=carrier_payload)
+                frame_carrier_payload = np.zeros((1, 768), dtype=np.float16)
+                frame_carrier_payload[0, (current_clip_id - split_start + 1) % 10] = 1.0
+                frame_carrier_path = carrier_dir / "payload" / f"frame_{current_clip_id:03d}.npz"
+                np.savez(frame_carrier_path, z_norm=frame_carrier_payload)
 
                 frame_payload = np.zeros((1, 4, 768), dtype=np.float16)
                 frame_payload[0, 0, (current_clip_id - split_start + 1) % 10] = 1.0
@@ -540,7 +552,7 @@ def _write_mainline_ratio_drop_fixture(
                         "clip_id": str(current_clip_id),
                         "z_norm_path": f"{carrier_path.name}#z_norm[0]",
                         "frame_indices": [0],
-                        "frame_carriers_norm_paths": [],
+                        "frame_carriers_norm_paths": [f"payload/{frame_carrier_path.name}#z_norm[0]"],
                         "path_base_mode": "artifact_parent_dir",
                     }
                 )

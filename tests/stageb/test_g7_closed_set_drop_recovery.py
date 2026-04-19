@@ -104,7 +104,7 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
     text_dir = root / "text_bank"
     audit_dir = root / "audit"
     exports_dir = root / "exports" / "lvvis_train_base"
-    for path in (carrier_dir, frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
+    for path in (carrier_dir, carrier_dir / "payload", frame_dir / "payload", text_dir / "payload", audit_dir, exports_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     class_names = {int(cid): f"class_{int(cid)}" for cid in REPO_CLASS_IDS}
@@ -141,6 +141,10 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
         carrier_payload[0, idx % 6] = 1.0
         carrier_path = carrier_dir / f"carrier_{clip_id:03d}.npz"
         np.savez(carrier_path, z_norm=carrier_payload)
+        frame_carrier_payload = np.zeros((1, 768), dtype=np.float16)
+        frame_carrier_payload[0, (idx + 1) % 6] = 1.0
+        frame_carrier_path = carrier_dir / "payload" / f"frame_{clip_id:03d}.npz"
+        np.savez(frame_carrier_path, z_norm=frame_carrier_payload)
         frame_payload = np.zeros((1, 4, 768), dtype=np.float16)
         frame_payload[0, 0, idx % 6] = 1.0
         frame_path = frame_dir / "payload" / f"clip_{clip_id:03d}.npz"
@@ -152,15 +156,15 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
         pooled_rows.append({"trajectory_id": trajectory_id, "clip_id": str(clip_id), "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": f"payload/{pooled_path.name}#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"})
 
         carrier_rows.append(
-            {
-                "trajectory_id": trajectory_id,
-                "clip_id": str(clip_id),
-                "z_norm_path": f"{carrier_path.name}#z_norm[0]",
-                "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
-                "path_base_mode": "artifact_parent_dir",
-            }
-        )
+                {
+                    "trajectory_id": trajectory_id,
+                    "clip_id": str(clip_id),
+                    "z_norm_path": f"{carrier_path.name}#z_norm[0]",
+                    "frame_indices": [0],
+                    "frame_carriers_norm_paths": [f"payload/{frame_carrier_path.name}#z_norm[0]"],
+                    "path_base_mode": "artifact_parent_dir",
+                }
+            )
         frame_rows.append(
             {
                 "clip_id": str(clip_id),
