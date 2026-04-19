@@ -63,12 +63,6 @@ def _prepare_fixture(root: Path) -> None:
         frame_dir / "frame_records.jsonl",
         [{"clip_id": "1", "frame_index": 0, "feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
     )
-    pooled_vec = np.eye(1, 768, 0, dtype=np.float32)[0]
-    np.savez(frame_dir / "payload" / "clip_1_pooled.npz", frame_pooled=np.stack([pooled_vec], axis=0).astype(np.float16))
-    _write_jsonl(
-        frame_dir / "pooled_frame_records.jsonl",
-        [{"trajectory_id": "traj_1", "clip_id": "1", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"}],
-    )
 
     _write_jsonl(
         frame_dir / "frame_geom_records.jsonl",

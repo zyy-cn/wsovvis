@@ -167,27 +167,6 @@ def _prepare_fixture(tmp_path: Path) -> Path:
         ],
     )
     _write_jsonl(
-        root / "frame_bank" / "lvvis_train_base" / "pooled_frame_records.jsonl",
-        [
-            {
-                "trajectory_id": "traj_000001",
-                "clip_id": "101",
-                "trajectory_source_branch": "mainline",
-                "frame_count": 2,
-                "frame_pooled_path": "payload/clip_101_pooled.npz#frame_pooled[0]",
-                "path_base_mode": "artifact_parent_dir",
-            },
-            {
-                "trajectory_id": "traj_000002",
-                "clip_id": "102",
-                "trajectory_source_branch": "mainline",
-                "frame_count": 1,
-                "frame_pooled_path": "payload/clip_102_pooled.npz#frame_pooled[0]",
-                "path_base_mode": "artifact_parent_dir",
-            },
-        ],
-    )
-    _write_jsonl(
         root / "text_bank" / "text_prototype_records.jsonl",
         [
             {"raw_id": 1, "proto_path": "payload/text_prototypes.npz#protos[0]", "path_base_mode": "artifact_parent_dir"},
@@ -201,8 +180,6 @@ def _prepare_fixture(tmp_path: Path) -> Path:
     (root / "frame_bank" / "lvvis_train_base" / "payload").mkdir(parents=True, exist_ok=True)
     np.savez(root / "frame_bank" / "lvvis_train_base" / "payload" / "clip_101_feats.npz", slot_0=np.ones((64, 768), dtype=np.float16), slot_1=np.ones((64, 768), dtype=np.float16))
     np.savez(root / "frame_bank" / "lvvis_train_base" / "payload" / "clip_102_feats.npz", slot_0=np.ones((64, 768), dtype=np.float16))
-    np.savez(root / "frame_bank" / "lvvis_train_base" / "payload" / "clip_101_pooled.npz", frame_pooled=np.ones((1, 768), dtype=np.float16))
-    np.savez(root / "frame_bank" / "lvvis_train_base" / "payload" / "clip_102_pooled.npz", frame_pooled=np.ones((1, 768), dtype=np.float16))
     (root / "text_bank" / "payload").mkdir(parents=True, exist_ok=True)
     text_protos = np.zeros((2, 512), dtype=np.float32)
     text_protos[0, 0] = 1.0
@@ -259,16 +236,15 @@ def test_phase1_materialization_prefers_authoritative_remote_when_local_incomple
     assert result["stats"]["valid_sample_count"] >= 1
 
 
-def test_phase1_materialization_accepts_missing_pooled_frame_records_when_frame_bank_exists(tmp_path: Path) -> None:
+def test_phase1_materialization_accepts_frame_bank_only_runtime_evidence(tmp_path: Path) -> None:
     root = _prepare_fixture(tmp_path)
-    (root / "frame_bank" / "lvvis_train_base" / "pooled_frame_records.jsonl").unlink()
     result = materialize_phase1_training_samples(
         root,
         Phase1MaterializationConfig(dataset_name="lvvis_train_base", smoke=True, smoke_max_trajectories=16),
     )
     by_tid = {sample["trajectory_id"]: sample for sample in result["samples"]}
     assert by_tid["traj_000001"]["sample_valid"] is True
-    assert "missing_pooled_frame_record" not in by_tid["traj_000001"]["invalid_reasons"]
+    assert "missing_runtime_frame_paths" not in by_tid["traj_000001"]["invalid_reasons"]
     assert result["resolution"]["required_canonical_views"] == [
         "trajectory_view",
         "carrier_view",
@@ -277,4 +253,4 @@ def test_phase1_materialization_accepts_missing_pooled_frame_records_when_frame_
         "frame_geometry_view",
         "text_bank_view",
     ]
-    assert result["resolution"]["upstream_asset_only_views"] == ["pooled_frame_view"]
+    assert result["resolution"]["upstream_asset_only_views"] == []

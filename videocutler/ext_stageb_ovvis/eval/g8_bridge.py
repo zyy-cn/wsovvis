@@ -16,7 +16,6 @@ from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
 )
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import _load_projector_from_checkpoint
 from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_carrier_records
-from videocutler.ext_stageb_ovvis.banks.frame_pooled_bank import pooled_frame_records_path
 from videocutler.ext_stageb_ovvis.banks.text_bank import load_text_vocab as load_text_bank_vocab
 
 
@@ -68,7 +67,6 @@ class InferenceAssetRoots:
     asset_root: Path
     trajectory_records_path: Path
     carrier_records_path: Path
-    pooled_frame_records_path: Path
     text_records_path: Path
 
 
@@ -216,7 +214,6 @@ def _carrier_records_relpath(dataset_name: str, trajectory_source_branch: str) -
 _REQUIRED_ASSET_RELPATHS = (
     lambda dataset_name, branch: _trajectory_records_relpath(dataset_name, branch),
     lambda dataset_name, branch: _carrier_records_relpath(dataset_name, branch),
-    lambda dataset_name, branch: Path("frame_bank") / dataset_name / "pooled_frame_records.jsonl",
     lambda dataset_name, branch: Path("text_bank") / "text_prototype_records.jsonl",
 )
 
@@ -259,7 +256,6 @@ def resolve_inference_asset_roots(
             asset_root=root,
             trajectory_records_path=root / _trajectory_records_relpath(dataset_name, trajectory_source_branch),
             carrier_records_path=root / _carrier_records_relpath(dataset_name, trajectory_source_branch),
-            pooled_frame_records_path=root / pooled_frame_records_path(root, dataset_name).relative_to(root),
             text_records_path=root / "text_bank" / "text_prototype_records.jsonl",
         )
     joined = "; ".join(errors) if errors else "no asset roots checked"
@@ -399,9 +395,7 @@ def build_infer_rows(
 ) -> Tuple[List[Record], Dict[str, Record], Dict[str, Record]]:
     trajectory_rows = load_jsonl(asset_roots.trajectory_records_path)
     carrier_rows = read_carrier_records(asset_roots.carrier_records_path)
-    pooled_rows = load_jsonl(asset_roots.pooled_frame_records_path)
     carrier_by_tid = {str(row.get("trajectory_id", "")): row for row in carrier_rows}
-    pooled_by_tid = {str(row.get("trajectory_id", "")): row for row in pooled_rows}
 
     rows: List[Record] = []
     skipped: Dict[str, int] = {}
@@ -415,13 +409,12 @@ def build_infer_rows(
             _bump("missing_trajectory_id")
             continue
         carrier_record = carrier_by_tid.get(trajectory_id)
-        pooled_frame_record = pooled_by_tid.get(trajectory_id)
         if carrier_record is None:
             _bump("missing_carrier_record")
             continue
         frame_paths = list(carrier_record.get("frame_carriers_norm_paths", [])) if isinstance(carrier_record, Mapping) else []
-        if pooled_frame_record is None and not frame_paths:
-            _bump("missing_pooled_frame_record")
+        if not frame_paths:
+            _bump("missing_runtime_frame_paths")
             continue
         rows.append(
             {
@@ -430,13 +423,11 @@ def build_infer_rows(
                 "video_id": int(traj.get("video_id", traj.get("clip_id", 0))),
                 "trajectory_record": traj,
                 "carrier_record": carrier_record,
-                "pooled_frame_record": pooled_frame_record,
             }
         )
     return rows, skipped, {
         "trajectory_count": {"total": len(trajectory_rows), "retained": len(rows)},
         "carrier_count": {"total": len(carrier_rows)},
-        "pooled_count": {"total": len(pooled_rows)},
     }
 
 
@@ -496,14 +487,8 @@ def score_infer_row(
     class_name_map: Mapping[int, str],
     logit_chunk_size: int,
 ) -> Dict[str, Any]:
-    sample_for_load = dict(row)
-    carrier_record = row.get("carrier_record") if isinstance(row.get("carrier_record"), Mapping) else {}
-    carrier_record_dict = dict(carrier_record)
-    if isinstance(carrier_record_dict.get("frame_carriers_norm_paths"), list) and not carrier_record_dict.get("frame_carriers_norm_paths"):
-        carrier_record_dict.pop("frame_carriers_norm_paths", None)
-    sample_for_load["carrier_record"] = carrier_record_dict
     carrier_vec, frame_vectors, frame_vec, _combined = load_combined_evidence(
-        sample_for_load,
+        row,
         output_root=asset_root,
         dataset_name=dataset_name,
         trajectory_source_branch=trajectory_source_branch,

@@ -61,14 +61,6 @@ def _prepare_fixture(root: Path) -> None:
         [{"clip_id": "1", "frame_index": 0, "orig_h": 28, "orig_w": 28, "resized_h": 28, "resized_w": 28, "padded_h": 28, "padded_w": 28, "scale_y": 1.0, "scale_x": 1.0, "pad_left": 0, "pad_top": 0, "pad_right": 0, "pad_bottom": 0, "patch_size": 14, "grid_h": 2, "grid_w": 2, "valid_token_mask_path": "frame_geom_records.jsonl#0", "path_base_mode": "artifact_parent_dir"}],
     )
     np.savez(frame_dir / "payload" / "clip_1_feats.npz", slot_0=np.ones((4, 768), dtype=np.float16))
-    pooled_vec = np.zeros((1, 768), dtype=np.float16)
-    pooled_vec[0, 1] = 1.0
-    np.savez(frame_dir / "payload" / "clip_1_pooled.npz", frame_pooled=pooled_vec)
-    _write_jsonl(
-        frame_dir / "pooled_frame_records.jsonl",
-        [{"trajectory_id": "traj-1", "clip_id": "1", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"}],
-    )
-
     protos = np.zeros((3, 512), dtype=np.float32)
     protos[0, 0] = 1.0
     protos[1, 1] = 1.0

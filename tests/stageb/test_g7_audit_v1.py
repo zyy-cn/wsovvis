@@ -30,6 +30,9 @@ def _prepare_fixture(root: Path) -> list[dict]:
     traj = np.zeros((1, 768), dtype=np.float16)
     traj[0, 0] = 1.0
     np.savez(carrier_dir / "carrier_vectors_traj.npz", z_norm=traj)
+    frame_vec = np.zeros((1, 768), dtype=np.float16)
+    frame_vec[0, 6] = 1.0
+    np.savez(carrier_dir / "carrier_vectors_frame.npz", z_norm=frame_vec)
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
         [
@@ -38,7 +41,7 @@ def _prepare_fixture(root: Path) -> list[dict]:
                 "clip_id": "1",
                 "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]",
                 "frame_indices": [1],
-                "frame_carriers_norm_paths": [],
+                "frame_carriers_norm_paths": ["carrier_vectors_frame.npz#z_norm[0]"],
                 "path_base_mode": "artifact_parent_dir",
             }
         ],
@@ -66,13 +69,6 @@ def _prepare_fixture(root: Path) -> list[dict]:
         frame_dir / "frame_records.jsonl",
         [{"clip_id": "1", "frame_index": 0, "feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
     )
-    pooled_vec = np.eye(1, 768, 0, dtype=np.float32)[0]
-    np.savez(frame_dir / "payload" / "clip_1_pooled.npz", frame_pooled=np.stack([pooled_vec], axis=0).astype(np.float16))
-    _write_jsonl(
-        frame_dir / "pooled_frame_records.jsonl",
-        [{"trajectory_id": "traj-1", "clip_id": "1", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"}],
-    )
-
     _write_jsonl(
         frame_dir / "frame_geom_records.jsonl",
         [
@@ -141,7 +137,6 @@ def _prepare_fixture(root: Path) -> list[dict]:
         "trajectory_record": {"video_id": 1},
         "carrier_record": {"z_norm_path": "carrier_vectors_traj.npz#z_norm[0]"},
         "weak_label_record": {"observed_raw_ids": [3]},
-        "pooled_frame_record": {"frame_pooled_path": "payload/clip_1_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
         "frame_feature_rows": [{"feat_path": "payload/clip_1_feats.npz#0", "path_base_mode": "artifact_parent_dir"}],
         "frame_geometry_rows": [
             {

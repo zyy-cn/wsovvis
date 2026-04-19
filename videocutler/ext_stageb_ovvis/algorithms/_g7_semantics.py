@@ -13,7 +13,6 @@ import torch.nn.functional as F
 
 from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_locator
 from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import read_feature_vector, reconstruct_valid_token_mask_from_geometry
-from videocutler.ext_stageb_ovvis.banks.frame_pooled_bank import read_pooled_frame_vector
 from videocutler.ext_stageb_ovvis.banks.text_bank import read_text_prototype_records, resolve_text_prototype
 from videocutler.ext_stageb_ovvis.algorithms._memory_audit import timing_checkpoint
 
@@ -161,7 +160,6 @@ def load_combined_evidence(
 ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
     global _LOAD_EVIDENCE_AUDIT_COUNT
     carrier_parent = _carrier_parent_dir(output_root, dataset_name, trajectory_source_branch)
-    pooled_frame_parent = output_root / 'frame_bank' / dataset_name
     audit_index = int(_LOAD_EVIDENCE_AUDIT_COUNT)
     _LOAD_EVIDENCE_AUDIT_COUNT += 1
     audit_enabled = audit_index < 3
@@ -206,14 +204,7 @@ def load_combined_evidence(
         frame_stack = np.stack([np.asarray(vec, dtype=np.float32) for vec in frame_vectors], axis=0).astype(np.float32)
         frame_vec = np.mean(frame_stack, axis=0).astype(np.float32)
     else:
-        # Compatibility-side sidecar only. The authoritative runtime path is carrier_record.frame_carriers_norm_paths.
-        pooled_frame_record = sample.get('pooled_frame_record')
-        if not isinstance(pooled_frame_record, Mapping):
-            raise ValueError('missing pooled_frame_record')
-        frame_pooled_path = str(pooled_frame_record.get('frame_pooled_path', ''))
-        if not frame_pooled_path:
-            raise ValueError('missing pooled_frame_record.frame_pooled_path')
-        frame_vec = np.asarray(read_pooled_frame_vector(pooled_frame_parent, frame_pooled_path), dtype=np.float32)
+        raise ValueError('missing runtime frame evidence: carrier_record.frame_carriers_norm_paths')
     if audit_enabled:
         timing_checkpoint(
             'load_combined_evidence_after_frame_vec',

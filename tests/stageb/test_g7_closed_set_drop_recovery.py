@@ -128,7 +128,6 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
     carrier_rows: List[Record] = []
     frame_rows: List[Record] = []
     geom_rows: List[Record] = []
-    pooled_rows: List[Record] = []
     weak_rows: List[Record] = []
     gt_rows: List[Record] = []
 
@@ -149,11 +148,6 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
         frame_payload[0, 0, idx % 6] = 1.0
         frame_path = frame_dir / "payload" / f"clip_{clip_id:03d}.npz"
         np.savez(frame_path, slot_0=frame_payload[0])
-        pooled_payload = np.zeros((1, 768), dtype=np.float16)
-        pooled_payload[0, idx % 6] = 1.0
-        pooled_path = frame_dir / "payload" / f"clip_{clip_id:03d}_pooled.npz"
-        np.savez(pooled_path, frame_pooled=pooled_payload)
-        pooled_rows.append({"trajectory_id": trajectory_id, "clip_id": str(clip_id), "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": f"payload/{pooled_path.name}#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"})
 
         carrier_rows.append(
                 {
@@ -246,7 +240,6 @@ def _write_synthetic_runtime_fixture(root: Path) -> Dict[str, Any]:
     _write_jsonl(carrier_dir / "carrier_records.jsonl", carrier_rows)
     _write_jsonl(frame_dir / "frame_records.jsonl", frame_rows)
     _write_jsonl(frame_dir / "frame_geom_records.jsonl", geom_rows)
-    _write_jsonl(frame_dir / "pooled_frame_records.jsonl", pooled_rows)
     _write_json(root / "weak_labels" / "weak_labels_train.json", weak_rows)
     _write_jsonl(exports_dir / "trajectory_records.jsonl", trajectory_rows)
     _write_jsonl(audit_dir / "trajectory_gt_match_train_mainline.jsonl", gt_rows)

@@ -77,7 +77,6 @@ def _asset_relpaths(*, dataset_name: str, trajectory_source_branch: str) -> Dict
         "carrier_records": f"{carrier_base}/{dataset_name}/carrier_records.jsonl",
         "frame_records": f"frame_bank/{dataset_name}/frame_records.jsonl",
         "frame_geom_records": f"frame_bank/{dataset_name}/frame_geom_records.jsonl",
-        "pooled_frame_records": f"frame_bank/{dataset_name}/pooled_frame_records.jsonl",
         "weak_labels": "weak_labels/weak_labels_train.json",
         "text_prototypes": "text_bank/text_prototype_records.jsonl",
     }
@@ -113,7 +112,6 @@ def _scan_asset_root(output_root: Path, rels: Mapping[str, str]) -> Dict[str, An
         "weak_label_view": bool(assets["weak_labels"]["non_empty"]),
         "frame_feature_view": bool(assets["frame_records"]["non_empty"]),
         "frame_geometry_view": bool(assets["frame_geom_records"]["non_empty"] and frame_geom_parity),
-        "pooled_frame_view": bool(assets["pooled_frame_records"]["non_empty"]),
         "text_bank_view": bool(assets["text_prototypes"]["non_empty"]),
     }
     required_view_keys = [
@@ -125,7 +123,6 @@ def _scan_asset_root(output_root: Path, rels: Mapping[str, str]) -> Dict[str, An
         "text_bank_view",
     ]
     upstream_asset_view_keys = [
-        "pooled_frame_view",
     ]
     return {
         "output_root": str(output_root),
@@ -366,7 +363,6 @@ def materialize_phase1_training_samples(
         _load_jsonl(runtime_output_root / assets["trajectory_records"]["path"], limit=traj_limit)
     )
     carrier_records = _load_jsonl(runtime_output_root / assets["carrier_records"]["path"])
-    pooled_frame_records = _load_jsonl(runtime_output_root / assets["pooled_frame_records"]["path"]) if assets["pooled_frame_records"]["exists"] else []
     weak_records = _load_json(runtime_output_root / assets["weak_labels"]["path"])
     text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(runtime_output_root)
     timing_checkpoint(
@@ -374,7 +370,6 @@ def materialize_phase1_training_samples(
         started_at=phase_t0,
         trajectory_records=len(trajectory_records),
         carrier_records=len(carrier_records),
-        pooled_frame_records=len(pooled_frame_records),
         weak_records=len(weak_records) if isinstance(weak_records, list) else 0,
         text_vocab_size=len(text_vocab_ids),
         text_vocab_matrix_shape=getattr(text_vocab_matrix, "shape", None),
@@ -384,7 +379,6 @@ def materialize_phase1_training_samples(
         "phase1_materialization_after_asset_load",
         trajectory_records=len(trajectory_records),
         carrier_records=len(carrier_records),
-        pooled_frame_records=len(pooled_frame_records),
         weak_records=len(weak_records) if isinstance(weak_records, list) else 0,
         text_vocab_size=len(text_vocab_ids),
         text_vocab_matrix_shape=getattr(text_vocab_matrix, "shape", None),
@@ -398,7 +392,6 @@ def materialize_phase1_training_samples(
     weak_by_clip = _build_lookup_by_key(weak_records, lambda rec: str(rec.get('clip_id', '')))
     weak_by_video = _build_lookup_by_key(weak_records, lambda rec: int(rec.get('video_id', -1)))
     text_by_raw = _build_lookup_by_key(text_records, lambda rec: int(rec['raw_id']))
-    pooled_frame_by_tid = _build_lookup_by_key(pooled_frame_records, lambda rec: str(rec['trajectory_id']))
     timing_checkpoint(
         "phase1_materialization_after_join_indices",
         started_at=phase_t0,
@@ -406,7 +399,6 @@ def materialize_phase1_training_samples(
         weak_by_clip=len(weak_by_clip),
         weak_by_video=len(weak_by_video),
         text_by_raw=len(text_by_raw),
-        pooled_frame_by_tid=len(pooled_frame_by_tid),
         carrier_by_tid_shallow_size=shallow_size_bytes(carrier_by_tid),
     )
     memory_checkpoint(
@@ -415,7 +407,6 @@ def materialize_phase1_training_samples(
         weak_by_clip=len(weak_by_clip),
         weak_by_video=len(weak_by_video),
         text_by_raw=len(text_by_raw),
-        pooled_frame_by_tid=len(pooled_frame_by_tid),
         carrier_by_tid_shallow_size=shallow_size_bytes(carrier_by_tid),
     )
 
@@ -439,8 +430,6 @@ def materialize_phase1_training_samples(
 
         missing_views: List[str] = []
         invalid_reasons: List[str] = []
-        # Optional compatibility/audit sidecar only; not required for sample validity.
-        pooled_frame_rec = pooled_frame_by_tid.get(trajectory_id)
 
         if carrier_rec is None:
             missing_views.append("carrier_view")
@@ -455,7 +444,6 @@ def materialize_phase1_training_samples(
             "trajectory_record": traj,
             "carrier_record": carrier_rec,
             "weak_label_record": weak_rec,
-            "pooled_frame_record": pooled_frame_rec,
             "missing_views": sorted(set(missing_views)),
             "invalid_reasons": sorted(set(invalid_reasons)),
         })
@@ -482,7 +470,6 @@ def materialize_phase1_training_samples(
             "trajectory_record": partial["trajectory_record"],
             "carrier_record": partial["carrier_record"],
             "weak_label_record": weak_rec,
-            "pooled_frame_record": partial["pooled_frame_record"],
             "candidate_text_prototypes": candidate_text,
             "observed_raw_ids": observed_raw_ids,
             "candidate_ids_known": candidate_ids_known,

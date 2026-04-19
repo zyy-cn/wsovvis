@@ -50,6 +50,12 @@ def _prepare_fixture(root: Path) -> None:
     carrier[1, 1] = 1.0
     np.savez(carrier_dir / "carrier_vectors_traj_a.npz", z_norm=carrier[:1])
     np.savez(carrier_dir / "carrier_vectors_traj_b.npz", z_norm=carrier[1:2])
+    frame_a_vec = np.zeros((1, 768), dtype=np.float16)
+    frame_a_vec[0, 4] = 1.0
+    frame_b_vec = np.zeros((1, 768), dtype=np.float16)
+    frame_b_vec[0, 3] = 1.0
+    np.savez(carrier_dir / "carrier_vectors_frame_a.npz", z_norm=frame_a_vec)
+    np.savez(carrier_dir / "carrier_vectors_frame_b.npz", z_norm=frame_b_vec)
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
         [
@@ -58,7 +64,7 @@ def _prepare_fixture(root: Path) -> None:
                 "clip_id": "10",
                 "z_norm_path": "carrier_vectors_traj_a.npz#z_norm[0]",
                 "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
+                "frame_carriers_norm_paths": ["carrier_vectors_frame_a.npz#z_norm[0]"],
                 "path_base_mode": "artifact_parent_dir",
             },
             {
@@ -66,7 +72,7 @@ def _prepare_fixture(root: Path) -> None:
                 "clip_id": "11",
                 "z_norm_path": "carrier_vectors_traj_b.npz#z_norm[0]",
                 "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
+                "frame_carriers_norm_paths": ["carrier_vectors_frame_b.npz#z_norm[0]"],
                 "path_base_mode": "artifact_parent_dir",
             },
         ],
@@ -127,31 +133,6 @@ def _prepare_fixture(root: Path) -> None:
                 "grid_h": 2,
                 "grid_w": 2,
                 "valid_token_mask_path": "frame_geom_records.jsonl#1",
-                "path_base_mode": "artifact_parent_dir",
-            },
-        ],
-    )
-    pooled = np.zeros((2, 768), dtype=np.float16)
-    pooled[0, 4] = 1.0
-    pooled[1, 3] = 1.0
-    np.savez(frame_dir / "payload" / "clips_pooled.npz", pooled=pooled)
-    _write_jsonl(
-        frame_dir / "pooled_frame_records.jsonl",
-        [
-            {
-                "trajectory_id": "traj-a",
-                "clip_id": "10",
-                "trajectory_source_branch": "mainline",
-                "frame_count": 1,
-                "frame_pooled_path": "payload/clips_pooled.npz#pooled[0]",
-                "path_base_mode": "artifact_parent_dir",
-            },
-            {
-                "trajectory_id": "traj-b",
-                "clip_id": "11",
-                "trajectory_source_branch": "mainline",
-                "frame_count": 1,
-                "frame_pooled_path": "payload/clips_pooled.npz#pooled[1]",
                 "path_base_mode": "artifact_parent_dir",
             },
         ],

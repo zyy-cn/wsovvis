@@ -48,6 +48,9 @@ def _prepare_infer_fixture(root: Path) -> None:
     traj = np.zeros((1, 768), dtype=np.float16)
     traj[0, 0] = 1.0
     np.savez(carrier_dir / "carrier_vectors_traj.npz", z_norm=traj)
+    frame_vec = np.zeros((1, 768), dtype=np.float16)
+    frame_vec[0, 1] = 1.0
+    np.savez(carrier_dir / "carrier_vectors_frame.npz", z_norm=frame_vec)
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
         [
@@ -56,24 +59,7 @@ def _prepare_infer_fixture(root: Path) -> None:
                 "clip_id": "101",
                 "z_norm_path": "carrier_vectors_traj.npz#z_norm[0]",
                 "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
-                "path_base_mode": "artifact_parent_dir",
-            }
-        ],
-    )
-
-    pooled = np.zeros((1, 768), dtype=np.float16)
-    pooled[0, 1] = 1.0
-    np.savez(frame_dir / "payload" / "clip_101_pooled.npz", frame_pooled=pooled)
-    _write_jsonl(
-        frame_dir / "pooled_frame_records.jsonl",
-        [
-            {
-                "trajectory_id": "traj-101-0",
-                "clip_id": "101",
-                "trajectory_source_branch": "mainline",
-                "frame_count": 1,
-                "frame_pooled_path": "payload/clip_101_pooled.npz#frame_pooled[0]",
+                "frame_carriers_norm_paths": ["carrier_vectors_frame.npz#z_norm[0]"],
                 "path_base_mode": "artifact_parent_dir",
             }
         ],

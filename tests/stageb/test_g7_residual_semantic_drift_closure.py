@@ -59,17 +59,21 @@ def _prepare_evidence_fixture(root: Path) -> None:
     carrier_a = np.zeros((1, 768), dtype=np.float16)
     carrier_a[0, 3] = 1.0
     np.savez(carrier_dir / "carrier_vectors_traj_a.npz", z_norm=carrier_a)
+    frame_a_carrier = np.zeros((1, 768), dtype=np.float16)
+    frame_a_carrier[0, 4] = 1.0
+    np.savez(carrier_dir / "carrier_vectors_frame_a.npz", z_norm=frame_a_carrier)
     frame_a = np.zeros((1, 4, 768), dtype=np.float16)
     frame_a[0, 0, 4] = 1.0
     np.savez(frame_dir / "payload" / "clip_a_feats.npz", slot_0=frame_a[0])
     carrier_b = np.zeros((1, 768), dtype=np.float16)
     carrier_b[0, 1] = 1.0
     np.savez(carrier_dir / "carrier_vectors_traj_b.npz", z_norm=carrier_b)
+    frame_b_carrier = np.zeros((1, 768), dtype=np.float16)
+    frame_b_carrier[0, 2] = 1.0
+    np.savez(carrier_dir / "carrier_vectors_frame_b.npz", z_norm=frame_b_carrier)
     frame_b = np.zeros((1, 4, 768), dtype=np.float16)
     frame_b[0, 0, 2] = 1.0
     np.savez(frame_dir / "payload" / "clip_b_feats.npz", slot_0=frame_b[0])
-    np.savez(frame_dir / "payload" / "clip_10_pooled.npz", frame_pooled=np.asarray([[1.0, 0.0, 0.0, 0.0] + [0.0] * 764], dtype=np.float16))
-    np.savez(frame_dir / "payload" / "clip_11_pooled.npz", frame_pooled=np.asarray([[0.0, 1.0, 0.0, 0.0] + [0.0] * 764], dtype=np.float16))
 
     _write_jsonl(
         carrier_dir / "carrier_records.jsonl",
@@ -79,7 +83,7 @@ def _prepare_evidence_fixture(root: Path) -> None:
                 "clip_id": "10",
                 "z_norm_path": "carrier_vectors_traj_a.npz#z_norm[0]",
                 "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
+                "frame_carriers_norm_paths": ["carrier_vectors_frame_a.npz#z_norm[0]"],
                 "path_base_mode": "artifact_parent_dir",
             },
             {
@@ -87,7 +91,7 @@ def _prepare_evidence_fixture(root: Path) -> None:
                 "clip_id": "11",
                 "z_norm_path": "carrier_vectors_traj_b.npz#z_norm[0]",
                 "frame_indices": [0],
-                "frame_carriers_norm_paths": [],
+                "frame_carriers_norm_paths": ["carrier_vectors_frame_b.npz#z_norm[0]"],
                 "path_base_mode": "artifact_parent_dir",
             },
         ],
@@ -97,13 +101,6 @@ def _prepare_evidence_fixture(root: Path) -> None:
         [
             {"clip_id": "10", "frame_index": 0, "feat_path": "payload/clip_a_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
             {"clip_id": "11", "frame_index": 0, "feat_path": "payload/clip_b_feats.npz#0", "path_base_mode": "artifact_parent_dir"},
-        ],
-    )
-    _write_jsonl(
-        frame_dir / "pooled_frame_records.jsonl",
-        [
-            {"trajectory_id": "traj-a", "clip_id": "10", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_10_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
-            {"trajectory_id": "traj-b", "clip_id": "11", "trajectory_source_branch": "mainline", "frame_count": 1, "frame_pooled_path": "payload/clip_11_pooled.npz#frame_pooled[0]", "path_base_mode": "artifact_parent_dir"},
         ],
     )
     _write_jsonl(
