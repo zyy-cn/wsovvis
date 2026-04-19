@@ -11,6 +11,8 @@ weights/
 runs/
 codex/
 train/
+eval/
+predictions/
 outputs/
 frame_bank/
 exports/
