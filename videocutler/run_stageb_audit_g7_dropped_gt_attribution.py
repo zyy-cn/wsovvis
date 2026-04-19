@@ -37,6 +37,14 @@ def _summary_md_path(repo_root: Path) -> Path:
     return repo_root / "codex" / "outputs" / "G7_training" / "g7_dropped_gt_attribution_latest.md"
 
 
+def _summary_by_split_path(repo_root: Path) -> Path:
+    return repo_root / "codex" / "outputs" / "G7_training" / "g7_dropped_gt_attribution_latest_by_split.json"
+
+
+def _summary_by_split_md_path(repo_root: Path) -> Path:
+    return repo_root / "codex" / "outputs" / "G7_training" / "g7_dropped_gt_attribution_latest_by_split.md"
+
+
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -45,6 +53,39 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 def _write_md(path: Path, lines: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _write_split_md(path: Path, payload: Dict[str, Any]) -> None:
+    lines = [
+        "# G7 Dropped GT Attribution Audit by Split",
+        "",
+        f"- status: {payload.get('status', 'EMPTY')}",
+        f"- requested_stage: {payload.get('requested_stage', 'all')}",
+        "",
+        "| stage | split | dropped_gt_count | mean_normalized_gt_rank | gt_top1_hit_rate | gt_top5_hit_rate | gt_top10_hit_rate | mrr | wrong_top1_is_base_rate | in_stage_domain_rate | margin_to_best_wrong_mean |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    stage_summaries_by_split = dict(payload.get("stage_summaries_by_split", {}))
+    for stage_id in ("prealign", "softem_base", "softem_aug"):
+        stage_split_summaries = dict(stage_summaries_by_split.get(stage_id, {}))
+        for split in ("base_observed", "base_unobserved", "novel_unobserved"):
+            summary = dict(stage_split_summaries.get(split, {}))
+            lines.append(
+                "| {stage} | {split} | {count} | {rank} | {top1} | {top5} | {top10} | {mrr} | {wrong_base} | {in_domain} | {margin} |".format(
+                    stage=stage_id,
+                    split=split,
+                    count=summary.get("dropped_gt_count"),
+                    rank=summary.get("mean_normalized_gt_rank"),
+                    top1=summary.get("gt_top1_hit_rate"),
+                    top5=summary.get("gt_top5_hit_rate"),
+                    top10=summary.get("gt_top10_hit_rate"),
+                    mrr=summary.get("mrr"),
+                    wrong_base=summary.get("wrong_top1_is_base_rate"),
+                    in_domain=summary.get("in_stage_domain_rate"),
+                    margin=summary.get("margin_to_best_wrong_mean"),
+                )
+            )
+    _write_md(path, lines)
 
 
 def main() -> int:
@@ -78,6 +119,7 @@ def main() -> int:
             "training_semantics_changed": False,
             "artifacts": {
                 "summary": "train/audit/dropped_gt_attribution_summary.json",
+                "summary_by_split": "train/audit/dropped_gt_attribution_summary_by_split.json",
                 "ledgers": [
                     "train/prealign/dropped_gt_attribution_ledger.jsonl",
                     "train/softem_base/dropped_gt_attribution_ledger.jsonl",
@@ -85,6 +127,8 @@ def main() -> int:
                 ],
                 "hand_off_md": "codex/outputs/G7_training/g7_dropped_gt_attribution_latest.md",
                 "hand_off_json": "codex/outputs/G7_training/g7_dropped_gt_attribution_latest.json",
+                "hand_off_by_split_md": "codex/outputs/G7_training/g7_dropped_gt_attribution_latest_by_split.md",
+                "hand_off_by_split_json": "codex/outputs/G7_training/g7_dropped_gt_attribution_latest_by_split.json",
             },
         }
     )
@@ -118,6 +162,18 @@ def main() -> int:
             ]
         )
     _write_md(_summary_md_path(repo_root), lines)
+    by_split_payload = {
+        "status": payload.get("status", "EMPTY"),
+        "requested_stage": payload.get("requested_stage", "all"),
+        "dataset_name": payload.get("dataset_name"),
+        "trajectory_source_branch": payload.get("trajectory_source_branch"),
+        "smoke": payload.get("smoke"),
+        "smoke_max_trajectories": payload.get("smoke_max_trajectories"),
+        "stage_summaries_by_split": payload.get("stage_summaries_by_split", {}),
+        "summary_by_split_paths": payload.get("summary_by_split_paths", {}),
+    }
+    _write_json(_summary_by_split_path(repo_root), by_split_payload)
+    _write_split_md(_summary_by_split_md_path(repo_root), by_split_payload)
     print(json.dumps(payload, ensure_ascii=False))
     return 0
 

@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
 from videocutler.ext_stageb_ovvis.banks.text_bank import read_text_prototype_records
+from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
     Phase1MaterializationConfig,
     materialize_phase1_training_samples,
@@ -59,6 +60,16 @@ def _text_vocab_ids(output_root: Path) -> List[int]:
     return [int(record["raw_id"]) for record in records]
 
 
+def _load_lvvis_split_reference() -> Tuple[List[int], List[int]]:
+    ann_paths = resolve_lvvis_annotation_paths()
+    train_payload = json.loads(ann_paths.train_json.read_text(encoding="utf-8"))
+    val_payload = json.loads(ann_paths.val_json.read_text(encoding="utf-8"))
+    base_raw_ids = sorted({int(ann["category_id"]) for ann in train_payload.get("annotations", [])})
+    eval_raw_ids = sorted({int(ann["category_id"]) for ann in val_payload.get("annotations", [])})
+    novel_raw_ids = sorted(set(eval_raw_ids) - set(base_raw_ids))
+    return base_raw_ids, novel_raw_ids
+
+
 def _resolve_stage_path(output_root: Path, stage_id: str) -> Path:
     if stage_id == "prealign":
         return output_root / "train" / "prealign" / "proxy_records.jsonl"
@@ -76,6 +87,16 @@ def _sample_lookup(samples: Sequence[Mapping[str, Any]]) -> Dict[str, Record]:
         if tid:
             lookup[tid] = dict(sample)
     return lookup
+
+
+def _dropped_gt_split_label(*, gt_raw_id: int, observed_raw_ids: Sequence[int], base_vocab_ids: Sequence[int]) -> str:
+    base_vocab = {int(x) for x in base_vocab_ids}
+    observed_vocab = {int(x) for x in observed_raw_ids}
+    if int(gt_raw_id) in base_vocab and int(gt_raw_id) in observed_vocab:
+        return "base_observed"
+    if int(gt_raw_id) in base_vocab:
+        return "base_unobserved"
+    return "novel_unobserved"
 
 
 def _score_map_from_prealign(row: Mapping[str, Any]) -> Tuple[Dict[int, float], Optional[float], List[int]]:
@@ -165,6 +186,82 @@ def _rank_metrics_for_gt(
     }
 
 
+def _summarize_dropped_gt_subset(rows: Sequence[Mapping[str, Any]], *, stage_id: str) -> Dict[str, Any]:
+    gt_available_rows = [row for row in rows if bool(row.get("gt_available_for_audit"))]
+    dropped_rows = [row for row in gt_available_rows if bool(row.get("gt_missing_from_observed"))]
+    in_domain_rows = [row for row in dropped_rows if bool(row.get("dropped_gt_in_stage_domain"))]
+    ranks = [int(row["dropped_gt_rank"]) for row in dropped_rows if row.get("dropped_gt_rank") is not None]
+    mrrs = [float(row["dropped_gt_mrr"]) for row in dropped_rows if row.get("dropped_gt_mrr") is not None]
+    margins = [float(row["dropped_gt_margin_to_best_wrong"]) for row in dropped_rows if row.get("dropped_gt_margin_to_best_wrong") is not None]
+    scores = [float(row["dropped_gt_score"]) for row in dropped_rows if row.get("dropped_gt_score") is not None]
+    wrong_top1_base_count = sum(1 for row in dropped_rows if bool(row.get("wrong_top1_is_base")))
+    top1_counter = Counter(
+        str(row.get("stage_top1_id"))
+        for row in dropped_rows
+        if row.get("stage_top1_id") is not None and row.get("gt_class_id") is not None and int(row.get("stage_top1_id")) != int(row.get("gt_class_id"))
+    )
+
+    def _mean(values: Sequence[float]) -> Optional[float]:
+        if not values:
+            return None
+        return float(sum(values) / len(values))
+
+    return {
+        "stage_id": str(stage_id),
+        "status": "PASS" if rows else "EMPTY",
+        "row_count": int(len(rows)),
+        "gt_available_row_count": int(len(gt_available_rows)),
+        "dropped_gt_count": int(len(dropped_rows)),
+        "dropped_gt_in_stage_domain_rate": float(len(in_domain_rows) / len(dropped_rows)) if dropped_rows else None,
+        "dropped_gt_mean_rank": _mean(ranks),
+        "dropped_gt_mrr": _mean(mrrs),
+        "dropped_gt_top1_hit_rate": float(sum(1 for row in dropped_rows if bool(row.get("dropped_gt_top1"))) / len(dropped_rows)) if dropped_rows else None,
+        "dropped_gt_top5_hit_rate": float(sum(1 for row in dropped_rows if bool(row.get("dropped_gt_top5"))) / len(dropped_rows)) if dropped_rows else None,
+        "dropped_gt_top10_hit_rate": float(sum(1 for row in dropped_rows if bool(row.get("dropped_gt_top10"))) / len(dropped_rows)) if dropped_rows else None,
+        "wrong_top1_is_base_rate": float(wrong_top1_base_count / len(dropped_rows)) if dropped_rows else None,
+        "dropped_gt_score_mean": _mean(scores),
+        "dropped_gt_margin_to_best_wrong_mean": _mean(margins),
+        "top_confusion_classes": [{"raw_id": key, "count": int(count)} for key, count in top1_counter.most_common(10)],
+    }
+
+
+def _split_summary_payload(legacy_summary: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "dropped_gt_count": int(legacy_summary.get("dropped_gt_count") or 0),
+        "mean_normalized_gt_rank": legacy_summary.get("dropped_gt_mean_rank"),
+        "gt_top1_hit_rate": legacy_summary.get("dropped_gt_top1_hit_rate"),
+        "gt_top5_hit_rate": legacy_summary.get("dropped_gt_top5_hit_rate"),
+        "gt_top10_hit_rate": legacy_summary.get("dropped_gt_top10_hit_rate"),
+        "mrr": legacy_summary.get("dropped_gt_mrr"),
+        "wrong_top1_is_base_rate": legacy_summary.get("wrong_top1_is_base_rate"),
+        "in_stage_domain_rate": legacy_summary.get("dropped_gt_in_stage_domain_rate"),
+        "margin_to_best_wrong_mean": legacy_summary.get("dropped_gt_margin_to_best_wrong_mean"),
+        "status": legacy_summary.get("status", "EMPTY"),
+    }
+
+
+def summarize_dropped_gt_attribution_rows_by_split(rows: Sequence[Mapping[str, Any]], *, stage_id: str) -> Dict[str, Any]:
+    split_order = ("base_observed", "base_unobserved", "novel_unobserved")
+    grouped: Dict[str, List[Record]] = {split: [] for split in split_order}
+    for row in rows:
+        split = str(row.get("dropped_gt_split", "")).strip()
+        if split in grouped:
+            grouped[split].append(dict(row))
+
+    split_summaries = {split: _split_summary_payload(_summarize_dropped_gt_subset(split_rows, stage_id=stage_id)) for split, split_rows in grouped.items()}
+    counts = {
+        split: int(sum(1 for row in grouped[split] if bool(row.get("gt_missing_from_observed"))))
+        for split in split_order
+    }
+    return {
+        "stage_id": str(stage_id),
+        "status": "PASS" if rows else "EMPTY",
+        "row_count": int(len(rows)),
+        "split_counts": counts,
+        "split_summaries": split_summaries,
+    }
+
+
 def build_dropped_gt_attribution_rows(
     *,
     stage_id: str,
@@ -179,6 +276,7 @@ def build_dropped_gt_attribution_rows(
     samples_by_tid = _sample_lookup(materialized_samples)
     rows: List[Record] = []
     invalid_hist = Counter()
+    base_vocab_reference, _novel_vocab_reference = _load_lvvis_split_reference()
 
     for record in stage_records:
         tid = str(record.get("trajectory_id", "")).strip() or str(record.get("join_key", "")).strip()
@@ -226,6 +324,14 @@ def build_dropped_gt_attribution_rows(
                 base_vocab_ids=base_vocab_ids,
             )
 
+        split_label = None
+        if gt_available and gt_raw_id is not None:
+            split_label = _dropped_gt_split_label(
+                gt_raw_id=int(gt_raw_id),
+                observed_raw_ids=observed_raw_ids,
+                base_vocab_ids=base_vocab_reference,
+            )
+
         rows.append(
             {
                 "stage_id": str(stage_id),
@@ -237,6 +343,7 @@ def build_dropped_gt_attribution_rows(
                 "gt_available_for_audit": gt_available,
                 "gt_class_id": gt_raw_id,
                 "gt_missing_from_observed": gt_missing,
+                "dropped_gt_split": split_label,
                 "stage_domain_size": int(len(domain_ids)),
                 "full_vocab_size": int(len(full_vocab_ids)),
                 "unknown_score": unknown_score,
@@ -247,42 +354,14 @@ def build_dropped_gt_attribution_rows(
 
     summary = summarize_dropped_gt_attribution_rows(rows, stage_id=stage_id)
     summary["invalid_reason_histogram"] = dict(sorted(invalid_hist.items()))
+    split_payload = summarize_dropped_gt_attribution_rows_by_split(rows, stage_id=stage_id)
+    summary["stage_summaries_by_split"] = split_payload["split_summaries"]
+    summary["split_counts"] = split_payload["split_counts"]
     return rows, summary
 
 
 def summarize_dropped_gt_attribution_rows(rows: Sequence[Mapping[str, Any]], *, stage_id: str) -> Dict[str, Any]:
-    gt_available_rows = [row for row in rows if bool(row.get("gt_available_for_audit"))]
-    dropped_rows = [row for row in gt_available_rows if bool(row.get("gt_missing_from_observed"))]
-    in_domain_rows = [row for row in dropped_rows if bool(row.get("dropped_gt_in_stage_domain"))]
-    ranks = [int(row["dropped_gt_rank"]) for row in dropped_rows if row.get("dropped_gt_rank") is not None]
-    mrrs = [float(row["dropped_gt_mrr"]) for row in dropped_rows if row.get("dropped_gt_mrr") is not None]
-    margins = [float(row["dropped_gt_margin_to_best_wrong"]) for row in dropped_rows if row.get("dropped_gt_margin_to_best_wrong") is not None]
-    scores = [float(row["dropped_gt_score"]) for row in dropped_rows if row.get("dropped_gt_score") is not None]
-    wrong_top1_base_count = sum(1 for row in dropped_rows if bool(row.get("wrong_top1_is_base")))
-    top1_counter = Counter(str(row.get("stage_top1_id")) for row in dropped_rows if row.get("stage_top1_id") is not None and int(row.get("stage_top1_id")) != int(row.get("gt_class_id")) if row.get("gt_class_id") is not None)
-
-    def _mean(values: Sequence[float]) -> Optional[float]:
-        if not values:
-            return None
-        return float(sum(values) / len(values))
-
-    return {
-        "stage_id": str(stage_id),
-        "status": "PASS" if rows else "EMPTY",
-        "row_count": int(len(rows)),
-        "gt_available_row_count": int(len(gt_available_rows)),
-        "dropped_gt_count": int(len(dropped_rows)),
-        "dropped_gt_in_stage_domain_rate": float(len(in_domain_rows) / len(dropped_rows)) if dropped_rows else None,
-        "dropped_gt_mean_rank": _mean(ranks),
-        "dropped_gt_mrr": _mean(mrrs),
-        "dropped_gt_top1_hit_rate": float(sum(1 for row in dropped_rows if bool(row.get("dropped_gt_top1"))) / len(dropped_rows)) if dropped_rows else None,
-        "dropped_gt_top5_hit_rate": float(sum(1 for row in dropped_rows if bool(row.get("dropped_gt_top5"))) / len(dropped_rows)) if dropped_rows else None,
-        "dropped_gt_top10_hit_rate": float(sum(1 for row in dropped_rows if bool(row.get("dropped_gt_top10"))) / len(dropped_rows)) if dropped_rows else None,
-        "wrong_top1_is_base_rate": float(wrong_top1_base_count / len(dropped_rows)) if dropped_rows else None,
-        "dropped_gt_score_mean": _mean(scores),
-        "dropped_gt_margin_to_best_wrong_mean": _mean(margins),
-        "top_confusion_classes": [{"raw_id": key, "count": int(count)} for key, count in top1_counter.most_common(10)],
-    }
+    return _summarize_dropped_gt_subset(rows, stage_id=stage_id)
 
 
 def run_dropped_gt_attribution_audit(
@@ -316,14 +395,61 @@ def run_dropped_gt_attribution_audit(
         generate_sidecars=True,
     )
     full_vocab_ids = _text_vocab_ids(output_root)
-    base_vocab_ids = list(full_vocab_ids)
+    base_vocab_ids, _novel_vocab_reference = _load_lvvis_split_reference()
 
     selected_stages = list(_STAGE_IDS) if stage == "all" else [stage]
     stage_summaries: Dict[str, Any] = {}
+    stage_summaries_by_split: Dict[str, Any] = {}
     ledger_paths: Dict[str, str] = {}
+    summary_by_split_paths: Dict[str, str] = {}
     for stage_id in selected_stages:
         stage_path = _resolve_stage_path(output_root, stage_id)
         stage_records = _load_jsonl(stage_path)
+        if not stage_path.is_file():
+            empty_split_summaries = {
+                "base_observed": _split_summary_payload({"dropped_gt_count": 0, "status": "STAGE_NOT_PRESENT"}),
+                "base_unobserved": _split_summary_payload({"dropped_gt_count": 0, "status": "STAGE_NOT_PRESENT"}),
+                "novel_unobserved": _split_summary_payload({"dropped_gt_count": 0, "status": "STAGE_NOT_PRESENT"}),
+            }
+            summary = {
+                "stage_id": stage_id,
+                "status": "STAGE_NOT_PRESENT",
+                "row_count": 0,
+                "gt_available_row_count": 0,
+                "dropped_gt_count": 0,
+                "dropped_gt_in_stage_domain_rate": None,
+                "dropped_gt_mean_rank": None,
+                "dropped_gt_mrr": None,
+                "dropped_gt_top1_hit_rate": None,
+                "dropped_gt_top5_hit_rate": None,
+                "dropped_gt_top10_hit_rate": None,
+                "wrong_top1_is_base_rate": None,
+                "dropped_gt_score_mean": None,
+                "dropped_gt_margin_to_best_wrong_mean": None,
+                "top_confusion_classes": [],
+                "invalid_reason_histogram": {},
+                "stage_summaries_by_split": empty_split_summaries,
+                "split_counts": {"base_observed": 0, "base_unobserved": 0, "novel_unobserved": 0},
+            }
+            stage_summaries[stage_id] = summary
+            stage_summaries_by_split[stage_id] = empty_split_summaries
+            ledger_path = output_root / "train" / stage_id / "dropped_gt_attribution_ledger.jsonl"
+            ledger_paths[stage_id] = str(ledger_path)
+            summary_by_split_path = output_root / "train" / stage_id / "dropped_gt_attribution_summary_by_split.json"
+            _write_json(
+                summary_by_split_path,
+                {
+                    "stage_id": stage_id,
+                    "status": "STAGE_NOT_PRESENT",
+                    "row_count": 0,
+                    "gt_available_row_count": 0,
+                    "dropped_gt_count": 0,
+                    "split_counts": {"base_observed": 0, "base_unobserved": 0, "novel_unobserved": 0},
+                    "split_summaries": empty_split_summaries,
+                },
+            )
+            summary_by_split_paths[stage_id] = str(summary_by_split_path)
+            continue
         rows, summary = build_dropped_gt_attribution_rows(
             stage_id=stage_id,
             materialized_samples=samples,
@@ -336,6 +462,21 @@ def run_dropped_gt_attribution_audit(
         _write_jsonl(ledger_path, rows)
         ledger_paths[stage_id] = str(ledger_path)
         stage_summaries[stage_id] = summary
+        stage_summaries_by_split[stage_id] = dict(summary.get("stage_summaries_by_split", {}))
+        summary_by_split_path = output_root / "train" / stage_id / "dropped_gt_attribution_summary_by_split.json"
+        _write_json(
+            summary_by_split_path,
+            {
+                "stage_id": stage_id,
+                "status": summary.get("status", "EMPTY"),
+                "row_count": summary.get("row_count", 0),
+                "gt_available_row_count": summary.get("gt_available_row_count", 0),
+                "dropped_gt_count": summary.get("dropped_gt_count", 0),
+                "split_counts": summary.get("split_counts", {}),
+                "split_summaries": summary.get("stage_summaries_by_split", {}),
+            },
+        )
+        summary_by_split_paths[stage_id] = str(summary_by_split_path)
 
     summary_payload: Dict[str, Any] = {
         "status": "PASS" if stage_summaries else "EMPTY",
@@ -345,7 +486,9 @@ def run_dropped_gt_attribution_audit(
         "smoke_max_trajectories": int(smoke_max_trajectories),
         "requested_stage": str(stage),
         "stage_summaries": stage_summaries,
+        "stage_summaries_by_split": stage_summaries_by_split,
         "ledger_paths": ledger_paths,
+        "summary_by_split_paths": summary_by_split_paths,
         "metric_definitions": {
             "dropped_gt_mean_rank": "mean full-vocabulary rank of GT classes missing from observed_raw_ids; for soft-EM stages, GT outside stage domain receives sentinel rank |V|+1",
             "dropped_gt_top1_hit_rate": "fraction of dropped GT classes ranked top-1",
@@ -359,5 +502,20 @@ def run_dropped_gt_attribution_audit(
     }
     summary_path = output_root / "train" / "audit" / "dropped_gt_attribution_summary.json"
     _write_json(summary_path, summary_payload)
+    summary_by_split_path = output_root / "train" / "audit" / "dropped_gt_attribution_summary_by_split.json"
+    _write_json(
+        summary_by_split_path,
+        {
+            "status": summary_payload["status"],
+            "dataset_name": summary_payload["dataset_name"],
+            "trajectory_source_branch": summary_payload["trajectory_source_branch"],
+            "smoke": summary_payload["smoke"],
+            "smoke_max_trajectories": summary_payload["smoke_max_trajectories"],
+            "requested_stage": summary_payload["requested_stage"],
+            "stage_summaries_by_split": stage_summaries_by_split,
+            "summary_by_split_paths": summary_by_split_paths,
+        },
+    )
     summary_payload["summary_path"] = str(summary_path)
+    summary_payload["summary_by_split_path"] = str(summary_by_split_path)
     return summary_payload
