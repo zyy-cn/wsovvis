@@ -11,7 +11,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_text_vocab
-from videocutler.ext_stageb_ovvis.data.weak_labels import build_label_map_from_text_prototypes, build_weak_label_record, select_observed_raw_ids
+from videocutler.ext_stageb_ovvis.data.weak_labels import (
+    build_label_map_from_class_map,
+    build_label_map_from_text_prototypes,
+    build_weak_label_record,
+    select_observed_raw_ids,
+)
 from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.algorithms._memory_audit import memory_checkpoint, shallow_size_bytes, timing_checkpoint
 
@@ -170,9 +175,35 @@ def _lvvis_video_full_raw_ids_from_payload(payload: Mapping[str, Any]) -> List[R
     ]
 
 
+def _build_label_map_for_observed_records(text_records: Sequence[Record]) -> Dict[int, Dict[str, Any]]:
+    if text_records and all("contiguous_id" in rec and "class_name" in rec for rec in text_records):
+        return build_label_map_from_text_prototypes(text_records)
+
+    raw_ids = sorted({int(rec["raw_id"]) for rec in text_records})
+    if not raw_ids:
+        raise ValueError("text_records is empty; cannot synthesize observed-set label map")
+
+    val_payload = _load_json(resolve_lvvis_annotation_paths().val_json)
+    train_payload = _load_json(resolve_lvvis_annotation_paths().train_json)
+    categories: Dict[int, str] = {}
+    for payload in (train_payload, val_payload):
+        for category in payload.get("categories", []):
+            raw_id = int(category.get("id", -1))
+            if raw_id < 0:
+                continue
+            categories.setdefault(raw_id, str(category.get("name", raw_id)))
+
+    missing = [raw_id for raw_id in raw_ids if raw_id not in categories]
+    if missing:
+        raise KeyError(f"Missing category metadata for raw ids: {missing[:8]}")
+
+    class_map_records = [{"raw_id": raw_id, "name": categories[raw_id]} for raw_id in raw_ids]
+    return build_label_map_from_class_map(class_map_records)
+
+
 def _synthesize_lvvis_val_weak_records(*, train_weak_records: Sequence[Record], text_records: Sequence[Record]) -> List[Record]:
     protocol_id = _observation_protocol_id_from_weak_records(train_weak_records)
-    label_map = build_label_map_from_text_prototypes(text_records)
+    label_map = _build_label_map_for_observed_records(text_records)
     val_payload = _load_json(resolve_lvvis_annotation_paths().val_json)
     val_videos = _lvvis_video_full_raw_ids_from_payload(val_payload)
     record_count = len(val_videos)
