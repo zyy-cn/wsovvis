@@ -25,7 +25,7 @@ from videocutler.ext_stageb_ovvis.audit.gt_attribution_rank_audit import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stage-wise matched GT attribution rank audit over full dataset class space.")
-    parser.add_argument("--dataset_name", required=True, choices=("lvvis_val", "ytvis_2019_val"))
+    parser.add_argument("--dataset_name", required=True, choices=("lvvis_train_base", "lvvis_val", "ytvis_2019_val"))
     parser.add_argument("--output_root", required=True)
     parser.add_argument("--stage", required=True, choices=("prealign", "softem_base", "softem_aug", "all"))
     parser.add_argument("--device", default="cpu")

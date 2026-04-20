@@ -28,16 +28,23 @@ from videocutler.ext_stageb_ovvis.eval.g8_bridge import (
     resolve_selected_for_infer,
     write_json,
 )
-from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import Phase1MaterializationConfig, materialize_phase1_training_samples
+from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
+    Phase1MaterializationConfig,
+    materialize_phase1_training_samples,
+    resolve_runtime_assets,
+)
 
-ALLOWED_DATASETS = ("lvvis_val", "ytvis_2019_val")
+TRAIN_DATASETS = ("lvvis_train_base",)
+VAL_BASE_NOVEL_DATASETS = ("lvvis_val", "ytvis_2019_val")
+ALLOWED_DATASETS = TRAIN_DATASETS + VAL_BASE_NOVEL_DATASETS
 STAGE_TO_SELECTED = {
     "prealign": "prealign_only",
     "softem_base": "base_only",
     "softem_aug": "augmented",
 }
 ALL_STAGES = ("prealign", "softem_base", "softem_aug")
-ALL_GT_SPLIT_ORDER = ("base_observed", "base_unobserved", "novel_unobserved")
+ALL_GT_TRAIN_SPLIT_ORDER = ("base_observed", "base_unobserved")
+ALL_GT_VAL_SPLIT_ORDER = ("base", "novel")
 
 
 @dataclass(frozen=True)
@@ -206,6 +213,8 @@ def _video_iou(pred_segmentations: Sequence[Any], gt_segmentations: Sequence[Any
 
 
 def _load_gt_payload(dataset_name: str) -> Dict[str, Any]:
+    if dataset_name == "lvvis_train_base":
+        return load_json(resolve_lvvis_annotation_paths().train_json)
     if dataset_name == "lvvis_val":
         return load_json(resolve_lvvis_annotation_paths().val_json)
     if dataset_name == "ytvis_2019_val":
@@ -354,12 +363,13 @@ def _score_all_gt_rows(
         split_label = None
         if gt_available and gt_raw_id is not None:
             split_label = _all_gt_split_label(
+                dataset_name=dataset_name,
                 gt_raw_id=int(gt_raw_id),
                 observed_raw_ids=observed_raw_ids,
                 base_vocab_ids=base_vocab,
             )
             if split_label is None:
-                unsupported_hist["novel_observed"] = unsupported_hist.get("novel_observed", 0) + 1
+                unsupported_hist["unsupported_split"] = unsupported_hist.get("unsupported_split", 0) + 1
 
         row: Dict[str, Any] = {
             "stage_id": str(stage),
@@ -424,7 +434,7 @@ def _score_all_gt_rows(
         if progress_callback is not None and (row_index == total_rows or row_index % max(1, int(progress_callback.__dict__.get("heartbeat_every", 256))) == 0):
             progress_callback(row_index, total_rows)
 
-    summary = _summarize_all_gt_subset(rows, stage_id=stage)
+    summary = _summarize_all_gt_subset(rows, stage_id=stage, split_order=split_order)
     summary["unsupported_gt_histogram"] = dict(sorted(unsupported_hist.items()))
     return rows, summary
 
@@ -465,17 +475,29 @@ def _match_rate(matched: int, total: int) -> float:
     return float(matched / total)
 
 
-def _all_gt_split_label(*, gt_raw_id: int, observed_raw_ids: Sequence[int], base_vocab_ids: Sequence[int]) -> Optional[str]:
+def _all_gt_split_order_for_dataset(dataset_name: str) -> Tuple[str, ...]:
+    if dataset_name in TRAIN_DATASETS:
+        return ALL_GT_TRAIN_SPLIT_ORDER
+    if dataset_name in VAL_BASE_NOVEL_DATASETS:
+        return ALL_GT_VAL_SPLIT_ORDER
+    raise ValueError(f"unsupported dataset_name for all-GT split order: {dataset_name}")
+
+
+def _all_gt_split_label(*, dataset_name: str, gt_raw_id: int, observed_raw_ids: Sequence[int], base_vocab_ids: Sequence[int]) -> Optional[str]:
     base_vocab = {int(x) for x in base_vocab_ids}
     observed_vocab = {int(x) for x in observed_raw_ids}
     gt_raw_id = int(gt_raw_id)
-    if gt_raw_id in base_vocab and gt_raw_id in observed_vocab:
-        return "base_observed"
-    if gt_raw_id in base_vocab and gt_raw_id not in observed_vocab:
-        return "base_unobserved"
-    if gt_raw_id not in base_vocab and gt_raw_id not in observed_vocab:
-        return "novel_unobserved"
-    return None
+    if dataset_name in TRAIN_DATASETS:
+        if gt_raw_id in base_vocab and gt_raw_id in observed_vocab:
+            return "base_observed"
+        if gt_raw_id in base_vocab and gt_raw_id not in observed_vocab:
+            return "base_unobserved"
+        return None
+    if dataset_name in VAL_BASE_NOVEL_DATASETS:
+        if gt_raw_id in base_vocab:
+            return "base"
+        return "novel"
+    raise ValueError(f"unsupported dataset_name for all-GT split label: {dataset_name}")
 
 
 def _resolve_asset_roots(output_root: Path) -> InferenceAssetRoots:
@@ -543,7 +565,7 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _load_base_vocab_ids_for_dataset(dataset_name: str, gt_payload: Mapping[str, Any]) -> List[int]:
-    if dataset_name == "lvvis_val":
+    if dataset_name in {"lvvis_train_base", "lvvis_val"}:
         base_vocab_ids, _novel_vocab_reference = _load_lvvis_split_reference()
         return [int(x) for x in base_vocab_ids]
     return sorted({int(cat["id"]) for cat in gt_payload.get("categories", [])})
@@ -572,16 +594,73 @@ def _load_or_generate_gt_sidecar_lookup_cached(
     )
 
 
-def _prepare_all_gt_shared_inputs(config: GTAttributionRankAuditConfig) -> Dict[str, Any]:
-    materialized = materialize_phase1_training_samples(
+def _load_jsonl_records(path: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
+def _prepare_all_gt_val_samples(config: GTAttributionRankAuditConfig) -> List[Dict[str, Any]]:
+    resolution = resolve_runtime_assets(
         config.output_root,
-        Phase1MaterializationConfig(
-            dataset_name=config.dataset_name,
-            trajectory_source_branch=config.trajectory_source_branch,
-            smoke=False,
-        ),
+        dataset_name=config.dataset_name,
+        trajectory_source_branch=config.trajectory_source_branch,
     )
-    samples = [dict(x) for x in materialized["samples"] if bool(x.get("sample_valid", False))]
+    runtime_output_root = Path(str(resolution["runtime_output_root"]))
+    assets = resolution["assets"]
+    trajectory_records = sorted(
+        _load_jsonl_records(runtime_output_root / assets["trajectory_records"]["path"]),
+        key=lambda rec: str(rec.get("trajectory_id", "")),
+    )
+    carrier_records = _load_jsonl_records(runtime_output_root / assets["carrier_records"]["path"])
+    carrier_by_tid = {str(rec.get("trajectory_id", "")): rec for rec in carrier_records}
+    samples: List[Dict[str, Any]] = []
+    for traj in trajectory_records:
+        trajectory_id = str(traj.get("trajectory_id", "")).strip()
+        if not trajectory_id:
+            continue
+        carrier_rec = carrier_by_tid.get(trajectory_id)
+        if carrier_rec is None:
+            continue
+        samples.append(
+            {
+                "trajectory_id": trajectory_id,
+                "clip_id": str(traj.get("clip_id", "")),
+                "trajectory_record": dict(traj),
+                "carrier_record": dict(carrier_rec),
+                "weak_label_record": None,
+                "candidate_text_prototypes": [],
+                "observed_raw_ids": [],
+                "observed_set_semantics": "not_applicable_val_base_novel_only",
+                "observed_set_source": "not_applicable_val_base_novel_only",
+                "candidate_ids_known": [],
+                "candidate_ids_extra": [],
+                "sample_valid": True,
+            }
+        )
+    return samples
+
+
+def _prepare_all_gt_shared_inputs(config: GTAttributionRankAuditConfig) -> Dict[str, Any]:
+    if config.dataset_name in TRAIN_DATASETS:
+        materialized = materialize_phase1_training_samples(
+            config.output_root,
+            Phase1MaterializationConfig(
+                dataset_name=config.dataset_name,
+                trajectory_source_branch=config.trajectory_source_branch,
+                smoke=False,
+            ),
+        )
+        samples = [dict(x) for x in materialized["samples"] if bool(x.get("sample_valid", False))]
+    elif config.dataset_name in VAL_BASE_NOVEL_DATASETS:
+        samples = _prepare_all_gt_val_samples(config)
+    else:
+        raise ValueError(f"unsupported dataset_name for all-GT preparation: {config.dataset_name}")
     clip_ids = sorted(
         {
             int(sample.get("trajectory_record", {}).get("clip_id"))
@@ -639,9 +718,9 @@ def _write_all_gt_progress(
     )
 
 
-def _build_all_gt_comparison_by_split(results: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+def _build_all_gt_comparison_by_split(results: Mapping[str, Mapping[str, Any]], *, split_order: Sequence[str]) -> Dict[str, Any]:
     by_split: Dict[str, Dict[str, Any]] = {}
-    for split in ALL_GT_SPLIT_ORDER:
+    for split in split_order:
         by_split[split] = {}
         for stage, stage_summary in results.items():
             split_summary = dict(stage_summary.get("split_summaries", {}).get(split, {}))
@@ -652,18 +731,18 @@ def _build_all_gt_comparison_by_split(results: Mapping[str, Mapping[str, Any]]) 
                 "status": split_summary.get("status"),
             }
     return {
-        "split_order": list(ALL_GT_SPLIT_ORDER),
+        "split_order": [str(x) for x in split_order],
         "stage_order": list(results.keys()),
         "by_split": by_split,
     }
 
 
-def _summarize_all_gt_subset(rows: Sequence[Mapping[str, Any]], *, stage_id: str) -> Dict[str, Any]:
+def _summarize_all_gt_subset(rows: Sequence[Mapping[str, Any]], *, stage_id: str, split_order: Sequence[str]) -> Dict[str, Any]:
     gt_rows = [row for row in rows if bool(row.get("gt_available_for_audit")) and row.get("gt_rank") is not None and row.get("normalized_gt_rank") is not None]
     unsupported_rows = [row for row in rows if not str(row.get("all_gt_split", "")).strip()]
     split_summaries: Dict[str, Any] = {}
     split_counts: Dict[str, int] = {}
-    for split in ALL_GT_SPLIT_ORDER:
+    for split in split_order:
         split_rows = [row for row in gt_rows if str(row.get("all_gt_split", "")).strip() == split]
         split_counts[split] = int(len(split_rows))
         if not split_rows:
@@ -827,6 +906,9 @@ def run_stage_all_gt_attribution_rank_audit(
 
     checkpoint_path = _stage_checkpoint_path(config.output_root, stage)
     summary_path = _stage_all_gt_summary_by_split_path(config.output_root, config.dataset_name, stage)
+    split_order = _all_gt_split_order_for_dataset(config.dataset_name)
+    observed_set_sources = list((prepared_inputs or {}).get("observed_set_sources", []))
+    observed_set_semantics = list((prepared_inputs or {}).get("observed_set_semantics", []))
     if not checkpoint_path.is_file():
         result = {
             "dataset_name": config.dataset_name,
@@ -847,8 +929,8 @@ def run_stage_all_gt_attribution_rank_audit(
             "checkpoint_path": str(checkpoint_path),
             "summary_by_split_path": str(summary_path),
             "note": "checkpoint missing for requested stage",
-            "split_counts": {split: 0 for split in ALL_GT_SPLIT_ORDER},
-            "split_summaries": {split: {"gt_count": 0, "status": "STAGE_NOT_PRESENT"} for split in ALL_GT_SPLIT_ORDER},
+            "split_counts": {split: 0 for split in split_order},
+            "split_summaries": {split: {"gt_count": 0, "status": "STAGE_NOT_PRESENT"} for split in split_order},
             "unsupported_gt_histogram": {},
             "observed_set_sources": observed_set_sources,
             "observed_set_semantics": observed_set_semantics,
@@ -938,10 +1020,11 @@ def run_gt_attribution_rank_all_gt_audit(config: GTAttributionRankAuditConfig) -
     results: Dict[str, Any] = {}
     for stage in stage_names:
         results[stage] = run_stage_all_gt_attribution_rank_audit(config, stage, prepared_inputs=prepared)
-    comparison = _build_all_gt_comparison_by_split(results)
+    comparison = _build_all_gt_comparison_by_split(results, split_order=_all_gt_split_order_for_dataset(config.dataset_name))
     summary = {
         "dataset_name": config.dataset_name,
         "output_root": str(config.output_root),
+        "split_order": list(_all_gt_split_order_for_dataset(config.dataset_name)),
         "stages": results,
         "comparison_by_split": comparison,
         "observed_set_sources": list(prepared.get("observed_set_sources", [])),
