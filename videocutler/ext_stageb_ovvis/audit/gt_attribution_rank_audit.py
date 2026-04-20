@@ -347,6 +347,7 @@ def _score_all_gt_rows(
     trajectory_source_branch: str,
     logit_chunk_size: int,
     base_vocab_ids: Sequence[int],
+    split_order: Sequence[str],
     progress_callback: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     base_vocab = {int(x) for x in base_vocab_ids}
@@ -985,6 +986,7 @@ def run_stage_all_gt_attribution_rank_audit(
         trajectory_source_branch=config.trajectory_source_branch,
         logit_chunk_size=config.logit_chunk_size,
         base_vocab_ids=base_vocab_ids,
+        split_order=split_order,
         progress_callback=_progress_callback,
     )
     summary.update(
