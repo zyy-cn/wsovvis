@@ -1,6 +1,6 @@
 {
   "task_id": "G8_inference_and_eval-task",
-  "task_truth_stamp": "525a17d07fb79e40bb7431edab6a117b2ecb2672a53c7d601bcadb0c4fe0796b",
+  "task_truth_stamp": "80d2bdec2fa8f3e59f242b0eccea887109261b5a498eb00ce5176759aaac17d6",
   "active_gate": "G8_inference_and_eval",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
