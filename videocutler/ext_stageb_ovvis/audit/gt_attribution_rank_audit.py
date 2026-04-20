@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_combined_evidence
-from videocutler.ext_stageb_ovvis.audit.dropped_gt_attribution_audit import _load_lvvis_split_reference
+from videocutler.ext_stageb_ovvis.audit.dropped_gt_attribution_audit import _as_int, _load_lvvis_split_reference
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
 from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.eval.external_ytvis2019 import resolve_ytvis2019_annotation_paths
