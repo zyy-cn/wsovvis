@@ -31,6 +31,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--logit_chunk_size", type=int, default=256)
     parser.add_argument("--trajectory_source_branch", default="mainline")
+    parser.add_argument("--all_gt_only", action="store_true")
+    parser.add_argument("--all_gt_generate_sidecars_if_missing", action="store_true")
+    parser.add_argument("--all_gt_heartbeat_every_rows", type=int, default=256)
     return parser.parse_args()
 
 
@@ -43,6 +46,9 @@ def main() -> int:
         device=torch.device(args.device),
         logit_chunk_size=int(args.logit_chunk_size),
         trajectory_source_branch=str(args.trajectory_source_branch),
+        all_gt_only=bool(args.all_gt_only),
+        all_gt_generate_sidecars_if_missing=bool(args.all_gt_generate_sidecars_if_missing),
+        all_gt_heartbeat_every_rows=int(args.all_gt_heartbeat_every_rows),
     )
     summary = run_gt_attribution_rank_audit(config)
     print(json.dumps(summary, ensure_ascii=False))

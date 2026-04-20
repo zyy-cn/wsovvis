@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_combined_evidence
+from videocutler.ext_stageb_ovvis.audit.dropped_gt_attribution_audit import _load_lvvis_split_reference
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
 from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.eval.external_ytvis2019 import resolve_ytvis2019_annotation_paths
@@ -63,6 +64,9 @@ class GTAttributionRankAuditConfig:
     device: torch.device
     logit_chunk_size: int = 256
     trajectory_source_branch: str = "mainline"
+    all_gt_only: bool = False
+    all_gt_generate_sidecars_if_missing: bool = False
+    all_gt_heartbeat_every_rows: int = 256
 
 
 def _require_dataset_name(dataset_name: str) -> str:
@@ -334,12 +338,14 @@ def _score_all_gt_rows(
     trajectory_source_branch: str,
     logit_chunk_size: int,
     base_vocab_ids: Sequence[int],
+    progress_callback: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     base_vocab = {int(x) for x in base_vocab_ids}
     vocab_index = {int(raw_id): idx for idx, raw_id in enumerate(full_vocab_ids)}
     rows: List[Dict[str, Any]] = []
     unsupported_hist: Dict[str, int] = {}
-    for sample in materialized_samples:
+    total_rows = int(len(materialized_samples))
+    for row_index, sample in enumerate(materialized_samples, start=1):
         trajectory_id = str(sample.get("trajectory_id", "")).strip()
         sidecar = gt_sidecar_lookup.get(trajectory_id, {})
         gt_raw_id = _as_int(sidecar.get("matched_gt_class_id"))
@@ -415,6 +421,8 @@ def _score_all_gt_rows(
             }
         )
         rows.append(row)
+        if progress_callback is not None and (row_index == total_rows or row_index % max(1, int(progress_callback.__dict__.get("heartbeat_every", 256))) == 0):
+            progress_callback(row_index, total_rows)
 
     summary = _summarize_all_gt_subset(rows, stage_id=stage)
     summary["unsupported_gt_histogram"] = dict(sorted(unsupported_hist.items()))
@@ -515,11 +523,135 @@ def _package_all_gt_summary_by_split_path(output_root: Path, dataset_name: str) 
     return output_root / "audit" / "gt_attribution_rank" / dataset_name / "all_gt_summary_by_split.json"
 
 
+def _package_all_gt_comparison_by_split_path(output_root: Path, dataset_name: str) -> Path:
+    return output_root / "audit" / "gt_attribution_rank" / dataset_name / "gt_attribution_rank_all_gt_comparison_by_split.json"
+
+
+def _package_all_gt_summary_export_path(output_root: Path, dataset_name: str) -> Path:
+    return output_root / "audit" / "gt_attribution_rank" / dataset_name / "gt_attribution_rank_all_gt_summary_by_split.json"
+
+
+def _stage_all_gt_progress_path(output_root: Path, dataset_name: str, stage: str) -> Path:
+    return output_root / "audit" / "gt_attribution_rank" / dataset_name / f"{stage}_all_gt_progress.json"
+
+
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(dict(row), ensure_ascii=False) + "\n")
+
+
+def _load_base_vocab_ids_for_dataset(dataset_name: str, gt_payload: Mapping[str, Any]) -> List[int]:
+    if dataset_name == "lvvis_val":
+        base_vocab_ids, _novel_vocab_reference = _load_lvvis_split_reference()
+        return [int(x) for x in base_vocab_ids]
+    return sorted({int(cat["id"]) for cat in gt_payload.get("categories", [])})
+
+
+def _load_or_generate_gt_sidecar_lookup_cached(
+    *,
+    output_root: Path,
+    dataset_name: str,
+    clip_ids: Sequence[int],
+    generate_if_missing: bool,
+) -> Dict[str, Mapping[str, Any]]:
+    lookup = _load_or_generate_gt_sidecar_lookup(
+        output_root=output_root,
+        dataset_name=dataset_name,
+        clip_ids=clip_ids,
+        generate_sidecars=False,
+    )
+    if lookup or not generate_if_missing:
+        return lookup
+    return _load_or_generate_gt_sidecar_lookup(
+        output_root=output_root,
+        dataset_name=dataset_name,
+        clip_ids=clip_ids,
+        generate_sidecars=True,
+    )
+
+
+def _prepare_all_gt_shared_inputs(config: GTAttributionRankAuditConfig) -> Dict[str, Any]:
+    materialized = materialize_phase1_training_samples(
+        config.output_root,
+        Phase1MaterializationConfig(
+            dataset_name=config.dataset_name,
+            trajectory_source_branch=config.trajectory_source_branch,
+            smoke=False,
+        ),
+    )
+    samples = [dict(x) for x in materialized["samples"] if bool(x.get("sample_valid", False))]
+    clip_ids = sorted(
+        {
+            int(sample.get("trajectory_record", {}).get("clip_id"))
+            for sample in samples
+            if isinstance(sample.get("trajectory_record"), Mapping) and sample.get("trajectory_record", {}).get("clip_id") is not None
+        }
+    )
+    gt_sidecar_lookup = _load_or_generate_gt_sidecar_lookup_cached(
+        output_root=config.output_root,
+        dataset_name=config.dataset_name,
+        clip_ids=[int(x) for x in clip_ids],
+        generate_if_missing=bool(config.all_gt_generate_sidecars_if_missing),
+    )
+    asset_roots = _resolve_asset_roots_for_dataset(config.output_root, config.dataset_name)
+    gt_payload = _load_gt_payload(config.dataset_name)
+    full_vocab_ids, vocab_matrix = _dataset_vocab(asset_roots.asset_root, config.dataset_name, gt_payload)
+    base_vocab_ids = _load_base_vocab_ids_for_dataset(config.dataset_name, gt_payload)
+    return {
+        "samples": samples,
+        "clip_ids": clip_ids,
+        "gt_sidecar_lookup": gt_sidecar_lookup,
+        "asset_roots": asset_roots,
+        "gt_payload": gt_payload,
+        "full_vocab_ids": full_vocab_ids,
+        "vocab_matrix": vocab_matrix,
+        "base_vocab_ids": base_vocab_ids,
+    }
+
+
+def _write_all_gt_progress(
+    output_root: Path,
+    dataset_name: str,
+    stage: str,
+    *,
+    processed_rows: int,
+    total_rows: int,
+    checkpoint_path: Path,
+    status: str,
+) -> None:
+    write_json(
+        _stage_all_gt_progress_path(output_root, dataset_name, stage),
+        {
+            "dataset_name": dataset_name,
+            "stage": stage,
+            "status": status,
+            "processed_rows": int(processed_rows),
+            "total_rows": int(total_rows),
+            "progress": float(processed_rows / total_rows) if total_rows > 0 else 1.0,
+            "checkpoint_path": str(checkpoint_path),
+        },
+    )
+
+
+def _build_all_gt_comparison_by_split(results: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    by_split: Dict[str, Dict[str, Any]] = {}
+    for split in ALL_GT_SPLIT_ORDER:
+        by_split[split] = {}
+        for stage, stage_summary in results.items():
+            split_summary = dict(stage_summary.get("split_summaries", {}).get(split, {}))
+            by_split[split][stage] = {
+                "gt_count": split_summary.get("gt_count"),
+                "mean_normalized_gt_rank": split_summary.get("mean_normalized_gt_rank"),
+                "gt_top1_hit_rate": split_summary.get("gt_top1_hit_rate"),
+                "status": split_summary.get("status"),
+            }
+    return {
+        "split_order": list(ALL_GT_SPLIT_ORDER),
+        "stage_order": list(results.keys()),
+        "by_split": by_split,
+    }
 
 
 def _summarize_all_gt_subset(rows: Sequence[Mapping[str, Any]], *, stage_id: str) -> Dict[str, Any]:
@@ -679,7 +811,12 @@ def run_stage_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig, st
     return result
 
 
-def run_stage_all_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig, stage: str) -> Dict[str, Any]:
+def run_stage_all_gt_attribution_rank_audit(
+    config: GTAttributionRankAuditConfig,
+    stage: str,
+    *,
+    prepared_inputs: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     _require_dataset_name(config.dataset_name)
     if stage not in ALL_STAGES:
         raise ValueError(f"stage must be one of {ALL_STAGES}, got {stage!r}")
@@ -713,33 +850,39 @@ def run_stage_all_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig
         write_json(summary_path, result)
         return result
 
-    materialized = materialize_phase1_training_samples(
-        config.output_root,
-        Phase1MaterializationConfig(
-            dataset_name=config.dataset_name,
-            trajectory_source_branch=config.trajectory_source_branch,
-            smoke=False,
-        ),
-    )
-    samples = [dict(x) for x in materialized["samples"] if bool(x.get("sample_valid", False))]
-    clip_ids = sorted(
-        {
-            int(sample.get("trajectory_record", {}).get("clip_id"))
-            for sample in samples
-            if isinstance(sample.get("trajectory_record"), Mapping) and sample.get("trajectory_record", {}).get("clip_id") is not None
-        }
-    )
-    gt_sidecar_lookup = _load_or_generate_gt_sidecar_lookup(
-        output_root=config.output_root,
-        dataset_name=config.dataset_name,
-        clip_ids=[int(x) for x in clip_ids],
-        generate_sidecars=True,
-    )
-    asset_roots = _resolve_asset_roots_for_dataset(config.output_root, config.dataset_name)
-    gt_payload = _load_gt_payload(config.dataset_name)
-    full_vocab_ids, vocab_matrix = _dataset_vocab(asset_roots.asset_root, config.dataset_name, gt_payload)
-    base_vocab_ids, _novel_vocab_reference = _load_lvvis_split_reference()
+    prepared = dict(prepared_inputs or _prepare_all_gt_shared_inputs(config))
+    samples = [dict(x) for x in prepared["samples"]]
+    gt_sidecar_lookup = dict(prepared["gt_sidecar_lookup"])
+    asset_roots = prepared["asset_roots"]
+    full_vocab_ids = list(prepared["full_vocab_ids"])
+    vocab_matrix = np.asarray(prepared["vocab_matrix"], dtype=np.float32)
+    base_vocab_ids = list(prepared["base_vocab_ids"])
+
     bundle = load_projector_bundle(checkpoint_path, device=config.device)
+
+    def _progress_callback(processed_rows: int, total_rows: int) -> None:
+        _write_all_gt_progress(
+            config.output_root,
+            config.dataset_name,
+            stage,
+            processed_rows=processed_rows,
+            total_rows=total_rows,
+            checkpoint_path=checkpoint_path,
+            status="RUNNING",
+        )
+
+    _progress_callback.__dict__["heartbeat_every"] = int(config.all_gt_heartbeat_every_rows)
+
+    _write_all_gt_progress(
+        config.output_root,
+        config.dataset_name,
+        stage,
+        processed_rows=0,
+        total_rows=len(samples),
+        checkpoint_path=checkpoint_path,
+        status="RUNNING",
+    )
+
     rows, summary = _score_all_gt_rows(
         stage=stage,
         materialized_samples=samples,
@@ -752,6 +895,7 @@ def run_stage_all_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig
         trajectory_source_branch=config.trajectory_source_branch,
         logit_chunk_size=config.logit_chunk_size,
         base_vocab_ids=base_vocab_ids,
+        progress_callback=_progress_callback,
     )
     summary.update(
         {
@@ -766,24 +910,40 @@ def run_stage_all_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig
         }
     )
     write_json(summary_path, summary)
+    _write_all_gt_progress(
+        config.output_root,
+        config.dataset_name,
+        stage,
+        processed_rows=len(samples),
+        total_rows=len(samples),
+        checkpoint_path=checkpoint_path,
+        status="COMPLETE",
+    )
     return summary
 
 
 def run_gt_attribution_rank_all_gt_audit(config: GTAttributionRankAuditConfig) -> Dict[str, Any]:
     stage_names = ALL_STAGES if config.stage == "all" else (config.stage,)
+    prepared = _prepare_all_gt_shared_inputs(config)
     results: Dict[str, Any] = {}
     for stage in stage_names:
-        results[stage] = run_stage_all_gt_attribution_rank_audit(config, stage)
+        results[stage] = run_stage_all_gt_attribution_rank_audit(config, stage, prepared_inputs=prepared)
+    comparison = _build_all_gt_comparison_by_split(results)
     summary = {
         "dataset_name": config.dataset_name,
         "output_root": str(config.output_root),
         "stages": results,
+        "comparison_by_split": comparison,
     }
     write_json(_package_all_gt_summary_by_split_path(config.output_root, config.dataset_name), summary)
+    write_json(_package_all_gt_summary_export_path(config.output_root, config.dataset_name), summary)
+    write_json(_package_all_gt_comparison_by_split_path(config.output_root, config.dataset_name), comparison)
     return summary
 
 
 def run_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig) -> Dict[str, Any]:
+    if bool(config.all_gt_only):
+        return run_gt_attribution_rank_all_gt_audit(config)
     stage_names = ALL_STAGES if config.stage == "all" else (config.stage,)
     results: Dict[str, Any] = {}
     for stage in stage_names:
