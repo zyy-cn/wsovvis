@@ -1,10 +1,11 @@
 {
   "task_id": "G8_inference_and_eval-task",
-  "task_truth_stamp": "eb0ef36ad39d4687cec6031ec316f3fa798de56870567645cbd0f395db0e4040",
+  "task_truth_stamp": "a67a947633559a8be5ea9bee28dd6a309ee275410b3ed3a7a43da48c941d99fd",
   "active_gate": "G8_inference_and_eval",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
     "videocutler/ext_stageb_ovvis/models/projector.py",
+    "videocutler/ext_stageb_ovvis/audit/gt_attribution_rank_audit.py",
     "third_party/lvvis_official/evaluate/lvvis.py",
     "third_party/lvvis_official/evaluate/lvviseval.py",
     "videocutler/ext_stageb_ovvis/eval/internal_val.py",
@@ -15,6 +16,7 @@
     "videocutler/run_stageb_eval_lvvis.py",
     "videocutler/run_stageb_eval_ytvis2019.py",
     "videocutler/run_stageb_train_softem.py",
+    "videocutler/run_stageb_audit_g7_gt_attribution_rank.py",
     "tests/stageb/",
     "codex/outputs/G8_inference_and_eval/"
   ],
