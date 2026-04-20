@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_text_vocab
+from videocutler.ext_stageb_ovvis.data.weak_labels import build_label_map_from_text_prototypes, build_weak_label_record, select_observed_raw_ids
+from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.algorithms._memory_audit import memory_checkpoint, shallow_size_bytes, timing_checkpoint
 
 
@@ -141,6 +143,73 @@ def _scan_asset_root(output_root: Path, rels: Mapping[str, str]) -> Dict[str, An
         },
     }
 
+
+
+
+def _observation_protocol_id_from_weak_records(weak_records: Sequence[Record]) -> str:
+    protocols = sorted({str(rec.get("observation_protocol_id", "")).strip() for rec in weak_records if str(rec.get("observation_protocol_id", "")).strip()})
+    if not protocols:
+        raise ValueError("weak_labels source is missing observation_protocol_id; cannot synthesize lvvis_val observed set")
+    if len(protocols) != 1:
+        raise ValueError(f"weak_labels source has inconsistent observation protocols: {protocols}")
+    return protocols[0]
+
+
+def _lvvis_video_full_raw_ids_from_payload(payload: Mapping[str, Any]) -> List[Record]:
+    by_video: Dict[int, set[int]] = {}
+    for ann in payload.get("annotations", []):
+        video_id = int(ann.get("video_id", -1))
+        category_id = int(ann.get("category_id", -1))
+        if video_id < 0 or category_id < 0:
+            continue
+        by_video.setdefault(video_id, set()).add(category_id)
+    return [
+        {"video_id": int(video_id), "full_raw_ids": sorted(int(x) for x in raw_ids)}
+        for video_id, raw_ids in sorted(by_video.items())
+        if raw_ids
+    ]
+
+
+def _synthesize_lvvis_val_weak_records(*, train_weak_records: Sequence[Record], text_records: Sequence[Record]) -> List[Record]:
+    protocol_id = _observation_protocol_id_from_weak_records(train_weak_records)
+    label_map = build_label_map_from_text_prototypes(text_records)
+    val_payload = _load_json(resolve_lvvis_annotation_paths().val_json)
+    val_videos = _lvvis_video_full_raw_ids_from_payload(val_payload)
+    record_count = len(val_videos)
+    coverage_ratio = 1.0 if val_videos else 0.0
+    output: List[Record] = []
+    for video in val_videos:
+        video_id = int(video["video_id"])
+        observed_raw_ids = select_observed_raw_ids(video.get("full_raw_ids", []), video_id=video_id, protocol_id=protocol_id, seed=42)
+        record = build_weak_label_record(
+            dataset_name="lvvis_val",
+            split_tag="val_full",
+            video_id=video_id,
+            observed_raw_ids=observed_raw_ids,
+            protocol_id=protocol_id,
+            label_map=label_map,
+            run_scope="full",
+            input_source_type="official_lvvis_val_annotations",
+            data_scope="val",
+            consumer_target="audit_posthoc",
+            record_count=record_count,
+            coverage_ratio=coverage_ratio,
+            consumer_ready=True,
+        )
+        record["observed_set_semantics"] = "Y_prime_v"
+        record["observed_set_source"] = "synthesized_from_lvvis_val_annotations_and_train_protocol"
+        record["observed_protocol_source_dataset"] = "lvvis_train_base"
+        output.append(record)
+    return output
+
+
+def _load_dataset_observed_records(*, runtime_output_root: Path, dataset_name: str, weak_labels_relpath: str, text_records: Sequence[Record]) -> List[Record]:
+    weak_records = _load_json(runtime_output_root / weak_labels_relpath)
+    if not isinstance(weak_records, list):
+        raise ValueError("weak_labels source must be a JSON array")
+    if dataset_name == "lvvis_val":
+        return _synthesize_lvvis_val_weak_records(train_weak_records=weak_records, text_records=text_records)
+    return weak_records
 
 def _read_remote_repo_dir(repo_root: Path) -> str:
     explicit_repo = str(os.environ.get("WSOVVIS_AUTHORITATIVE_REMOTE_REPO_DIR", "")).strip()
@@ -363,8 +432,13 @@ def materialize_phase1_training_samples(
         _load_jsonl(runtime_output_root / assets["trajectory_records"]["path"], limit=traj_limit)
     )
     carrier_records = _load_jsonl(runtime_output_root / assets["carrier_records"]["path"])
-    weak_records = _load_json(runtime_output_root / assets["weak_labels"]["path"])
     text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(runtime_output_root)
+    weak_records = _load_dataset_observed_records(
+        runtime_output_root=runtime_output_root,
+        dataset_name=config.dataset_name,
+        weak_labels_relpath=assets["weak_labels"]["path"],
+        text_records=text_records,
+    )
     timing_checkpoint(
         "phase1_materialization_after_asset_load",
         started_at=phase_t0,
@@ -386,7 +460,7 @@ def materialize_phase1_training_samples(
     )
 
     if not isinstance(weak_records, list):
-        raise ValueError("weak_labels_train must be a JSON array")
+        raise ValueError("weak_labels source must be a JSON array")
 
     carrier_by_tid = _build_lookup_by_key(carrier_records, lambda rec: str(rec["trajectory_id"]))
     weak_by_clip = _build_lookup_by_key(weak_records, lambda rec: str(rec.get('clip_id', '')))
@@ -472,6 +546,8 @@ def materialize_phase1_training_samples(
             "weak_label_record": weak_rec,
             "candidate_text_prototypes": candidate_text,
             "observed_raw_ids": observed_raw_ids,
+            "observed_set_semantics": str(weak_rec.get("observed_set_semantics", "Y_prime_v")) if isinstance(weak_rec, Mapping) else "Y_prime_v",
+            "observed_set_source": str(weak_rec.get("observed_set_source", "weak_label_record")) if isinstance(weak_rec, Mapping) else "weak_label_record",
             "candidate_ids_known": candidate_ids_known,
             "candidate_ids_extra": candidate_ids_extra,
             "candidate_ids_extra_phase1_placeholder": list(candidate_ids_extra),

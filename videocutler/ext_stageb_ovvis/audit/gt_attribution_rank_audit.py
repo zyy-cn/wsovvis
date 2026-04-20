@@ -599,6 +599,8 @@ def _prepare_all_gt_shared_inputs(config: GTAttributionRankAuditConfig) -> Dict[
     gt_payload = _load_gt_payload(config.dataset_name)
     full_vocab_ids, vocab_matrix = _dataset_vocab(asset_roots.asset_root, config.dataset_name, gt_payload)
     base_vocab_ids = _load_base_vocab_ids_for_dataset(config.dataset_name, gt_payload)
+    observed_sources = sorted({str(sample.get("observed_set_source", "unknown")) for sample in samples})
+    observed_semantics = sorted({str(sample.get("observed_set_semantics", "unknown")) for sample in samples})
     return {
         "samples": samples,
         "clip_ids": clip_ids,
@@ -608,6 +610,8 @@ def _prepare_all_gt_shared_inputs(config: GTAttributionRankAuditConfig) -> Dict[
         "full_vocab_ids": full_vocab_ids,
         "vocab_matrix": vocab_matrix,
         "base_vocab_ids": base_vocab_ids,
+        "observed_set_sources": observed_sources,
+        "observed_set_semantics": observed_semantics,
     }
 
 
@@ -846,12 +850,16 @@ def run_stage_all_gt_attribution_rank_audit(
             "split_counts": {split: 0 for split in ALL_GT_SPLIT_ORDER},
             "split_summaries": {split: {"gt_count": 0, "status": "STAGE_NOT_PRESENT"} for split in ALL_GT_SPLIT_ORDER},
             "unsupported_gt_histogram": {},
+            "observed_set_sources": observed_set_sources,
+            "observed_set_semantics": observed_set_semantics,
         }
         write_json(summary_path, result)
         return result
 
     prepared = dict(prepared_inputs or _prepare_all_gt_shared_inputs(config))
     samples = [dict(x) for x in prepared["samples"]]
+    observed_set_sources = list(prepared.get("observed_set_sources", []))
+    observed_set_semantics = list(prepared.get("observed_set_semantics", []))
     gt_sidecar_lookup = dict(prepared["gt_sidecar_lookup"])
     asset_roots = prepared["asset_roots"]
     full_vocab_ids = list(prepared["full_vocab_ids"])
@@ -907,6 +915,8 @@ def run_stage_all_gt_attribution_rank_audit(
             "summary_by_split_path": str(summary_path),
             "legacy_summary_path": str(_stage_summary_path(config.output_root, config.dataset_name, stage)),
             "ledger_path": None,
+            "observed_set_sources": observed_set_sources,
+            "observed_set_semantics": observed_set_semantics,
         }
     )
     write_json(summary_path, summary)
@@ -934,6 +944,8 @@ def run_gt_attribution_rank_all_gt_audit(config: GTAttributionRankAuditConfig) -
         "output_root": str(config.output_root),
         "stages": results,
         "comparison_by_split": comparison,
+        "observed_set_sources": list(prepared.get("observed_set_sources", [])),
+        "observed_set_semantics": list(prepared.get("observed_set_semantics", [])),
     }
     write_json(_package_all_gt_summary_by_split_path(config.output_root, config.dataset_name), summary)
     write_json(_package_all_gt_summary_export_path(config.output_root, config.dataset_name), summary)
