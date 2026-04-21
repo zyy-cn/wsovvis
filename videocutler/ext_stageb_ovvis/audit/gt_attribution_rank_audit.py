@@ -368,7 +368,7 @@ def _score_all_gt_rows(
     for row_index, sample in enumerate(materialized_samples, start=1):
         trajectory_id = str(sample.get("trajectory_id", "")).strip()
         sidecar = gt_sidecar_lookup.get(trajectory_id, {})
-        gt_raw_id = _as_int(sidecar.get("matched_gt_class_id"))
+        gt_raw_id = _as_int(sidecar.get("matched_gt_raw_id_canonical"))
         gt_available = bool(sidecar.get("audit_usable", False)) and gt_raw_id is not None
         observed_raw_ids = [int(x) for x in list(sample.get("observed_raw_ids", []))]
         split_label = None
@@ -396,6 +396,8 @@ def _score_all_gt_rows(
             "observed_raw_ids": observed_raw_ids,
             "gt_available_for_audit": gt_available,
             "gt_class_id": gt_raw_id,
+            "gt_raw_id_canonical": gt_raw_id,
+            "gt_raw_id_legacy": _as_int(sidecar.get("matched_gt_class_id")),
             "all_gt_split": split_label,
             "gt_rank": None,
             "normalized_gt_rank": None,

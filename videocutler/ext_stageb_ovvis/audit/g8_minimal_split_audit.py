@@ -163,6 +163,15 @@ def _stage_row_source_path(output_root: Path, dataset_name: str, stage: str) -> 
     return None
 
 
+def _canonical_sidecar_gt_raw_id(sidecar: Mapping[str, Any]) -> Optional[int]:
+    gt_raw_id = _as_int(sidecar.get('matched_gt_raw_id_canonical'))
+    if gt_raw_id is None:
+        raise RuntimeError(
+            "MISSING_CANONICAL_GT_RAW_ID: sidecar must expose matched_gt_raw_id_canonical for Fix C semantics"
+        )
+    return gt_raw_id
+
+
 def _load_proxy_observed_lookup(output_root: Path) -> Dict[str, List[int]]:
     lookup: Dict[str, List[int]] = {}
     proxy_path = output_root / 'train' / 'prealign' / 'proxy_records.jsonl'
@@ -198,7 +207,7 @@ def _materialize_shared_inputs(config: MinimalSplitAuditConfig) -> Dict[str, Any
         for sample in samples:
             trajectory_id = str(sample.get('trajectory_id', sample.get('trajectory_record', {}).get('trajectory_id', ''))).strip()
             sidecar = dict(gt_sidecar_lookup.get(trajectory_id, {}))
-            gt_raw_id = _as_int(sidecar.get('matched_gt_raw_id', sidecar.get('matched_gt_class_id')))
+            gt_raw_id = _canonical_sidecar_gt_raw_id(sidecar)
             if bool(sidecar.get('audit_usable', False)) and gt_raw_id is not None:
                 gt_available += 1
         if gt_available == 0:
@@ -242,7 +251,8 @@ def _build_rows_and_cache_train(*, config: MinimalSplitAuditConfig, prepared: Ma
         if not trajectory_id:
             continue
         sidecar = dict(gt_sidecar_lookup.get(trajectory_id, {}))
-        gt_raw_id = _as_int(sidecar.get('matched_gt_raw_id', sidecar.get('matched_gt_class_id')))
+        gt_raw_id = _canonical_sidecar_gt_raw_id(sidecar)
+        gt_raw_id_legacy = _as_int(sidecar.get('matched_gt_class_id'))
         gt_available = bool(sidecar.get('audit_usable', False)) and gt_raw_id is not None
         observed_raw_ids = proxy_observed_lookup.get(trajectory_id, [])
         split_label = None
@@ -258,6 +268,8 @@ def _build_rows_and_cache_train(*, config: MinimalSplitAuditConfig, prepared: Ma
             'video_id': _as_int(record.get('video_id')),
             'clip_id': _as_int(record.get('clip_id')),
             'gt_class_id': gt_raw_id,
+            'gt_raw_id_canonical': gt_raw_id,
+            'gt_raw_id_legacy': gt_raw_id_legacy,
             'gt_available_for_audit': bool(gt_available),
             'split': split_label,
             'observed_raw_ids': observed_raw_ids,
@@ -318,7 +330,7 @@ def _build_rows_and_cache_val(*, config: MinimalSplitAuditConfig, prepared: Mapp
         if not trajectory_id:
             continue
         sidecar = dict(gt_sidecar_lookup.get(trajectory_id, {}))
-        gt_raw_id = _as_int(sidecar.get('matched_gt_raw_id', sidecar.get('matched_gt_class_id')))
+        gt_raw_id = _canonical_sidecar_gt_raw_id(sidecar)
         gt_available = bool(sidecar.get('audit_usable', False)) and gt_raw_id is not None
         observed_raw_ids = [int(x) for x in list(sample.get('observed_raw_ids', []))]
         split_label = None
@@ -334,6 +346,8 @@ def _build_rows_and_cache_val(*, config: MinimalSplitAuditConfig, prepared: Mapp
             'video_id': _as_int(sample.get('video_id', sample.get('trajectory_record', {}).get('video_id'))),
             'clip_id': _as_int(sample.get('clip_id', sample.get('trajectory_record', {}).get('clip_id'))),
             'gt_class_id': gt_raw_id,
+            'gt_raw_id_canonical': gt_raw_id,
+            'gt_raw_id_legacy': _as_int(sidecar.get('matched_gt_class_id')),
             'gt_available_for_audit': bool(gt_available),
             'split': split_label,
             'observed_raw_ids': observed_raw_ids,
@@ -414,7 +428,7 @@ def _score_batch(*, batch_rows: Sequence[Mapping[str, Any]], cache: Mapping[str,
             fused_logits = torch.cat(parts, dim=1)
         else:
             fused_logits = _batched_logits(candidate_tensor)
-        gt_indices = torch.tensor([int(vocab_index[int(row['gt_class_id'])]) for row in batch_rows], device=device, dtype=torch.long)
+        gt_indices = torch.tensor([int(vocab_index[int(row['gt_raw_id_canonical'])]) for row in batch_rows], device=device, dtype=torch.long)
         gt_scores = fused_logits.gather(1, gt_indices.unsqueeze(1)).squeeze(1)
         ranks = (fused_logits > gt_scores.unsqueeze(1)).sum(dim=1).to(dtype=torch.float32) + 1.0
         denom = max(1, int(fused_logits.shape[1]) - 1)
@@ -508,7 +522,14 @@ def run_stage_minimal_split_audit(config: MinimalSplitAuditConfig, stage: str, *
     rows, cache, vocab_index, candidate_tensor, temperature_tensor, metadata = _build_rows_and_cache(config=config, prepared=prepared, stage=stage)
 
     split_order_set = set(split_order)
-    scored_rows = [row for row in rows if bool(row.get('gt_available_for_audit')) and row.get('split') in split_order_set and row.get('gt_class_id') in vocab_index and str(row['trajectory_id']) in cache]
+    scored_rows = [
+        row
+        for row in rows
+        if bool(row.get('gt_available_for_audit'))
+        and row.get('split') in split_order_set
+        and row.get('gt_raw_id_canonical') in vocab_index
+        and str(row['trajectory_id']) in cache
+    ]
     if rows and config.dataset_name in TRAIN_DATASETS and not scored_rows:
         raise RuntimeError(
             f"TRAIN_GT_AVAILABLE_FILTERED_TO_ZERO: row_count={len(rows)} gt_available_row_count=0_or_filtered for dataset={config.dataset_name} stage={stage} output_root={config.output_root}"
@@ -554,6 +575,10 @@ def run_stage_minimal_split_audit(config: MinimalSplitAuditConfig, stage: str, *
         'sidecar_match_sha256': metadata.get('sidecar_match_sha256'),
         'sidecar_identity_path': metadata.get('sidecar_identity_path'),
         'sidecar_identity_sha256': metadata.get('sidecar_identity_sha256'),
+        'sidecar_raw_id_field': 'matched_gt_raw_id_canonical',
+        'legacy_sidecar_raw_id_field': 'matched_gt_class_id',
+        'canonical_id_space': 'observed_raw_ids',
+        'legacy_id_space': 'pred_label_raw',
         'missing_sample_count': metadata.get('missing_sample_count'),
         'row_source_path': metadata.get('row_source_path'),
     })
@@ -583,6 +608,8 @@ def run_minimal_split_audit(config: MinimalSplitAuditConfig) -> Dict[str, Any]:
         'stage_scope': list(stage_names),
         'observed_set_sources': list(results[stage_names[0]].get('observed_set_sources', [])) if stage_names else [],
         'observed_set_semantics': list(results[stage_names[0]].get('observed_set_semantics', [])) if stage_names else [],
+        'canonical_id_space': 'observed_raw_ids',
+        'legacy_id_space': 'pred_label_raw',
     }
     summary.update(_new_chain_provenance(dataset_name=config.dataset_name, split_order=split_order, stage_scope=stage_names))
     write_json(_dataset_summary_path(config.output_root, config.dataset_name), summary)
