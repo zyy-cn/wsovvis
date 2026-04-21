@@ -26,4 +26,11 @@ __all__ = [
     "run_extra_recovery_audit",
     "summarize_projector_quality_rows",
     "summarize_attribution_rows",
+    "G8GTSidecarGenerationConfig",
+    "run_g8_gt_sidecar_generation",
 ]
+
+from .g8_gt_sidecar_generation import (
+    G8GTSidecarGenerationConfig,
+    run_g8_gt_sidecar_generation,
+)
