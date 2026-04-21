@@ -1,9 +1,13 @@
 {
   "task_id": "G8_inference_and_eval-task",
-  "task_truth_stamp": "723a0e4ce74cf518ab639cd5716328c6941daf3177cc4e3a2ca398ef765d1627",
+  "task_truth_stamp": "14b0407329b0fc01fec7130cccc4aa1c7f1a797cb3bb902743046cb84b037372",
   "active_gate": "G8_inference_and_eval",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
+    "videocutler/ext_stageb_ovvis/audit/g8_minimal_split_audit.py",
+    "videocutler/ext_stageb_ovvis/audit/g8_softem_aug_extra_audit.py",
+    "videocutler/run_stageb_audit_g8_minimal_split.py",
+    "videocutler/run_stageb_audit_g8_softem_aug_extra.py",
     "videocutler/ext_stageb_ovvis/models/projector.py",
     "videocutler/ext_stageb_ovvis/audit/gt_attribution_rank_audit.py",
     "third_party/lvvis_official/evaluate/lvvis.py",
