@@ -30,6 +30,10 @@ MINIMAL_STAGES: Tuple[str, ...] = ("prealign", "softem_base")
 TRAIN_SPLIT_ORDER: Tuple[str, ...] = ("base_observed", "base_unobserved")
 VAL_SPLIT_ORDER: Tuple[str, ...] = ("base", "novel")
 DEFAULT_LAMBDA_FRAME = 0.25
+NEW_CHAIN_AUDIT_PIPELINE_ID = "g8_minimal_split_v1"
+NEW_CHAIN_AUDIT_ENTRYPOINT = "videocutler/run_stageb_audit_g8_minimal_split.py"
+NEW_CHAIN_AUDIT_SCOPE = "g8_default_minimal_split"
+NEW_CHAIN_METRIC_SCOPE: Tuple[str, ...] = ("gt_count", "mean_normalized_gt_rank", "gt_top1_hit_rate")
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,19 @@ def _write_progress(path: Path, *, status: str, processed_rows: int, total_rows:
 
 def _iter_stage_names(stage: str) -> Tuple[str, ...]:
     return MINIMAL_STAGES if stage == "all" else (stage,)
+
+
+def _new_chain_provenance(*, dataset_name: str, split_order: Sequence[str], stage_scope: Sequence[str]) -> Dict[str, Any]:
+    return {
+        "audit_pipeline_id": NEW_CHAIN_AUDIT_PIPELINE_ID,
+        "audit_entrypoint": NEW_CHAIN_AUDIT_ENTRYPOINT,
+        "audit_scope": NEW_CHAIN_AUDIT_SCOPE,
+        "dataset_name": str(dataset_name),
+        "stage_scope": list(stage_scope),
+        "metric_scope": list(NEW_CHAIN_METRIC_SCOPE),
+        "split_scope": [str(x) for x in split_order],
+        "generated_by_new_chain": True,
+    }
 
 
 def _materialize_shared_inputs(config: MinimalSplitAuditConfig) -> Dict[str, Any]:
@@ -357,6 +374,7 @@ def run_stage_minimal_split_audit(
             "observed_set_sources": list((prepared_inputs or {}).get("observed_set_sources", [])),
             "observed_set_semantics": list((prepared_inputs or {}).get("observed_set_semantics", [])),
         }
+        result.update(_new_chain_provenance(dataset_name=config.dataset_name, split_order=split_order, stage_scope=MINIMAL_STAGES))
         write_json(summary_path, result)
         return result
 
@@ -405,6 +423,7 @@ def run_stage_minimal_split_audit(
             "observed_set_semantics": observed_set_semantics,
         }
     )
+    summary.update(_new_chain_provenance(dataset_name=config.dataset_name, split_order=split_order, stage_scope=MINIMAL_STAGES))
     write_json(summary_path, summary)
     _write_progress(progress_path, status="COMPLETE", processed_rows=len(scored_rows), total_rows=len(scored_rows), checkpoint_path=checkpoint_path)
     return summary
@@ -431,6 +450,8 @@ def run_minimal_split_audit(config: MinimalSplitAuditConfig) -> Dict[str, Any]:
         "observed_set_sources": list(prepared.get("observed_set_sources", [])),
         "observed_set_semantics": list(prepared.get("observed_set_semantics", [])),
     }
+    summary.update(_new_chain_provenance(dataset_name=config.dataset_name, split_order=split_order, stage_scope=stage_names))
     write_json(_dataset_summary_path(config.output_root, config.dataset_name), summary)
+    comparison.update(_new_chain_provenance(dataset_name=config.dataset_name, split_order=split_order, stage_scope=stage_names))
     write_json(_package_comparison_path(config.output_root, config.dataset_name), comparison)
     return summary

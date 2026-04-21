@@ -15,6 +15,10 @@ from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
 )
 from videocutler.ext_stageb_ovvis.eval.g8_bridge import write_json
 
+NEW_CHAIN_AUDIT_PIPELINE_ID = "g8_softem_aug_extra_v1"
+NEW_CHAIN_AUDIT_ENTRYPOINT = "videocutler/run_stageb_audit_g8_softem_aug_extra.py"
+NEW_CHAIN_AUDIT_SCOPE = "g8_softem_aug_extra"
+
 
 @dataclass(frozen=True)
 class SoftemAugExtraAuditConfig:
@@ -27,6 +31,25 @@ class SoftemAugExtraAuditConfig:
 
 def _summary_path(output_root: Path, dataset_name: str) -> Path:
     return output_root / "audit" / "softem_aug_extra" / dataset_name / "softem_aug_extra_audit_summary.json"
+
+
+def _provenance(*, dataset_name: str) -> Dict[str, Any]:
+    return {
+        "audit_pipeline_id": NEW_CHAIN_AUDIT_PIPELINE_ID,
+        "audit_entrypoint": NEW_CHAIN_AUDIT_ENTRYPOINT,
+        "audit_scope": NEW_CHAIN_AUDIT_SCOPE,
+        "dataset_name": str(dataset_name),
+        "stage_scope": ["softem_aug"],
+        "metric_scope": [
+            "extra_selected_count",
+            "extra_correct_count",
+            "extra_precision",
+            "gt_recovered_by_extra_count",
+            "gt_recovered_by_extra_rate",
+        ],
+        "split_scope": ["softem_aug_extra"],
+        "generated_by_new_chain": True,
+    }
 
 
 def run_softem_aug_extra_audit(config: SoftemAugExtraAuditConfig) -> Dict[str, Any]:
@@ -47,6 +70,7 @@ def run_softem_aug_extra_audit(config: SoftemAugExtraAuditConfig) -> Dict[str, A
             "summary_path": str(summary_path),
             "note": "softem_aug not present for this output_root",
         }
+        summary.update(_provenance(dataset_name=config.dataset_name))
         write_json(summary_path, summary)
         return summary
 
@@ -100,5 +124,6 @@ def run_softem_aug_extra_audit(config: SoftemAugExtraAuditConfig) -> Dict[str, A
         "gt_recovered_by_extra_rate": float(len(gt_recovered) / len(gt_missing_rows)) if gt_missing_rows else None,
         "summary_path": str(summary_path),
     }
+    summary.update(_provenance(dataset_name=config.dataset_name))
     write_json(summary_path, summary)
     return summary

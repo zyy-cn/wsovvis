@@ -45,6 +45,7 @@ STAGE_TO_SELECTED = {
 ALL_STAGES = ("prealign", "softem_base", "softem_aug")
 ALL_GT_TRAIN_SPLIT_ORDER = ("base_observed", "base_unobserved")
 ALL_GT_VAL_SPLIT_ORDER = ("base", "novel")
+G8_BATCH_ROOT_MARKER = "G8_inference_and_eval/g8_param_exploration_"
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,15 @@ def _require_dataset_name(dataset_name: str) -> str:
     if dataset_name not in ALLOWED_DATASETS:
         raise ValueError(f"dataset_name must be one of {ALLOWED_DATASETS}, got {dataset_name!r}")
     return dataset_name
+
+
+def _retire_old_g7_chain_for_current_g8_param_batch(output_root: Path) -> None:
+    output_root_text = str(output_root).replace("\\", "/")
+    if G8_BATCH_ROOT_MARKER in output_root_text:
+        raise RuntimeError(
+            "RETIRED_FOR_G8_PARAM_BATCH_USE_G8_MINIMAL_SPLIT: "
+            "run_stageb_audit_g7_gt_attribution_rank.py is retired for current G8 parameter-batch auditing"
+        )
 
 
 def _read_json(path: Path) -> Any:
@@ -1017,6 +1027,7 @@ def run_stage_all_gt_attribution_rank_audit(
 
 
 def run_gt_attribution_rank_all_gt_audit(config: GTAttributionRankAuditConfig) -> Dict[str, Any]:
+    _retire_old_g7_chain_for_current_g8_param_batch(config.output_root)
     stage_names = ALL_STAGES if config.stage == "all" else (config.stage,)
     prepared = _prepare_all_gt_shared_inputs(config)
     results: Dict[str, Any] = {}
@@ -1039,6 +1050,7 @@ def run_gt_attribution_rank_all_gt_audit(config: GTAttributionRankAuditConfig) -
 
 
 def run_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig) -> Dict[str, Any]:
+    _retire_old_g7_chain_for_current_g8_param_batch(config.output_root)
     if bool(config.all_gt_only):
         return run_gt_attribution_rank_all_gt_audit(config)
     stage_names = ALL_STAGES if config.stage == "all" else (config.stage,)
