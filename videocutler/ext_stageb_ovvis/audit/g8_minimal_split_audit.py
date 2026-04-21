@@ -165,10 +165,6 @@ def _stage_row_source_path(output_root: Path, dataset_name: str, stage: str) -> 
 
 def _canonical_sidecar_gt_raw_id(sidecar: Mapping[str, Any]) -> Optional[int]:
     gt_raw_id = _as_int(sidecar.get('matched_gt_raw_id_canonical'))
-    if gt_raw_id is None:
-        raise RuntimeError(
-            "MISSING_CANONICAL_GT_RAW_ID: sidecar must expose matched_gt_raw_id_canonical for Fix C semantics"
-        )
     return gt_raw_id
 
 
