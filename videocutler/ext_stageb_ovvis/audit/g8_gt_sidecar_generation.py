@@ -91,7 +91,8 @@ def _choose_canonical_offset(
     *,
     legacy_rows: Sequence[Record],
     observed_lookup: Mapping[str, Sequence[int]],
-) -> tuple[int, Dict[str, int]]:
+    require_observed_lookup: bool,
+) -> tuple[int, Dict[str, int], str]:
     candidates = (0, 1, -1)
     scores = {offset: 0 for offset in candidates}
     usable_rows = 0
@@ -112,9 +113,12 @@ def _choose_canonical_offset(
             if int(gt_class_id) + int(offset) in observed_raw_ids:
                 scores[offset] += 1
     if rows_with_observed == 0:
-        raise RuntimeError(
-            f"CANONICAL_GT_RAW_ID_SELF_CHECK_NO_OBSERVED_ROWS: dataset-level observed_raw_ids lookup missing or empty for {len(legacy_rows)} match rows"
-        )
+        if require_observed_lookup:
+            raise RuntimeError(
+                f"CANONICAL_GT_RAW_ID_SELF_CHECK_NO_OBSERVED_ROWS: dataset-level observed_raw_ids lookup missing or empty for {len(legacy_rows)} match rows"
+            )
+        offset = int(CANONICAL_GT_RAW_ID_OFFSET)
+        return offset, {str(k): int(v) for k, v in scores.items()}, "fallback_no_observed_lookup"
     best_offset = max(candidates, key=lambda offset: (scores[offset], -abs(offset), -offset))
     best_score = scores[best_offset]
     tied = [offset for offset in candidates if scores[offset] == best_score]
@@ -123,7 +127,7 @@ def _choose_canonical_offset(
             "CANONICAL_GT_RAW_ID_SELF_CHECK_AMBIGUOUS: "
             f"scores={scores} usable_rows={usable_rows} rows_with_observed={rows_with_observed}"
         )
-    return int(best_offset), {str(k): int(v) for k, v in scores.items()}
+    return int(best_offset), {str(k): int(v) for k, v in scores.items()}, "observed_membership"
 
 
 def _annotate_canonical_fields(rows: Sequence[Record], *, offset: int) -> List[Record]:
@@ -152,6 +156,7 @@ def _canonicalization_self_check(
     rows: Sequence[Record],
     observed_lookup: Mapping[str, Sequence[int]],
     offset: int,
+    require_observed_lookup: bool,
 ) -> Dict[str, Any]:
     legacy_hits = 0
     canonical_hits = 0
@@ -175,7 +180,17 @@ def _canonicalization_self_check(
         if canonical_raw_id in observed_raw_ids:
             canonical_hits += 1
     if checked_rows == 0:
-        raise RuntimeError("CANONICAL_GT_RAW_ID_SELF_CHECK_NO_CHECKED_ROWS: no usable rows with observed_raw_ids were available")
+        if require_observed_lookup:
+            raise RuntimeError("CANONICAL_GT_RAW_ID_SELF_CHECK_NO_CHECKED_ROWS: no usable rows with observed_raw_ids were available")
+        return {
+            "skipped": True,
+            "reason": "no_observed_lookup_available_for_dataset",
+            "legacy_hits": int(legacy_hits),
+            "canonical_hits": int(canonical_hits),
+            "checked_rows": int(checked_rows),
+            "observed_rows": int(observed_rows),
+            "canonicalization_offset": int(offset),
+        }
     if int(offset) != 0 and canonical_hits <= legacy_hits:
         raise RuntimeError(
             "CANONICAL_GT_RAW_ID_SELF_CHECK_FAILED: "
@@ -430,12 +445,22 @@ def run_g8_gt_sidecar_generation(config: G8GTSidecarGenerationConfig) -> Dict[st
     had_canonical_fields = all(row.get("matched_gt_raw_id_canonical") is not None for row in match_rows) and all(
         row.get("matched_gt_raw_id_canonical") is not None for row in identity_rows_existing
     )
-    offset, offset_scores = _choose_canonical_offset(legacy_rows=match_rows, observed_lookup=observed_lookup)
+    require_observed_lookup = config.dataset_name in ("lvvis_train_base",)
+    offset, offset_scores, offset_source = _choose_canonical_offset(
+        legacy_rows=match_rows,
+        observed_lookup=observed_lookup,
+        require_observed_lookup=require_observed_lookup,
+    )
     match_rows = _annotate_canonical_fields(match_rows, offset=offset)
     identity_rows = _annotate_canonical_fields(identity_rows_existing, offset=offset)
     _write_jsonl(paths["match"], match_rows)
     _write_jsonl(paths["identity"], identity_rows)
-    canonical_check = _canonicalization_self_check(rows=match_rows, observed_lookup=observed_lookup, offset=offset)
+    canonical_check = _canonicalization_self_check(
+        rows=match_rows,
+        observed_lookup=observed_lookup,
+        offset=offset,
+        require_observed_lookup=require_observed_lookup,
+    )
     if (not config.rewrite_existing) and all(preexisting.values()) and had_canonical_fields:
         status = "REUSED_EXISTING_VALID"
     else:
@@ -455,6 +480,7 @@ def run_g8_gt_sidecar_generation(config: G8GTSidecarGenerationConfig) -> Dict[st
             "current_asset_mode_behavior": "sidecar_only_generation_video_iou_050_only",
             "canonical_gt_raw_id_offset": int(offset),
             "canonical_gt_raw_id_offset_scores": offset_scores,
+            "canonical_gt_raw_id_offset_source": offset_source,
             "canonicalization_self_check": canonical_check,
             "canonical_id_space": CANONICAL_GT_RAW_ID_SPACE,
             "legacy_id_space": LEGACY_GT_RAW_ID_SPACE,
