@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--write_runtime_metrics_jsonl", type=_parse_bool, default=True)
     parser.add_argument("--print_epoch_summary", type=_parse_bool, default=True)
+    parser.add_argument("--unknown_init_mode", type=str, choices=["legacy", "unknown_prior"], default="legacy")
     return parser.parse_args()
 
 
@@ -217,6 +218,7 @@ def main() -> int:
             log_every=int(args.log_every),
             write_runtime_metrics_jsonl=bool(args.write_runtime_metrics_jsonl),
             print_epoch_summary=bool(args.print_epoch_summary),
+            unknown_init_mode=str(args.unknown_init_mode),
         ),
     )
 

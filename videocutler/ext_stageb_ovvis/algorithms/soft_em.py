@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Literal
 
 import numpy as np
 import torch
@@ -35,6 +35,11 @@ from videocutler.ext_stageb_ovvis.algorithms._training_budget import build_dynam
 
 
 Record = Dict[str, Any]
+
+UNKNOWN_INIT_MODE_LEGACY = 'legacy'
+UNKNOWN_INIT_MODE_PRIOR = 'unknown_prior'
+UNKNOWN_INIT_MODE_CHOICES = (UNKNOWN_INIT_MODE_LEGACY, UNKNOWN_INIT_MODE_PRIOR)
+UNKNOWN_INIT_PRIOR_ALPHA = 0.2
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ class SoftEMConfig:
     log_every: int = 10
     write_runtime_metrics_jsonl: bool = True
     print_epoch_summary: bool = True
+    unknown_init_mode: str = 'legacy'
 
 
 def _set_seed(seed: int) -> None:
@@ -576,6 +582,19 @@ def _project_init_mass_to_domain(init_mass: Mapping[str, float], domain_ids: Seq
     return _normalize_mass(projected)
 
 
+def _apply_unknown_prior_to_init_mass(
+    projected_init_mass: Mapping[str, float],
+    *,
+    alpha: float = UNKNOWN_INIT_PRIOR_ALPHA,
+) -> Dict[str, float]:
+    bounded_alpha = min(max(float(alpha), 0.0), 1.0)
+    if bounded_alpha <= 0.0:
+        return _normalize_mass(projected_init_mass)
+    remixed = {str(key): (1.0 - bounded_alpha) * float(value) for key, value in projected_init_mass.items()}
+    remixed['unknown'] = float(remixed.get('unknown', 0.0) + bounded_alpha)
+    return _normalize_mass(remixed)
+
+
 def _explicit_init_mass_for_aug_stage(
     *,
     domain_ids: Sequence[int],
@@ -610,6 +629,7 @@ def _compute_initial_mass_for_stage(
     extra_ids: Sequence[int],
     stage_logits_candidates: torch.Tensor,
     b_u: torch.nn.Parameter,
+    unknown_init_mode: str = UNKNOWN_INIT_MODE_LEGACY,
 ) -> Dict[str, float]:
     if str(stage_id) == 'softem_aug' and len(extra_ids) > 0:
         return _explicit_init_mass_for_aug_stage(
@@ -619,7 +639,10 @@ def _compute_initial_mass_for_stage(
             stage_logits_candidates=stage_logits_candidates,
             b_u=b_u,
         )
-    return _project_init_mass_to_domain(base_cache.get_init_mass(trajectory_id), domain_ids)
+    projected = _project_init_mass_to_domain(base_cache.get_init_mass(trajectory_id), domain_ids)
+    if str(stage_id) == 'softem_base' and str(unknown_init_mode) == UNKNOWN_INIT_MODE_PRIOR:
+        return _apply_unknown_prior_to_init_mass(projected, alpha=UNKNOWN_INIT_PRIOR_ALPHA)
+    return projected
 
 
 def _build_clip_coverage_context(current_masses_by_tid: Mapping[str, Mapping[str, float]], clip_examples: Sequence[Mapping[str, Any]], known_ids: Sequence[int]) -> Dict[str, float]:
@@ -682,6 +705,7 @@ def _compute_clip_refinement_rows(
                 extra_ids=extra_ids,
                 stage_logits_candidates=stage_logits_candidates,
                 b_u=b_u,
+                unknown_init_mode=str(config.unknown_init_mode),
             )
 
     current_masses_by_tid = {tid: dict(mass) for tid, mass in initial_masses_by_tid.items()}
@@ -1257,6 +1281,7 @@ def run_soft_em(
                 'mode': str(config.mode),
                 'global_step': int(iteration_index),
                 'extra_refresh_interval_iters': int(current_refresh_interval),
+                'unknown_init_mode': str(config.unknown_init_mode),
             },
             checkpoint_path,
         )
@@ -1276,10 +1301,13 @@ def run_soft_em(
                 'runtime_extra_cache_enabled': bool(str(stage.stage_id) == 'softem_aug'),
                 'runtime_extra_cache_clip_count': int(len(runtime_extra_cache)),
                 'extra_refresh_interval_iters': int(current_refresh_interval),
+                'unknown_init_mode': str(config.unknown_init_mode),
                 'batch_budget': int(batch_budget),
                 'budget_policy': 'dynamic_sum_Tv_times_Kv',
                 'loss_normalization': 'effective_responsibility_unit_count',
                 'micro_batch_count_per_epoch': int(final_epoch_plan.batch_count) if final_epoch_plan is not None else 0,
+                'unknown_init_mode': str(config.unknown_init_mode),
+                'unknown_init_prior_alpha': float(UNKNOWN_INIT_PRIOR_ALPHA) if str(config.unknown_init_mode) == UNKNOWN_INIT_MODE_PRIOR else 0.0,
             }
         )
         current_checkpoint = checkpoint_path
