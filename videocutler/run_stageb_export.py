@@ -17,6 +17,8 @@ from videocutler.ext_stageb_ovvis.banks.trajectory_bank import (
     validate_trajectory_record,
 )
 
+from videocutler.ext_stageb_ovvis.data.datasets.lvvis_official_split import validate_lvvis_annotation_categories
+
 DATASET_CHOICES = ("lvvis_train_base", "lvvis_val", "ytvis_2019_val")
 TRAJECTORY_SOURCE_BRANCHES = ("mainline", "gt_upper_bound")
 SPEC_VERSION = "v20.1.3"
@@ -80,21 +82,22 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _resolve_lvvis_root() -> Path:
+def _resolve_lvvis_root(*, validate_official_authority: bool = False) -> Path:
     env_value = os.environ.get("WSOVVIS_LVVIS_ROOT")
-    if env_value:
-        return Path(env_value).expanduser().resolve()
-    return (_repo_root() / "videocutler" / "datasets" / "LV-VIS").resolve()
+    root = Path(env_value).expanduser().resolve() if env_value else (_repo_root() / "videocutler" / "datasets" / "LV-VIS").resolve()
+    if validate_official_authority:
+        validate_lvvis_annotation_categories(root / "annotations" / "train_instances.json", root / "annotations" / "val_instances.json")
+    return root
 
 
-def _annotation_json_path(dataset_name: str) -> Path:
+def _annotation_json_path(dataset_name: str, *, validate_official_authority: bool = False) -> Path:
     if dataset_name == "lvvis_train_base":
         ann_rel = "annotations/train_instances.json"
     elif dataset_name == "lvvis_val":
         ann_rel = "annotations/val_instances.json"
     else:
         raise ValueError(f"dataset does not support full raw export: {dataset_name}")
-    return _resolve_lvvis_root() / ann_rel
+    return _resolve_lvvis_root(validate_official_authority=validate_official_authority) / ann_rel
 
 
 def _branch_input_source_type(dataset_name: str, trajectory_source_branch: str) -> str:
@@ -108,7 +111,7 @@ def _branch_input_source_type(dataset_name: str, trajectory_source_branch: str) 
 
 
 def _load_video_metadata(dataset_name: str) -> Dict[int, Dict[str, int]]:
-    ann_path = _annotation_json_path(dataset_name)
+    ann_path = _annotation_json_path(dataset_name, validate_official_authority=True)
     if not ann_path.exists():
         raise FileNotFoundError(f"LV-VIS annotation json not found: {ann_path}")
     payload = json.loads(ann_path.read_text(encoding="utf-8"))
@@ -442,7 +445,7 @@ def _gt_annotation_payload(dataset_name: str, smoke: bool) -> Dict[str, Any]:
 
         _, subset_data, _ = load_lvvis_smoke_subset_data(dataset_name, smoke_num_videos=2)
         return subset_data
-    ann_path = _annotation_json_path(dataset_name)
+    ann_path = _annotation_json_path(dataset_name, validate_official_authority=True)
     if not ann_path.exists():
         raise FileNotFoundError(f"LV-VIS annotation json not found: {ann_path}")
     return json.loads(ann_path.read_text(encoding="utf-8"))

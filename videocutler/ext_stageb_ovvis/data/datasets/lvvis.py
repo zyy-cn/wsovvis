@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 from detectron2.data import DatasetCatalog, MetadataCatalog
+
+from .lvvis_official_split import validate_lvvis_annotation_categories
 from detectron2.structures import BoxMode
 
 
@@ -25,11 +27,12 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
-def resolve_lvvis_root() -> Path:
+def resolve_lvvis_root(*, validate_official_authority: bool = False) -> Path:
     env_value = os.environ.get(ROOT_ENV_VAR)
-    if env_value:
-        return Path(env_value).expanduser().resolve()
-    return (_repo_root() / ROOT_FALLBACK).resolve()
+    root = Path(env_value).expanduser().resolve() if env_value else (_repo_root() / ROOT_FALLBACK).resolve()
+    if validate_official_authority:
+        validate_lvvis_annotation_categories(root / "annotations" / "train_instances.json", root / "annotations" / "val_instances.json")
+    return root
 
 
 def _normalize_name(name: str) -> str:

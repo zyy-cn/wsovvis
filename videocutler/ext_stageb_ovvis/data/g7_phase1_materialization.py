@@ -11,11 +11,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_text_vocab
+from videocutler.ext_stageb_ovvis.data.datasets.lvvis_official_split import load_lvvis_official_split_reference
 from videocutler.ext_stageb_ovvis.data.weak_labels import (
     build_label_map_from_class_map,
     build_label_map_from_text_prototypes,
     build_weak_label_record,
     select_observed_raw_ids,
+    sha256_path,
 )
 from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.algorithms._memory_audit import memory_checkpoint, shallow_size_bytes, timing_checkpoint
@@ -56,6 +58,10 @@ def _load_jsonl(path: Path, *, limit: Optional[int] = None) -> List[Record]:
 def _count_jsonl(path: Path) -> int:
     with path.open("r", encoding="utf-8") as handle:
         return sum(1 for _ in handle)
+
+
+def _sha256_file(path: Path) -> str:
+    return sha256_path(path)
 
 
 def _carrier_base_for_branch(branch: str) -> str:
@@ -151,6 +157,35 @@ def _scan_asset_root(output_root: Path, rels: Mapping[str, str]) -> Dict[str, An
 
 
 
+def _require_consistent_scalar(records: Sequence[Record], key: str) -> str:
+    values = sorted({str(rec.get(key, "")).strip() for rec in records if str(rec.get(key, "")).strip()})
+    if len(values) != 1:
+        raise ValueError(f"weak_labels source has inconsistent {key}: {values}")
+    return values[0]
+
+
+def _require_formal_weak_label_provenance(weak_records: Sequence[Record], weak_labels_path: Path) -> Dict[str, Any]:
+    if not weak_records:
+        raise ValueError("weak_labels source is empty")
+    run_scope = _require_consistent_scalar(weak_records, "run_scope")
+    input_source_type = _require_consistent_scalar(weak_records, "input_source_type")
+    data_scope = _require_consistent_scalar(weak_records, "data_scope")
+    official_split_ref = _require_consistent_scalar(weak_records, "official_split_ref")
+    official_split_sha256 = _require_consistent_scalar(weak_records, "official_split_sha256")
+    upstream_source_ref = _require_consistent_scalar(weak_records, "upstream_source_ref")
+    upstream_source_sha256 = _require_consistent_scalar(weak_records, "upstream_source_sha256")
+    if run_scope != "full":
+        raise ValueError(f"formal G7 requires full weak_labels payload; got run_scope={run_scope}")
+    if input_source_type != "official_lvvis_train_annotations":
+        raise ValueError(f"formal G7 requires official train weak_labels source; got {input_source_type}")
+    if data_scope != "train":
+        raise ValueError(f"formal G7 requires train weak_labels payload; got data_scope={data_scope}")
+    official_split = load_lvvis_official_split_reference()
+    if official_split_ref != str(official_split["official_split_ref"]) or official_split_sha256 != str(official_split["official_split_sha256"]):
+        raise ValueError("weak_labels payload official split stamp does not match frozen authority")
+    return {"weak_label_payload_path": str(weak_labels_path), "weak_label_payload_sha256": _sha256_file(weak_labels_path), "official_split_ref": official_split_ref, "official_split_sha256": official_split_sha256, "upstream_source_ref": upstream_source_ref, "upstream_source_sha256": upstream_source_sha256}
+
+
 def _observation_protocol_id_from_weak_records(weak_records: Sequence[Record]) -> str:
     protocols = sorted({str(rec.get("observation_protocol_id", "")).strip() for rec in weak_records if str(rec.get("observation_protocol_id", "")).strip()})
     if not protocols:
@@ -183,8 +218,9 @@ def _build_label_map_for_observed_records(text_records: Sequence[Record]) -> Dic
     if not raw_ids:
         raise ValueError("text_records is empty; cannot synthesize observed-set label map")
 
-    val_payload = _load_json(resolve_lvvis_annotation_paths().val_json)
-    train_payload = _load_json(resolve_lvvis_annotation_paths().train_json)
+    ann_paths = resolve_lvvis_annotation_paths(validate_official_authority=True)
+    val_payload = _load_json(ann_paths.val_json)
+    train_payload = _load_json(ann_paths.train_json)
     categories: Dict[int, str] = {}
     for payload in (train_payload, val_payload):
         for category in payload.get("categories", []):
@@ -204,10 +240,12 @@ def _build_label_map_for_observed_records(text_records: Sequence[Record]) -> Dic
 def _synthesize_lvvis_val_weak_records(*, train_weak_records: Sequence[Record], text_records: Sequence[Record]) -> List[Record]:
     protocol_id = _observation_protocol_id_from_weak_records(train_weak_records)
     label_map = _build_label_map_for_observed_records(text_records)
-    val_payload = _load_json(resolve_lvvis_annotation_paths().val_json)
+    ann_paths = resolve_lvvis_annotation_paths(validate_official_authority=True)
+    val_payload = _load_json(ann_paths.val_json)
     val_videos = _lvvis_video_full_raw_ids_from_payload(val_payload)
     record_count = len(val_videos)
     coverage_ratio = 1.0 if val_videos else 0.0
+    official_split = load_lvvis_official_split_reference()
     output: List[Record] = []
     for video in val_videos:
         video_id = int(video["video_id"])
@@ -226,6 +264,10 @@ def _synthesize_lvvis_val_weak_records(*, train_weak_records: Sequence[Record], 
             record_count=record_count,
             coverage_ratio=coverage_ratio,
             consumer_ready=True,
+            official_split_ref=str(official_split["official_split_ref"]),
+            official_split_sha256=str(official_split["official_split_sha256"]),
+            upstream_source_ref=str(ann_paths.val_json),
+            upstream_source_sha256=_sha256_file(ann_paths.val_json),
         )
         record["observed_set_semantics"] = "Y_prime_v"
         record["observed_set_source"] = "synthesized_from_lvvis_val_annotations_and_train_protocol"
@@ -234,13 +276,19 @@ def _synthesize_lvvis_val_weak_records(*, train_weak_records: Sequence[Record], 
     return output
 
 
-def _load_dataset_observed_records(*, runtime_output_root: Path, dataset_name: str, weak_labels_relpath: str, text_records: Sequence[Record]) -> List[Record]:
-    weak_records = _load_json(runtime_output_root / weak_labels_relpath)
+def _load_dataset_observed_records(*, runtime_output_root: Path, dataset_name: str, weak_labels_relpath: str, text_records: Sequence[Record], require_formal_provenance: bool) -> Tuple[List[Record], Dict[str, Any]]:
+    weak_labels_path = runtime_output_root / weak_labels_relpath
+    weak_records = _load_json(weak_labels_path)
     if not isinstance(weak_records, list):
         raise ValueError("weak_labels source must be a JSON array")
+    provenance: Dict[str, Any] = {}
+    if require_formal_provenance:
+        provenance = _require_formal_weak_label_provenance(weak_records, weak_labels_path)
+    elif weak_labels_path.is_file():
+        provenance = {"weak_label_payload_path": str(weak_labels_path), "weak_label_payload_sha256": _sha256_file(weak_labels_path)}
     if dataset_name == "lvvis_val":
-        return _synthesize_lvvis_val_weak_records(train_weak_records=weak_records, text_records=text_records)
-    return weak_records
+        return _synthesize_lvvis_val_weak_records(train_weak_records=weak_records, text_records=text_records), provenance
+    return weak_records, provenance
 
 def _read_remote_repo_dir(repo_root: Path) -> str:
     explicit_repo = str(os.environ.get("WSOVVIS_AUTHORITATIVE_REMOTE_REPO_DIR", "")).strip()
@@ -275,6 +323,7 @@ def resolve_runtime_assets(
     *,
     dataset_name: str,
     trajectory_source_branch: str,
+    allow_authoritative_remote_fallback: bool,
 ) -> Dict[str, Any]:
     if dataset_name not in {"lvvis_train_base", "lvvis_val"}:
         raise ValueError(f"unsupported dataset_name: {dataset_name}")
@@ -290,7 +339,7 @@ def resolve_runtime_assets(
     runtime_source_resolution = "local_complete"
     chosen_scan = local_scan
     if local_incomplete:
-        if remote_scan is not None and bool(remote_scan["complete_required_views"]):
+        if allow_authoritative_remote_fallback and remote_scan is not None and bool(remote_scan["complete_required_views"]):
             runtime_asset_source = "authoritative_remote_canonical_assets"
             runtime_source_resolution = "remote_fallback_from_local_incomplete"
             chosen_scan = remote_scan
@@ -300,7 +349,7 @@ def resolve_runtime_assets(
             chosen_scan = local_scan
 
     return {
-        "policy": "authoritative_remote_canonical_when_local_incomplete",
+        "policy": "formal_local_canonical_only__smoke_remote_fallback_allowed",
         "reporting_requirement": "train_state_or_run_meta_must_record_runtime_asset_source",
         "requested_output_root": str(output_root),
         "output_root": str(chosen_scan["output_root"]),
@@ -315,6 +364,7 @@ def resolve_runtime_assets(
         "runtime_asset_source": runtime_asset_source,
         "runtime_source_resolution": runtime_source_resolution,
         "local_incomplete": bool(local_incomplete),
+        "allow_authoritative_remote_fallback": bool(allow_authoritative_remote_fallback),
         "required_canonical_views": list(chosen_scan["required_view_keys"]),
         "upstream_asset_only_views": list(chosen_scan.get("upstream_asset_view_keys", [])),
         "local_candidate": local_scan,
@@ -451,12 +501,15 @@ def materialize_phase1_training_samples(
         output_root,
         dataset_name=config.dataset_name,
         trajectory_source_branch=config.trajectory_source_branch,
+        allow_authoritative_remote_fallback=bool(config.smoke),
     )
     runtime_output_root = Path(str(resolution["runtime_output_root"]))
     assets = resolution["assets"]
     for key in ("trajectory_records", "carrier_records", "frame_records", "frame_geom_records", "weak_labels", "text_prototypes"):
         if not assets[key]["exists"]:
             raise FileNotFoundError(f"missing required canonical input: {assets[key]['path']}")
+    if (not bool(config.smoke)) and str(resolution.get("runtime_asset_source", "")) != "local_canonical_assets":
+        raise RuntimeError(f"formal G7 provenance-sensitive execution forbids remote fallback; got runtime_asset_source={resolution.get("runtime_asset_source")}")
 
     traj_limit = int(config.smoke_max_trajectories) if config.smoke else None
     trajectory_records = _stable_trajectory_order(
@@ -464,11 +517,12 @@ def materialize_phase1_training_samples(
     )
     carrier_records = _load_jsonl(runtime_output_root / assets["carrier_records"]["path"])
     text_vocab_ids, text_records, text_vocab_matrix = load_text_vocab(runtime_output_root)
-    weak_records = _load_dataset_observed_records(
+    weak_records, weak_label_provenance = _load_dataset_observed_records(
         runtime_output_root=runtime_output_root,
         dataset_name=config.dataset_name,
         weak_labels_relpath=assets["weak_labels"]["path"],
         text_records=text_records,
+        require_formal_provenance=not bool(config.smoke),
     )
     timing_checkpoint(
         "phase1_materialization_after_asset_load",
@@ -654,7 +708,7 @@ def materialize_phase1_training_samples(
     )
 
     return {
-        "resolution": resolution,
+        "resolution": {**resolution, "weak_label_provenance": weak_label_provenance},
         "samples": materialized,
         "valid_samples": valid_samples,
         "invalid_samples": invalid_samples,
@@ -669,5 +723,6 @@ def materialize_phase1_training_samples(
             "determinism_ok": bool(sample_hash_a == sample_hash_b),
             "subset_fraction": float(config.subset_fraction) if config.subset_fraction is not None else None,
             "subset_seed": int(config.subset_seed),
+            "weak_label_provenance": weak_label_provenance,
         },
     }

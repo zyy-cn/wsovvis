@@ -659,6 +659,7 @@ def _build_clip_coverage_context(current_masses_by_tid: Mapping[str, Mapping[str
 def _compute_clip_refinement_rows(
     *,
     stage_id: str,
+    unknown_init_mode: str,
     clip_examples: Sequence[Mapping[str, Any]],
     base_cache: ResponsibilityCache,
     text_projector: Projector,
@@ -705,7 +706,7 @@ def _compute_clip_refinement_rows(
                 extra_ids=extra_ids,
                 stage_logits_candidates=stage_logits_candidates,
                 b_u=b_u,
-                unknown_init_mode=str(config.unknown_init_mode),
+                unknown_init_mode=str(unknown_init_mode),
             )
 
     current_masses_by_tid = {tid: dict(mass) for tid, mass in initial_masses_by_tid.items()}
@@ -775,6 +776,7 @@ def _compute_clip_refinement_rows(
 def _refresh_stage_runtime_state(
     *,
     stage_id: str,
+    unknown_init_mode: str,
     base_examples: Sequence[Mapping[str, Any]],
     base_cache: ResponsibilityCache,
     text_projector: Projector,
@@ -814,6 +816,7 @@ def _refresh_stage_runtime_state(
     for clip_id in sorted(stage_examples_by_clip.keys()):
         rows, sample_trace = _compute_clip_refinement_rows(
             stage_id=stage_id,
+            unknown_init_mode=str(unknown_init_mode),
             clip_examples=stage_examples_by_clip[int(clip_id)],
             base_cache=base_cache,
             text_projector=text_projector,
@@ -917,6 +920,7 @@ def run_soft_em(
 
         active_examples_by_tid, cache, runtime_extra_cache, stage_trace_sample = _refresh_stage_runtime_state(
             stage_id=stage.stage_id,
+            unknown_init_mode=str(config.unknown_init_mode),
             base_examples=examples,
             base_cache=cache,
             text_projector=text_projector,
@@ -1109,6 +1113,7 @@ def run_soft_em(
                     if since_refresh >= current_refresh_interval:
                         active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state(
                             stage_id=stage.stage_id,
+                            unknown_init_mode=str(config.unknown_init_mode),
                             base_examples=examples,
                             base_cache=cache,
                             text_projector=text_projector,
@@ -1210,6 +1215,7 @@ def run_soft_em(
         if since_refresh > 0:
             active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state(
                 stage_id=stage.stage_id,
+                unknown_init_mode=str(config.unknown_init_mode),
                 base_examples=examples,
                 base_cache=cache,
                 text_projector=text_projector,

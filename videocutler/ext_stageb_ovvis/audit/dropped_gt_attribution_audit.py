@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
 from videocutler.ext_stageb_ovvis.banks.text_bank import read_text_prototype_records
+from videocutler.ext_stageb_ovvis.data.datasets.lvvis_official_split import load_lvvis_base_and_novel_raw_ids
 from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (
     Phase1MaterializationConfig,
@@ -61,13 +62,7 @@ def _text_vocab_ids(output_root: Path) -> List[int]:
 
 
 def _load_lvvis_split_reference() -> Tuple[List[int], List[int]]:
-    ann_paths = resolve_lvvis_annotation_paths()
-    train_payload = json.loads(ann_paths.train_json.read_text(encoding="utf-8"))
-    val_payload = json.loads(ann_paths.val_json.read_text(encoding="utf-8"))
-    base_raw_ids = sorted({int(ann["category_id"]) for ann in train_payload.get("annotations", [])})
-    eval_raw_ids = sorted({int(ann["category_id"]) for ann in val_payload.get("annotations", [])})
-    novel_raw_ids = sorted(set(eval_raw_ids) - set(base_raw_ids))
-    return base_raw_ids, novel_raw_ids
+    return load_lvvis_base_and_novel_raw_ids()
 
 
 def _resolve_stage_path(output_root: Path, stage_id: str) -> Path:

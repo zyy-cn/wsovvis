@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence
 import numpy as np
 
 from .g8_bridge import G8Paths, load_json, validate_json_artifact, write_json
+from videocutler.ext_stageb_ovvis.data.datasets.lvvis_official_split import load_lvvis_base_and_novel_raw_ids, validate_lvvis_annotation_categories
 
 
 ROOT_ENV_VAR = "WSOVVIS_LVVIS_ROOT"
@@ -36,7 +37,7 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def resolve_lvvis_annotation_paths() -> LVVISAnnotationPaths:
+def resolve_lvvis_annotation_paths(*, validate_official_authority: bool = False) -> LVVISAnnotationPaths:
     env_value = str(__import__("os").environ.get(ROOT_ENV_VAR, "")).strip()
     root = Path(env_value).expanduser().resolve() if env_value else (_repo_root() / ROOT_FALLBACK).resolve()
     train_json = root / "annotations" / "train_instances.json"
@@ -44,6 +45,8 @@ def resolve_lvvis_annotation_paths() -> LVVISAnnotationPaths:
     if not train_json.is_file() or not val_json.is_file():
         missing = [str(path) for path in (train_json, val_json) if not path.is_file()]
         raise FileNotFoundError(f"LV-VIS annotation files not found: {missing}")
+    if validate_official_authority:
+        validate_lvvis_annotation_categories(train_json, val_json)
     return LVVISAnnotationPaths(root=root, train_json=train_json, val_json=val_json)
 
 
@@ -118,12 +121,8 @@ def _per_category_ap(evaluator: Any, *, category_ids: Sequence[int]) -> List[Dic
 
 
 def _derive_base_and_novel_ids(paths: LVVISAnnotationPaths) -> tuple[List[int], List[int]]:
-    train_payload = load_json(paths.train_json)
-    val_payload = load_json(paths.val_json)
-    base_raw_ids = sorted({int(ann["category_id"]) for ann in train_payload.get("annotations", [])})
-    eval_raw_ids = sorted({int(ann["category_id"]) for ann in val_payload.get("annotations", [])})
-    novel_raw_ids = sorted(set(eval_raw_ids) - set(base_raw_ids))
-    return base_raw_ids, novel_raw_ids
+    _ = paths
+    return load_lvvis_base_and_novel_raw_ids()
 
 
 def _mean_ap(raw_ids: Sequence[int], per_category_ap: Sequence[Mapping[str, Any]]) -> float:
@@ -167,7 +166,7 @@ def run_external_lvvis_eval(config: ExternalLVVISEvalConfig) -> Dict[str, Any]:
     if not pred_main_path.is_file():
         raise FileNotFoundError(f"missing canonical pred_main artifact: {pred_main_path}")
     pred_rows = _read_pred_main(pred_main_path)
-    ann_paths = resolve_lvvis_annotation_paths()
+    ann_paths = resolve_lvvis_annotation_paths(validate_official_authority=not config.smoke)
     gt_api, gt_payload = _load_gt_for_mode(ann_paths, smoke=config.smoke, pred_rows=pred_rows)
     evaluator = _run_lvvis_eval(gt_api, pred_rows)
     base_raw_ids, novel_raw_ids = _derive_base_and_novel_ids(ann_paths)
