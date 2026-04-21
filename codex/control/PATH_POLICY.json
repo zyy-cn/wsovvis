@@ -1,11 +1,16 @@
 {
   "task_id": "G8_inference_and_eval-task",
-  "task_truth_stamp": "14b0407329b0fc01fec7130cccc4aa1c7f1a797cb3bb902743046cb84b037372",
+  "task_truth_stamp": "a90a2be955914434a30099ec4d4d94a015b1d60651bbc046ddc50b44a086c6ff",
   "active_gate": "G8_inference_and_eval",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
+    "videocutler/ext_stageb_ovvis/audit/g8_gt_sidecar_generation.py",
     "videocutler/ext_stageb_ovvis/audit/g8_minimal_split_audit.py",
     "videocutler/ext_stageb_ovvis/audit/g8_softem_aug_extra_audit.py",
+    "videocutler/ext_stageb_ovvis/audit/__init__.py",
+    "videocutler/run_stageb_audit_g7_extra_recovery.py",
+    "videocutler/run_stageb_audit_g7_gt_attribution_rank.py",
+    "videocutler/run_stageb_audit_g8_gt_sidecar.py",
     "videocutler/run_stageb_audit_g8_minimal_split.py",
     "videocutler/run_stageb_audit_g8_softem_aug_extra.py",
     "videocutler/ext_stageb_ovvis/models/projector.py",
@@ -20,7 +25,6 @@
     "videocutler/run_stageb_eval_lvvis.py",
     "videocutler/run_stageb_eval_ytvis2019.py",
     "videocutler/run_stageb_train_softem.py",
-    "videocutler/run_stageb_audit_g7_gt_attribution_rank.py",
     "tests/stageb/",
     "codex/outputs/G8_inference_and_eval/"
   ],
