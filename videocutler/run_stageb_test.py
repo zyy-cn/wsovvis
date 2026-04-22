@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     p=argparse.ArgumentParser(description='Unified Stage-B testing entrypoint.')
     p.add_argument('--exp_name', required=True); p.add_argument('--output_root', required=True); p.add_argument('--device', required=True); p.add_argument('--seed', type=int, required=True); p.add_argument('--smoke', action='store_true')
     p.add_argument('--pipeline', default='legacy', choices=('legacy','reservoir_v1')); p.add_argument('--stage_scope', default='prealign_base_aug', choices=('prealign_only','prealign_base','prealign_base_aug')); p.add_argument('--dataset_name', default='lvvis_val', choices=('lvvis_val','ytvis_2019_val')); p.add_argument('--benchmark', default='lvvis', choices=('lvvis',)); p.add_argument('--metrics_profile', default='default', choices=('default','formal')); p.add_argument('--logit_chunk_size', type=int, default=256); p.add_argument('--ckpt_path', default=None)
+    p.add_argument('--repo_root', default=None); p.add_argument('--asset_root', default=None)
     return p.parse_args()
 def main() -> int:
     result=run_test_pipeline(resolve_test_plan(parse_args())); print(result['summary_path']); return 0
