@@ -13,7 +13,7 @@ from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     build_stage_domain_indices,
     fuse_carrier_frame_logits,
     fuse_carrier_frame_logits_torch,
-    load_combined_evidence,
+    load_carrier_evidence,
     load_text_vocab,
     _project_candidate_matrix,
 )
@@ -140,8 +140,6 @@ def _compute_query_and_scores(
     *,
     projector: Projector,
     carrier_vec: np.ndarray,
-    frame_vectors: Sequence[np.ndarray],
-    frame_vec: np.ndarray,
     text_matrix: np.ndarray,
     temperature: float,
     lambda_frame: float = 0.25,
@@ -150,18 +148,16 @@ def _compute_query_and_scores(
     carrier_logits_t, frame_logits_t, fused_logits_t = fuse_carrier_frame_logits_torch(
         projector=projector,
         carrier_vec=np.asarray(carrier_vec, dtype=np.float32),
-        frame_vec=np.asarray(frame_vec, dtype=np.float32),
+        frame_vec=np.asarray(carrier_vec, dtype=np.float32),
         candidate_matrix=np.asarray(text_matrix, dtype=np.float32),
         temperature=float(temperature),
         lambda_frame=float(lambda_frame),
-        frame_vectors=frame_vectors if frame_vectors else None,
+        frame_vectors=None,
     )
     candidate_tensor = _project_candidate_matrix(projector=projector, candidate_matrix=np.asarray(text_matrix, dtype=np.float32), device=device)
     carrier_tensor = torch.from_numpy(np.asarray(carrier_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
     carrier_tensor = F.normalize(carrier_tensor, p=2.0, dim=-1)
-    frame_tensor = torch.from_numpy(np.asarray(frame_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-    frame_tensor = F.normalize(frame_tensor, p=2.0, dim=-1)
-    fused_visual = F.normalize((1.0 - float(lambda_frame)) * carrier_tensor + float(lambda_frame) * frame_tensor, p=2.0, dim=-1)
+    fused_visual = carrier_tensor
     cosine_scores = torch.matmul(fused_visual, candidate_tensor.t()).squeeze(0)
     return (
         carrier_logits_t.detach().cpu().numpy().astype(np.float32),
@@ -259,7 +255,7 @@ def build_projector_quality_rows(
         traj_locator = str(carrier_record.get("z_norm_path", "")).strip() if isinstance(carrier_record, Mapping) else ""
         if sample_valid and traj_locator and gt_available_for_audit:
             try:
-                carrier_vec, frame_vectors, frame_vec, _combined = load_combined_evidence(
+                carrier_vec = load_carrier_evidence(
                     sample,
                     output_root=output_root,
                     dataset_name=dataset_name,
@@ -268,8 +264,6 @@ def build_projector_quality_rows(
                 _, _, fused_logits, cosine_scores, fused_query = _compute_query_and_scores(
                     projector=projector,
                     carrier_vec=carrier_vec,
-                    frame_vectors=frame_vectors,
-                    frame_vec=frame_vec,
                     text_matrix=text_matrix,
                     temperature=float(temperature),
                 )

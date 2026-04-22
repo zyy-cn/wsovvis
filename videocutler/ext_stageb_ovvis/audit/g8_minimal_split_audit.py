@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     _coerce_temperature_tensor,
     _project_candidate_matrix,
-    load_combined_evidence,
+    load_carrier_evidence,
 )
 from videocutler.ext_stageb_ovvis.audit.gt_attribution_rank_audit import (
     GTAttributionRankAuditConfig,
@@ -53,8 +53,6 @@ class MinimalSplitAuditConfig:
 class CachedEvidence:
     trajectory_id: str
     carrier_vec: np.ndarray
-    frame_vectors: Tuple[np.ndarray, ...]
-    frame_vec: np.ndarray
 
 
 def _stage_summary_path(output_root: Path, dataset_name: str, stage: str) -> Path:
@@ -280,7 +278,7 @@ def _build_rows_and_cache_train(*, config: MinimalSplitAuditConfig, prepared: Ma
         if sample is None:
             missing_sample_count += 1
             continue
-        carrier_vec, frame_vectors, frame_vec, _combined = load_combined_evidence(
+        carrier_vec = load_carrier_evidence(
             sample,
             output_root=asset_roots.asset_root,
             dataset_name=config.dataset_name,
@@ -289,8 +287,6 @@ def _build_rows_and_cache_train(*, config: MinimalSplitAuditConfig, prepared: Ma
         cache[trajectory_id] = CachedEvidence(
             trajectory_id=trajectory_id,
             carrier_vec=np.asarray(carrier_vec, dtype=np.float32),
-            frame_vectors=tuple(np.asarray(vec, dtype=np.float32) for vec in frame_vectors),
-            frame_vec=np.asarray(frame_vec, dtype=np.float32),
         )
     metadata = {
         'observed_set_sources': ['proxy_records'],
@@ -354,7 +350,7 @@ def _build_rows_and_cache_val(*, config: MinimalSplitAuditConfig, prepared: Mapp
             continue
         if trajectory_id in cache:
             continue
-        carrier_vec, frame_vectors, frame_vec, _combined = load_combined_evidence(
+        carrier_vec = load_carrier_evidence(
             sample,
             output_root=asset_roots.asset_root,
             dataset_name=config.dataset_name,
@@ -363,8 +359,6 @@ def _build_rows_and_cache_val(*, config: MinimalSplitAuditConfig, prepared: Mapp
         cache[trajectory_id] = CachedEvidence(
             trajectory_id=trajectory_id,
             carrier_vec=np.asarray(carrier_vec, dtype=np.float32),
-            frame_vectors=tuple(np.asarray(vec, dtype=np.float32) for vec in frame_vectors),
-            frame_vec=np.asarray(frame_vec, dtype=np.float32),
         )
     metadata = {
         'observed_set_sources': list(prepared.get('observed_set_sources', [])),
@@ -397,23 +391,8 @@ def _score_batch(*, batch_rows: Sequence[Mapping[str, Any]], cache: Mapping[str,
     carrier_np = np.stack([cache[str(row['trajectory_id'])].carrier_vec for row in batch_rows], axis=0).astype(np.float32)
     carrier_tensor = _normalize_batch(torch.from_numpy(carrier_np).to(device=device, dtype=torch.float32))
 
-    frame_tensors: List[torch.Tensor] = []
-    frame_counts: List[int] = []
-    for row in batch_rows:
-        frame_vectors = cache[str(row['trajectory_id'])].frame_vectors
-        frame_counts.append(max(1, len(frame_vectors)))
-        if frame_vectors:
-            frame_tensors.extend(torch.from_numpy(vec.astype(np.float32)).to(device=device, dtype=torch.float32) for vec in frame_vectors)
-        else:
-            frame_tensors.append(torch.from_numpy(cache[str(row['trajectory_id'])].frame_vec.astype(np.float32)).to(device=device, dtype=torch.float32))
-    frame_tensor = _normalize_batch(torch.stack(frame_tensors, dim=0))
-
     def _batched_logits(candidates: torch.Tensor) -> torch.Tensor:
-        carrier_logits = torch.matmul(carrier_tensor, candidates.t()) / temperature_tensor
-        frame_logits_flat = torch.matmul(frame_tensor, candidates.t()) / temperature_tensor
-        frame_logits_parts = torch.split(frame_logits_flat, frame_counts, dim=0)
-        frame_logits = torch.stack([part.mean(dim=0) for part in frame_logits_parts], dim=0)
-        return (1.0 - float(DEFAULT_LAMBDA_FRAME)) * carrier_logits + float(DEFAULT_LAMBDA_FRAME) * frame_logits
+        return torch.matmul(carrier_tensor, candidates.t()) / temperature_tensor
 
     with torch.no_grad():
         if int(candidate_chunk_size) > 0 and int(candidate_chunk_size) < int(candidate_tensor.shape[0]):

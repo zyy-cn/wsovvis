@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_combined_evidence
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_carrier_evidence
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import Phase1MaterializationConfig, materialize_phase1_training_samples
 from videocutler.ext_stageb_ovvis.eval.g8_bridge import compute_fused_logits_chunked, load_projector_bundle
@@ -204,19 +204,20 @@ def _score_stage_rows(
         observed_raw_ids = _unique_ints(sample.get("observed_raw_ids", []))
         supervision_split = _split_label(gt_class_id=int(gt_class_id), observed_raw_ids=observed_raw_ids)
         try:
-            carrier_vec, frame_vectors, frame_vec, _combined = load_combined_evidence(
+            carrier_vec = load_carrier_evidence(
                 sample,
                 output_root=output_root,
                 dataset_name=dataset_name,
                 trajectory_source_branch=trajectory_source_branch,
             )
+            frame_vec = np.asarray(carrier_vec, dtype=np.float32)
             _carrier_logits, _frame_logits, fused_logits = compute_fused_logits_chunked(
                 projector=bundle.projector,
                 carrier_vec=carrier_vec,
                 frame_vec=frame_vec,
                 candidate_matrix=text_matrix,
                 temperature=bundle.temperature,
-                frame_vectors=frame_vectors,
+                frame_vectors=[],
                 logit_chunk_size=int(logit_chunk_size),
             )
             rank, normalized_rank, is_top1 = _rank_and_top1_from_logits(fused_logits, gt_index=int(gt_index))

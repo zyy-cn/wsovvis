@@ -11,8 +11,8 @@ import torch
 import torch.nn.functional as F
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
-    fuse_carrier_frame_logits_torch,
-    load_combined_evidence,
+    load_carrier_evidence,
+    score_carrier_logits_torch,
 )
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import _load_projector_from_checkpoint
 from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_carrier_records
@@ -452,27 +452,18 @@ def compute_fused_logits_chunked(
     logit_chunk_size: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     carrier_parts: List[np.ndarray] = []
-    frame_parts: List[np.ndarray] = []
-    fused_parts: List[np.ndarray] = []
     total = int(candidate_matrix.shape[0])
     for start, end in _chunk_slices(total, logit_chunk_size):
         chunk = np.asarray(candidate_matrix[start:end], dtype=np.float32)
-        carrier_logits_t, frame_logits_t, fused_logits_t = fuse_carrier_frame_logits_torch(
+        carrier_logits_t = score_carrier_logits_torch(
             projector=projector,
             carrier_vec=carrier_vec,
-            frame_vec=frame_vec,
             candidate_matrix=chunk,
             temperature=float(temperature),
-            frame_vectors=frame_vectors if frame_vectors else None,
         )
         carrier_parts.append(np.asarray(carrier_logits_t.detach().cpu().numpy(), dtype=np.float32))
-        frame_parts.append(np.asarray(frame_logits_t.detach().cpu().numpy(), dtype=np.float32))
-        fused_parts.append(np.asarray(fused_logits_t.detach().cpu().numpy(), dtype=np.float32))
-    return (
-        np.concatenate(carrier_parts, axis=0).astype(np.float32) if carrier_parts else np.zeros((0,), dtype=np.float32),
-        np.concatenate(frame_parts, axis=0).astype(np.float32) if frame_parts else np.zeros((0,), dtype=np.float32),
-        np.concatenate(fused_parts, axis=0).astype(np.float32) if fused_parts else np.zeros((0,), dtype=np.float32),
-    )
+    logits = np.concatenate(carrier_parts, axis=0).astype(np.float32) if carrier_parts else np.zeros((0,), dtype=np.float32)
+    return logits, logits, logits
 
 
 def score_infer_row(
@@ -487,12 +478,14 @@ def score_infer_row(
     class_name_map: Mapping[int, str],
     logit_chunk_size: int,
 ) -> Dict[str, Any]:
-    carrier_vec, frame_vectors, frame_vec, _combined = load_combined_evidence(
+    carrier_vec = load_carrier_evidence(
         row,
         output_root=asset_root,
         dataset_name=dataset_name,
         trajectory_source_branch=trajectory_source_branch,
     )
+    frame_vectors: List[np.ndarray] = []
+    frame_vec = np.asarray(carrier_vec, dtype=np.float32)
     _carrier_logits, _frame_logits, fused_logits = compute_fused_logits_chunked(
         projector=bundle.projector,
         carrier_vec=carrier_vec,

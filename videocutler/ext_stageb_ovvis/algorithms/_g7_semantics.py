@@ -128,6 +128,23 @@ def _carrier_parent_dir(output_root: Path, dataset_name: str, trajectory_source_
     raise ValueError(f'unsupported trajectory_source_branch: {trajectory_source_branch}')
 
 
+def load_carrier_evidence(
+    sample: Mapping[str, Any],
+    *,
+    output_root: Path,
+    dataset_name: str,
+    trajectory_source_branch: str,
+) -> np.ndarray:
+    carrier_parent = _carrier_parent_dir(output_root, dataset_name, trajectory_source_branch)
+    carrier_record = sample.get('carrier_record')
+    if not isinstance(carrier_record, Mapping):
+        raise ValueError('missing carrier_record')
+    z_norm_path = str(carrier_record.get('z_norm_path', ''))
+    if not z_norm_path:
+        raise ValueError('missing carrier z_norm_path')
+    return np.asarray(read_vector_from_locator(carrier_parent, z_norm_path), dtype=np.float32)
+
+
 def _collect_runtime_frame_vectors(
     sample: Mapping[str, Any],
     *,
@@ -135,19 +152,6 @@ def _collect_runtime_frame_vectors(
     dataset_name: str,
     trajectory_source_branch: str,
 ) -> List[np.ndarray]:
-    carrier_record = sample.get('carrier_record')
-    if not isinstance(carrier_record, Mapping):
-        raise ValueError('missing carrier_record')
-    carrier_frame_paths = carrier_record.get('frame_carriers_norm_paths', None)
-    if carrier_frame_paths is not None:
-        frame_locators = [str(locator) for locator in list(carrier_frame_paths)]
-        if not frame_locators:
-            raise ValueError('empty carrier_record.frame_carriers_norm_paths')
-        carrier_parent = _carrier_parent_dir(output_root, dataset_name, trajectory_source_branch)
-        return [
-            np.asarray(read_vector_from_locator(carrier_parent, locator), dtype=np.float32)
-            for locator in frame_locators
-        ]
     return []
 
 
@@ -159,35 +163,17 @@ def load_combined_evidence(
     trajectory_source_branch: str,
 ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
     global _LOAD_EVIDENCE_AUDIT_COUNT
-    carrier_parent = _carrier_parent_dir(output_root, dataset_name, trajectory_source_branch)
     audit_index = int(_LOAD_EVIDENCE_AUDIT_COUNT)
     _LOAD_EVIDENCE_AUDIT_COUNT += 1
     audit_enabled = audit_index < 3
     audit_t0 = time.perf_counter()
-
-    carrier_record = sample.get('carrier_record')
-    if not isinstance(carrier_record, Mapping):
-        raise ValueError('missing carrier_record')
-    z_norm_path = str(carrier_record.get('z_norm_path', ''))
-    if not z_norm_path:
-        raise ValueError('missing carrier z_norm_path')
     if audit_enabled:
         timing_checkpoint(
             'load_combined_evidence_before_carrier_vec',
             started_at=audit_t0,
             trajectory_id=str(sample.get('trajectory_id', '')),
-            z_norm_path=z_norm_path,
         )
-    carrier_vec = np.asarray(read_vector_from_locator(carrier_parent, z_norm_path), dtype=np.float32)
-    if audit_enabled:
-        timing_checkpoint(
-            'load_combined_evidence_after_carrier_vec',
-            started_at=audit_t0,
-            trajectory_id=str(sample.get('trajectory_id', '')),
-            carrier_vec_shape=getattr(carrier_vec, 'shape', None),
-        )
-
-    frame_vectors = _collect_runtime_frame_vectors(
+    carrier_vec = load_carrier_evidence(
         sample,
         output_root=output_root,
         dataset_name=dataset_name,
@@ -195,38 +181,55 @@ def load_combined_evidence(
     )
     if audit_enabled:
         timing_checkpoint(
-            'load_combined_evidence_after_frame_vectors',
+            'load_combined_evidence_after_carrier_vec',
             started_at=audit_t0,
             trajectory_id=str(sample.get('trajectory_id', '')),
-            frame_vectors_count=len(frame_vectors),
+            carrier_vec_shape=getattr(carrier_vec, 'shape', None),
         )
-    if frame_vectors:
-        frame_stack = np.stack([np.asarray(vec, dtype=np.float32) for vec in frame_vectors], axis=0).astype(np.float32)
-        frame_vec = np.mean(frame_stack, axis=0).astype(np.float32)
-    else:
-        raise ValueError('missing runtime frame evidence: carrier_record.frame_carriers_norm_paths')
-    if audit_enabled:
-        timing_checkpoint(
-            'load_combined_evidence_after_frame_vec',
-            started_at=audit_t0,
-            trajectory_id=str(sample.get('trajectory_id', '')),
-            frame_vec_shape=getattr(frame_vec, 'shape', None),
-            frame_vectors_count=len(frame_vectors),
-        )
-
     carrier_norm = _normalize(carrier_vec)
-    frame_norm = _normalize(frame_vec)
-    if carrier_norm is None or frame_norm is None:
-        raise ValueError('combined evidence is zero norm')
-    combined = np.mean(np.stack([carrier_norm, frame_norm], axis=0), axis=0).astype(np.float32)
+    if carrier_norm is None:
+        raise ValueError('carrier evidence is zero norm')
     if audit_enabled:
         timing_checkpoint(
             'load_combined_evidence_after_combined_vec',
             started_at=audit_t0,
             trajectory_id=str(sample.get('trajectory_id', '')),
-            combined_shape=getattr(combined, 'shape', None),
+            combined_shape=getattr(carrier_norm, 'shape', None),
         )
-    return carrier_vec.astype(np.float32), [np.asarray(vec, dtype=np.float32) for vec in frame_vectors], frame_vec.astype(np.float32), combined.astype(np.float32)
+    # Compatibility wrapper: frame-side values are retired and synthesized from carrier only.
+    return carrier_vec.astype(np.float32), [], carrier_vec.astype(np.float32), carrier_norm.astype(np.float32)
+
+
+def score_carrier_logits_torch(
+    *,
+    projector: Any,
+    carrier_vec: np.ndarray,
+    candidate_matrix: np.ndarray,
+    temperature: float | torch.Tensor,
+) -> torch.Tensor:
+    device = _resolve_module_device(projector)
+    temperature_tensor = _coerce_temperature_tensor(temperature, device=device)
+    candidate_tensor = _project_candidate_matrix(projector=projector, candidate_matrix=candidate_matrix, device=device)
+    carrier_tensor = torch.from_numpy(np.asarray(carrier_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
+    carrier_tensor = F.normalize(carrier_tensor, p=2.0, dim=-1)
+    return torch.matmul(carrier_tensor, candidate_tensor.t()).squeeze(0) / temperature_tensor
+
+
+def score_carrier_logits(
+    *,
+    projector: Any,
+    carrier_vec: np.ndarray,
+    candidate_matrix: np.ndarray,
+    temperature: float | torch.Tensor,
+) -> np.ndarray:
+    with torch.no_grad():
+        logits = score_carrier_logits_torch(
+            projector=projector,
+            carrier_vec=carrier_vec,
+            candidate_matrix=candidate_matrix,
+            temperature=temperature,
+        )
+    return np.asarray(logits.detach().cpu().numpy(), dtype=np.float32)
 
 
 def fuse_carrier_frame_logits_torch(
@@ -239,27 +242,13 @@ def fuse_carrier_frame_logits_torch(
     lambda_frame: float = 0.25,
     frame_vectors: Optional[Sequence[np.ndarray]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    device = _resolve_module_device(projector)
-    temperature_tensor = _coerce_temperature_tensor(temperature, device=device)
-    candidate_tensor = _project_candidate_matrix(projector=projector, candidate_matrix=candidate_matrix, device=device)
-    carrier_tensor = torch.from_numpy(np.asarray(carrier_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-    carrier_tensor = F.normalize(carrier_tensor, p=2.0, dim=-1)
-    carrier_logits = torch.matmul(carrier_tensor, candidate_tensor.t()).squeeze(0) / temperature_tensor
-    if frame_vectors is not None:
-        frame_list = [np.asarray(vec, dtype=np.float32) for vec in frame_vectors]
-        if frame_list:
-            frame_tensor = torch.from_numpy(np.stack(frame_list, axis=0).astype(np.float32)).to(device=device, dtype=torch.float32)
-            frame_tensor = F.normalize(frame_tensor, p=2.0, dim=-1)
-            frame_logits = torch.matmul(frame_tensor, candidate_tensor.t()) / temperature_tensor
-            frame_logits = frame_logits.mean(dim=0)
-        else:
-            frame_vectors = None
-    if frame_vectors is None:
-        frame_tensor = torch.from_numpy(np.asarray(frame_vec, dtype=np.float32)).to(device=device, dtype=torch.float32).unsqueeze(0)
-        frame_tensor = F.normalize(frame_tensor, p=2.0, dim=-1)
-        frame_logits = torch.matmul(frame_tensor, candidate_tensor.t()).squeeze(0) / temperature_tensor
-    fused_logits = (1.0 - float(lambda_frame)) * carrier_logits + float(lambda_frame) * frame_logits
-    return carrier_logits, frame_logits, fused_logits
+    carrier_logits = score_carrier_logits_torch(
+        projector=projector,
+        carrier_vec=carrier_vec,
+        candidate_matrix=candidate_matrix,
+        temperature=temperature,
+    )
+    return carrier_logits, carrier_logits, carrier_logits
 
 
 def fuse_carrier_frame_logits(
@@ -272,21 +261,13 @@ def fuse_carrier_frame_logits(
     lambda_frame: float = 0.25,
     frame_vectors: Optional[Sequence[np.ndarray]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    with torch.no_grad():
-        carrier_logits, frame_logits, fused_logits = fuse_carrier_frame_logits_torch(
-            projector=projector,
-            carrier_vec=carrier_vec,
-            frame_vec=frame_vec,
-            candidate_matrix=candidate_matrix,
-            temperature=temperature,
-            lambda_frame=lambda_frame,
-            frame_vectors=frame_vectors,
-        )
-    return (
-        np.asarray(carrier_logits.detach().cpu().numpy(), dtype=np.float32),
-        np.asarray(frame_logits.detach().cpu().numpy(), dtype=np.float32),
-        np.asarray(fused_logits.detach().cpu().numpy(), dtype=np.float32),
+    logits = score_carrier_logits(
+        projector=projector,
+        carrier_vec=carrier_vec,
+        candidate_matrix=candidate_matrix,
+        temperature=temperature,
     )
+    return logits, logits, logits
 
 
 def observed_mass_loss(

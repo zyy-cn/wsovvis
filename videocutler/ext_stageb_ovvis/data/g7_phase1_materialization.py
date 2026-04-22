@@ -123,16 +123,12 @@ def _scan_asset_root(output_root: Path, rels: Mapping[str, str]) -> Dict[str, An
         "trajectory_view": bool(assets["trajectory_records"]["non_empty"]),
         "carrier_view": bool(assets["carrier_records"]["non_empty"]),
         "weak_label_view": bool(assets["weak_labels"]["non_empty"]),
-        "frame_feature_view": bool(assets["frame_records"]["non_empty"]),
-        "frame_geometry_view": bool(assets["frame_geom_records"]["non_empty"] and frame_geom_parity),
         "text_bank_view": bool(assets["text_prototypes"]["non_empty"]),
     }
     required_view_keys = [
         "trajectory_view",
         "carrier_view",
         "weak_label_view",
-        "frame_feature_view",
-        "frame_geometry_view",
         "text_bank_view",
     ]
     upstream_asset_view_keys = [

@@ -22,9 +22,9 @@ except Exception:  # pragma: no cover - tqdm is optional in smoke environments
 from videocutler.ext_stageb_ovvis.banks.responsibility_cache import ResponsibilityCache
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     build_stage_domain_indices,
-    fuse_carrier_frame_logits,
-    fuse_carrier_frame_logits_torch,
-    load_combined_evidence,
+    score_carrier_logits,
+    score_carrier_logits_torch,
+    load_carrier_evidence,
     load_text_vocab,
     refine_responsibilities,
 )
@@ -252,7 +252,7 @@ def _prepare_examples(
                 trajectory_id=str(sample.get('trajectory_id', '')),
                 observed_raw_ids=len(list(sample.get('observed_raw_ids', []))),
             )
-            carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
+            carrier_vec = load_carrier_evidence(
                 sample,
                 output_root=output_root,
                 dataset_name=dataset_name,
@@ -262,13 +262,9 @@ def _prepare_examples(
                 "softem_prepare_after_load_combined_evidence",
                 trajectory_id=str(sample.get('trajectory_id', '')),
                 carrier_vec_shallow_size=shallow_size_bytes(carrier_vec),
-                frame_vectors_count=len(frame_vectors),
-                frame_vectors_total_shallow_size=sum(shallow_size_bytes(vec) for vec in frame_vectors),
-                frame_vec_shallow_size=shallow_size_bytes(frame_vec),
-                combined_vec_shallow_size=shallow_size_bytes(combined_vec),
             )
         except Exception:
-            bump('missing_frame_evidence')
+            bump('missing_carrier_evidence')
             continue
         candidate_records = list(sample.get('candidate_text_prototypes', []))
         if not candidate_records:
@@ -298,9 +294,6 @@ def _prepare_examples(
                 'candidate_ids_extra': candidate_ids_extra,
                 'candidate_matrix': np.asarray(candidate_matrix, dtype=np.float32),
                 'carrier_vec': np.asarray(carrier_vec, dtype=np.float32),
-                'frame_vectors': [np.asarray(vec, dtype=np.float32) for vec in frame_vectors],
-                'frame_vec': np.asarray(frame_vec, dtype=np.float32),
-                'combined_vec': np.asarray(combined_vec, dtype=np.float32),
                 'candidate_records': candidate_records,
             }
         )
@@ -469,14 +462,11 @@ def _build_runtime_extra_cache(
         row_indices = [row_idx for row_idx, _ in grouped]
         clip_fused_rows: List[np.ndarray] = []
         for _, ex in grouped:
-            _carrier_logits, _frame_logits, fused_logits = fuse_carrier_frame_logits(
+            fused_logits = score_carrier_logits(
                 projector=text_projector,
                 carrier_vec=np.asarray(ex['carrier_vec'], dtype=np.float32),
-                frame_vec=np.asarray(ex['frame_vec'], dtype=np.float32),
                 candidate_matrix=vocab_matrix,
                 temperature=t_dis,
-                lambda_frame=lambda_frame,
-                frame_vectors=ex.get('frame_vectors'),
             )
             clip_fused_rows.append(np.asarray(fused_logits, dtype=np.float32))
         score_slice = np.asarray(clip_fused_rows, dtype=np.float32)
@@ -682,14 +672,11 @@ def _compute_clip_refinement_rows(
         for ex in clip_examples:
             tid = str(ex['trajectory_id'])
             domain_ids, known_ids, extra_ids = build_stage_domain_indices(ex.get('candidate_ids_known', []), ex.get('candidate_ids_extra', []), stage_id=stage_id)
-            _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
+            logits_known_extra = score_carrier_logits_torch(
                 projector=text_projector,
                 carrier_vec=ex['carrier_vec'],
-                frame_vec=ex['frame_vec'],
                 candidate_matrix=ex['candidate_matrix'],
                 temperature=t_dis,
-                lambda_frame=lambda_frame,
-                frame_vectors=ex.get('frame_vectors'),
             )
             stage_logits_candidates = logits_known_extra[: len(domain_ids)]
             model_logits = stage_logits_candidates.detach().cpu().numpy().astype(np.float64)
@@ -868,7 +855,6 @@ def run_soft_em(
         materialized_samples=len(materialized_samples),
         trainable_examples=len(examples),
         skipped_reason_histogram=skipped,
-        total_frame_vector_refs=sum(len(ex.get('frame_vectors', [])) for ex in examples),
         total_candidate_rows=sum(int(np.asarray(ex.get('candidate_matrix')).shape[0]) if ex.get('candidate_matrix') is not None else 0 for ex in examples),
     )
     timing_checkpoint(
@@ -877,7 +863,6 @@ def run_soft_em(
         materialized_samples=len(materialized_samples),
         trainable_examples=len(examples),
         skipped_reason_histogram=skipped,
-        total_frame_vector_refs=sum(len(ex.get('frame_vectors', [])) for ex in examples),
         total_candidate_rows=sum(int(np.asarray(ex.get('candidate_matrix')).shape[0]) if ex.get('candidate_matrix') is not None else 0 for ex in examples),
     )
     if not examples:
@@ -1017,13 +1002,11 @@ def run_soft_em(
                         domain_ids, known_ids, extra_ids = _stage_domain_for_stage(stage.stage_id, ex)
                         extra_id_set = {int(x) for x in extra_ids}
                         current_t_dis = _compute_t_dis(theta_t)
-                        _, _, logits_known_extra = fuse_carrier_frame_logits_torch(
+                        logits_known_extra = score_carrier_logits_torch(
                             projector=text_projector,
                             carrier_vec=ex['carrier_vec'],
-                            frame_vec=ex['frame_vec'],
                             candidate_matrix=ex['candidate_matrix'],
                             temperature=current_t_dis,
-                            frame_vectors=ex['frame_vectors'],
                         )
                         stage_candidate_count = len(domain_ids)
                         if stage_candidate_count <= 0:

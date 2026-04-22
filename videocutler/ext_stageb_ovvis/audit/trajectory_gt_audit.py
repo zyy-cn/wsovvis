@@ -308,7 +308,7 @@ def build_attribution_rows(
                 traj_locator = str(carrier_record.get("z_norm_path", "")).strip()
             if sample_valid and traj_locator and candidate_vectors and candidate_known_ids and len(candidate_known_ids) == len(candidate_vectors):
                 try:
-                    traj_vec, _frame_vectors_unused, frame_vec, _combined_vec = load_combined_evidence(
+                    traj_vec = load_carrier_evidence(
                         sample,
                         output_root=output_root,
                         dataset_name=dataset_name,
@@ -317,7 +317,7 @@ def build_attribution_rows(
                     _, _, fused_logits_np = fuse_carrier_frame_logits(
                         projector=projector,
                         carrier_vec=traj_vec,
-                        frame_vec=frame_vec,
+                        frame_vec=traj_vec,
                         candidate_matrix=np.asarray(candidate_vectors, dtype=np.float32),
                         temperature=float(temperature),
                     )

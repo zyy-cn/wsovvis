@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_combined_evidence
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_carrier_evidence
 from videocutler.ext_stageb_ovvis.audit.dropped_gt_attribution_audit import _as_int, _load_lvvis_split_reference
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
 from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
@@ -326,19 +326,21 @@ def _score_row_full_vocab(
     vocab_matrix: np.ndarray,
     logit_chunk_size: int,
 ) -> np.ndarray:
-    carrier_vec, frame_vectors, frame_vec, _combined = load_combined_evidence(
+    carrier_vec = load_carrier_evidence(
         row,
         output_root=asset_root,
         dataset_name=dataset_name,
         trajectory_source_branch=trajectory_source_branch,
     )
+    frame_vectors: List[np.ndarray] = []
+    frame_vec = np.asarray(carrier_vec, dtype=np.float32)
     _carrier_logits, _frame_logits, fused_logits = compute_fused_logits_chunked(
         projector=bundle.projector,
         carrier_vec=carrier_vec,
         frame_vec=frame_vec,
         candidate_matrix=vocab_matrix,
         temperature=float(bundle.temperature),
-        frame_vectors=frame_vectors,
+        frame_vectors=[],
         logit_chunk_size=logit_chunk_size,
     )
     return np.asarray(fused_logits, dtype=np.float32)

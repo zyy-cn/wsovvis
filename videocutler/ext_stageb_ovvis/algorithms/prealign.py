@@ -20,9 +20,9 @@ except Exception:  # pragma: no cover - tqdm is optional in smoke environments
     _tqdm_cls = None
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
-    fuse_carrier_frame_logits,
-    fuse_carrier_frame_logits_torch,
-    load_combined_evidence,
+    score_carrier_logits,
+    score_carrier_logits_torch,
+    load_carrier_evidence,
     load_text_vocab,
     observed_mass_loss,
 )
@@ -201,7 +201,7 @@ def _prepare_examples(
                 trajectory_id=str(sample.get('trajectory_id', '')),
                 observed_raw_ids=len(list(sample.get('observed_raw_ids', []))),
             )
-            carrier_vec, frame_vectors, frame_vec, combined_vec = load_combined_evidence(
+            carrier_vec = load_carrier_evidence(
                 sample,
                 output_root=output_root,
                 dataset_name=dataset_name,
@@ -211,13 +211,9 @@ def _prepare_examples(
                 "prealign_prepare_after_load_combined_evidence",
                 trajectory_id=str(sample.get('trajectory_id', '')),
                 carrier_vec_shallow_size=shallow_size_bytes(carrier_vec),
-                frame_vectors_count=len(frame_vectors),
-                frame_vectors_total_shallow_size=sum(shallow_size_bytes(vec) for vec in frame_vectors),
-                frame_vec_shallow_size=shallow_size_bytes(frame_vec),
-                combined_vec_shallow_size=shallow_size_bytes(combined_vec),
             )
         except Exception:
-            bump('missing_frame_evidence')
+            bump('missing_carrier_evidence')
             continue
         examples.append(
             {
@@ -226,9 +222,6 @@ def _prepare_examples(
                 'video_id': int(sample['trajectory_record']['video_id']),
                 'observed_raw_ids': sorted({int(x) for x in list(sample.get('observed_raw_ids', []))}),
                 'carrier_vec': np.asarray(carrier_vec, dtype=np.float32),
-                'frame_vectors': [np.asarray(vec, dtype=np.float32) for vec in frame_vectors],
-                'frame_vec': np.asarray(frame_vec, dtype=np.float32),
-                'combined_vec': np.asarray(combined_vec, dtype=np.float32),
             }
         )
     return {'examples': examples, 'skipped_reason_histogram': skipped}
@@ -274,7 +267,6 @@ def train_prealign(
         materialized_samples=len(materialized_samples),
         trainable_examples=len(examples),
         skipped_reason_histogram=skipped,
-        total_frame_vector_refs=sum(len(ex.get('frame_vectors', [])) for ex in examples),
         total_observed_ids=sum(len(ex.get('observed_raw_ids', [])) for ex in examples),
     )
     timing_checkpoint(
@@ -283,7 +275,6 @@ def train_prealign(
         materialized_samples=len(materialized_samples),
         trainable_examples=len(examples),
         skipped_reason_histogram=skipped,
-        total_frame_vector_refs=sum(len(ex.get('frame_vectors', [])) for ex in examples),
         total_observed_ids=sum(len(ex.get('observed_raw_ids', [])) for ex in examples),
     )
     total_samples = len(materialized_samples)
@@ -396,14 +387,11 @@ def train_prealign(
                 for batch_index in batch_indices:
                     ex = shuffled_examples[int(batch_index)]
                     current_t_dis = _compute_t_dis(theta_t)
-                    _, _, logits = fuse_carrier_frame_logits_torch(
+                    logits = score_carrier_logits_torch(
                         projector=text_projector,
                         carrier_vec=ex['carrier_vec'],
-                        frame_vec=ex['frame_vec'],
                         candidate_matrix=text_candidate_matrix,
                         temperature=current_t_dis,
-                        lambda_frame=float(config.lambda_frame),
-                        frame_vectors=ex['frame_vectors'],
                     )
                     observed_raw_ids = [int(x) for x in ex['observed_raw_ids']]
                     positive = [idx for idx, raw_id in enumerate(text_vocab_ids) if int(raw_id) in observed_raw_ids]
@@ -552,14 +540,11 @@ def train_prealign(
     with torch.no_grad():
         current_t_dis = _compute_t_dis(theta_t)
         for ex in sorted(examples, key=lambda row: str(row['trajectory_id'])):
-            _, _, logits_np = fuse_carrier_frame_logits(
+            logits_np = score_carrier_logits(
                 projector=text_projector,
                 carrier_vec=ex['carrier_vec'],
-                frame_vec=ex['frame_vec'],
                 candidate_matrix=text_candidate_matrix,
                 temperature=current_t_dis,
-                lambda_frame=float(config.lambda_frame),
-                frame_vectors=ex['frame_vectors'],
             )
             logits = torch.from_numpy(np.asarray(logits_np, dtype=np.float32)).to(device=device, dtype=torch.float32)
             logits_full = torch.cat([b_u.detach().reshape(1), logits], dim=0)
