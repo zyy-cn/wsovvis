@@ -74,20 +74,23 @@ def write_contract_check(path: str | Path, *, payload_path: Path, records: list[
 
 def main() -> int:
     args = parse_args()
-    if bool(args.text_prototypes_jsonl) == bool(args.class_map_json):
-        raise SystemExit("Provide exactly one of --text_prototypes_jsonl or --class_map_json")
-    label_map = build_label_map_from_text_prototypes(read_jsonl(args.text_prototypes_jsonl)) if args.text_prototypes_jsonl else build_label_map_from_class_map(read_json(args.class_map_json))
     official_split = load_lvvis_official_split_reference()
     run_root = _resolved_run_root(args.output_root, args.exp_name)
     output_json = Path(args.output_json) if args.output_json else _default_output_json(run_root, dataset_name=args.dataset_name, smoke=bool(args.smoke))
     _validate_output_path(output_json=output_json, run_root=run_root, smoke=bool(args.smoke))
     if args.smoke:
+        if bool(args.text_prototypes_jsonl) == bool(args.class_map_json):
+            raise SystemExit("Provide exactly one of --text_prototypes_jsonl or --class_map_json")
+        label_map = build_label_map_from_text_prototypes(read_jsonl(args.text_prototypes_jsonl)) if args.text_prototypes_jsonl else build_label_map_from_class_map(read_json(args.class_map_json))
         if not args.input_json:
             raise SystemExit("--input_json is required for smoke weak-label generation")
         fixture = read_json(args.input_json); input_source_type = "smoke_fixture"; upstream_source_ref = str(Path(args.input_json).expanduser().resolve()); upstream_source_sha256 = sha256_path(args.input_json)
     else:
         if args.input_json:
             raise SystemExit("formal/full weak-label generation is official-source locked and does not accept arbitrary --input_json")
+        if args.text_prototypes_jsonl or args.class_map_json:
+            raise SystemExit("formal/full weak-label generation derives its label map from the official split reference and does not accept external label-map inputs")
+        label_map = build_label_map_from_class_map({"raw_id": row["raw_id"], "name": row["class_name"]} for row in official_split.get("categories", []))
         ann_paths = resolve_lvvis_annotation_paths(validate_official_authority=True)
         fixture = build_official_lvvis_train_fixture(ann_paths.train_json, dataset_name=args.dataset_name)
         input_source_type = "official_lvvis_train_annotations"; upstream_source_ref = str(ann_paths.train_json); upstream_source_sha256 = sha256_path(ann_paths.train_json)

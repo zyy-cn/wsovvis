@@ -623,6 +623,7 @@ def _prepare_all_gt_val_samples(config: GTAttributionRankAuditConfig) -> List[Di
         config.output_root,
         dataset_name=config.dataset_name,
         trajectory_source_branch=config.trajectory_source_branch,
+        allow_authoritative_remote_fallback=False,
     )
     runtime_output_root = Path(str(resolution["runtime_output_root"]))
     assets = resolution["assets"]

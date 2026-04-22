@@ -509,7 +509,8 @@ def materialize_phase1_training_samples(
         if not assets[key]["exists"]:
             raise FileNotFoundError(f"missing required canonical input: {assets[key]['path']}")
     if (not bool(config.smoke)) and str(resolution.get("runtime_asset_source", "")) != "local_canonical_assets":
-        raise RuntimeError(f"formal G7 provenance-sensitive execution forbids remote fallback; got runtime_asset_source={resolution.get("runtime_asset_source")}")
+        runtime_asset_source = str(resolution.get("runtime_asset_source", ""))
+        raise RuntimeError(f"formal G7 provenance-sensitive execution forbids remote fallback; got runtime_asset_source={runtime_asset_source}")
 
     traj_limit = int(config.smoke_max_trajectories) if config.smoke else None
     trajectory_records = _stable_trajectory_order(
