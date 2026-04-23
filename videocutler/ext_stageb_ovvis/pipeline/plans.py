@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 _ALLOWED_PIPELINES=('legacy','reservoir_v1')
+_ALLOWED_TRAINING_SEMANTICS=('legacy_scta','reservoir_release')
 _ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug')
 _ALLOWED_METRICS_PROFILES=('default','formal')
 _ALLOWED_BENCHMARKS=('lvvis',)
@@ -30,6 +31,7 @@ class TrainPlan:
     stage_scope:str
     repo_root:Path
     asset_root:Path
+    training_semantics:str='legacy_scta'
     batch_budget:Optional[int]=None
     prealign_epochs:Optional[int]=None
     base_epochs:Optional[int]=None
@@ -95,6 +97,7 @@ def resolve_train_plan(args)->TrainPlan:
         exp_name=str(args.exp_name), output_root=Path(args.output_root).expanduser().resolve(), device=str(args.device),
         seed=int(args.seed), smoke=bool(args.smoke), dataset_name=str(args.dataset_name),
         trajectory_source_branch=str(args.trajectory_source_branch), pipeline=_require(str(args.pipeline), _ALLOWED_PIPELINES, 'pipeline'),
+        training_semantics=_require(str(getattr(args, 'training_semantics', 'legacy_scta')), _ALLOWED_TRAINING_SEMANTICS, 'training_semantics'),
         stage_scope=_require(str(args.stage_scope), _ALLOWED_STAGE_SCOPES, 'stage_scope'), repo_root=repo_root, asset_root=asset_root,
         batch_budget=None if args.batch_budget is None else int(args.batch_budget),
         prealign_epochs=None if args.prealign_epochs is None else int(args.prealign_epochs),
@@ -105,7 +108,7 @@ def resolve_train_plan(args)->TrainPlan:
         aug_learning_rate=None if args.aug_learning_rate is None else float(args.aug_learning_rate),
         weight_decay=float(args.weight_decay), lambda_frame=None if args.lambda_frame is None else float(args.lambda_frame),
         lambda_cov=float(args.lambda_cov), t_dis_init=float(args.t_dis_init), smoke_max_trajectories=int(args.smoke_max_trajectories),
-        subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction), k_extra=int(args.k_extra), extra_alpha=float(args.extra_alpha), base_release_margin=float(args.base_release_margin),
+        subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction), k_extra=int(getattr(args, 'k_extra', 2)), extra_alpha=float(getattr(args, 'extra_alpha', 0.25)), base_release_margin=float(args.base_release_margin),
         ablate_skip_base=bool(getattr(args, 'ablate_skip_base', False)),
         ablate_no_yprime_reward=bool(getattr(args, 'ablate_no_yprime_reward', False)), show_progress=bool(args.show_progress),
         log_every=int(args.log_every), write_runtime_metrics_jsonl=bool(args.write_runtime_metrics_jsonl),

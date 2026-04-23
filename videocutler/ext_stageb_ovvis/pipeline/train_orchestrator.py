@@ -10,6 +10,7 @@ from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import Phase1Ma
 from videocutler.ext_stageb_ovvis.algorithms.prealign import PrealignConfig, train_prealign
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import SoftEMConfig, run_soft_em
 from videocutler.ext_stageb_ovvis.algorithms.reservoir_v1 import ReservoirPrealignConfig, ReservoirSoftEMConfig, train_reservoir_prealign, run_reservoir_soft_em
+from videocutler.ext_stageb_ovvis.algorithms.legacy_scta_backend import LegacySCTABackendConfig, run_legacy_scta_soft_em_via_reservoir
 from videocutler.ext_stageb_ovvis.audit.g8_minimal_split_audit import MinimalSplitAuditConfig, run_minimal_split_audit
 from videocutler.ext_stageb_ovvis.audit.gt_attribution_rank_audit import TRAIN_DATASETS
 
@@ -22,6 +23,60 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 @contextmanager
+
+
+def _canonical_mirror_output_root(plan: TrainPlan) -> Path:
+    default_root = plan.repo_root / 'codex' / 'outputs' / 'G8_inference_and_eval' / str(plan.exp_name)
+    try:
+        return default_root.resolve()
+    except Exception:
+        return default_root
+
+
+def _iter_writeback_roots(plan: TrainPlan) -> Sequence[Path]:
+    roots: list[Path] = []
+    primary = Path(plan.output_root).expanduser().resolve()
+    roots.append(primary)
+    mirror = _canonical_mirror_output_root(plan)
+    if mirror not in roots:
+        roots.append(mirror)
+    return roots
+
+
+def _minimal_prealign_stage_summary(plan: TrainPlan, pre: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'stage_id': 'prealign',
+        'pipeline': str(plan.pipeline),
+        'training_semantics': str(getattr(plan, 'training_semantics', 'legacy_scta')),
+        'loss_mean': pre.get('loss_mean', 0.0),
+        'loss_last': pre.get('loss_last', 0.0),
+        'optimization_loss_mean': pre.get('optimization_loss_mean', 0.0),
+        'optimization_loss_last': pre.get('optimization_loss_last', 0.0),
+        'unknown_metrics': dict(pre.get('unknown_metrics', {})),
+    }
+
+
+def _ensure_train_writeback(plan: TrainPlan, summary: Dict[str, Any], *, pre: Dict[str, Any] | None = None, soft: Dict[str, Any] | None = None) -> Path:
+    roots = _iter_writeback_roots(plan)
+    for root in roots:
+        (root / 'train').mkdir(parents=True, exist_ok=True)
+        if isinstance(pre, dict) and pre:
+            stage_summary_path = root / 'train' / 'prealign' / 'stage_summary.json'
+            if not stage_summary_path.exists():
+                _write_json(stage_summary_path, _minimal_prealign_stage_summary(plan, pre))
+        if isinstance(soft, dict) and soft:
+            for stage_report in soft.get('stage_reports', []) or []:
+                if not isinstance(stage_report, dict):
+                    continue
+                relpath = stage_report.get('stage_summary_relpath')
+                payload = stage_report.get('stage_summary_payload')
+                if relpath and isinstance(payload, dict):
+                    stage_summary_path = root / str(relpath)
+                    if not stage_summary_path.exists():
+                        _write_json(stage_summary_path, payload)
+        out_path = root / 'train' / 'pipeline_train_summary.json'
+        _write_json(out_path, summary)
+    return roots[0] / 'train' / 'pipeline_train_summary.json'
 def _pushd(path: Path):
     old = Path.cwd()
     os.chdir(path)
@@ -133,10 +188,13 @@ def _run_post_train_minimal_split_audit(plan: TrainPlan) -> Dict[str, Any]:
 
 
 def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
+    for root in _iter_writeback_roots(plan):
+        (root / 'train').mkdir(parents=True, exist_ok=True)
     materialized = _materialize(plan)
     summary = {
         'exp_name': plan.exp_name,
         'pipeline': plan.pipeline,
+        'training_semantics': str(getattr(plan, 'training_semantics', 'legacy_scta')),
         'stage_scope': plan.stage_scope,
         'ablation_flags': {
             'ablate_skip_base': bool(getattr(plan, 'ablate_skip_base', False)),
@@ -209,27 +267,49 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
         summary['stages']['prealign'] = pre
         if plan.stage_scope != 'prealign_only':
             mode = 'base_only' if plan.stage_scope == 'prealign_base' else 'base_then_aug'
-            soft = run_reservoir_soft_em(
-                output_root=plan.output_root,
-                materialized_samples=reservoir_samples,
-                config=ReservoirSoftEMConfig(
-                    dataset_name=plan.dataset_name, trajectory_source_branch=plan.trajectory_source_branch, mode=mode,
-                    device=plan.device, seed=plan.seed, smoke=plan.smoke, lambda_frame=(0.25 if plan.lambda_frame is None else plan.lambda_frame),
-                    t_dis_init=plan.t_dis_init, weight_decay=plan.weight_decay,
-                    base_epochs=(1 if plan.smoke else 5) if plan.base_epochs is None else plan.base_epochs,
-                    aug_epochs=(1 if plan.smoke else 5) if plan.aug_epochs is None else plan.aug_epochs,
-                    base_learning_rate=(5e-5 if plan.base_learning_rate is None else plan.base_learning_rate),
-                    aug_learning_rate=(5e-5 if plan.aug_learning_rate is None else plan.aug_learning_rate),
-                    runtime_asset_source=str(materialized['resolution'].get('runtime_asset_source','local_canonical_assets')),
-                    runtime_asset_source_local_incomplete=bool(materialized['resolution'].get('local_incomplete',False)),
-                    runtime_asset_output_root=str(materialized['resolution'].get('runtime_output_root', str(plan.repo_root))),
-                    batch_budget=plan.batch_budget, k_extra=int(plan.k_extra), extra_alpha=float(plan.extra_alpha), base_release_margin=float(plan.base_release_margin),
-                    ablate_skip_base=bool(getattr(plan, 'ablate_skip_base', False)),
-                    ablate_no_yprime_reward=bool(getattr(plan, 'ablate_no_yprime_reward', False)),
-                    show_progress=plan.show_progress, log_every=plan.log_every,
-                    write_runtime_metrics_jsonl=plan.write_runtime_metrics_jsonl, print_epoch_summary=plan.print_epoch_summary,
-                ),
-            )
+            if str(getattr(plan, 'training_semantics', 'legacy_scta')) == 'legacy_scta':
+                soft = run_legacy_scta_soft_em_via_reservoir(
+                    output_root=plan.output_root,
+                    materialized_samples=reservoir_samples,
+                    config=LegacySCTABackendConfig(
+                        dataset_name=plan.dataset_name, trajectory_source_branch=plan.trajectory_source_branch, mode=mode,
+                        device=plan.device, seed=plan.seed, smoke=plan.smoke, lambda_frame=(0.25 if plan.lambda_frame is None else plan.lambda_frame),
+                        lambda_cov=plan.lambda_cov, t_dis_init=plan.t_dis_init, weight_decay=plan.weight_decay,
+                        base_epochs=(1 if plan.smoke else 5) if plan.base_epochs is None else plan.base_epochs,
+                        aug_epochs=(1 if plan.smoke else 5) if plan.aug_epochs is None else plan.aug_epochs,
+                        base_learning_rate=(5e-5 if plan.base_learning_rate is None else plan.base_learning_rate),
+                        aug_learning_rate=(5e-5 if plan.aug_learning_rate is None else plan.aug_learning_rate),
+                        k_extra=int(getattr(plan, 'k_extra', 2)), extra_alpha=float(getattr(plan, 'extra_alpha', 0.25)),
+                        runtime_asset_source=str(materialized['resolution'].get('runtime_asset_source','local_canonical_assets')),
+                        runtime_asset_source_local_incomplete=bool(materialized['resolution'].get('local_incomplete',False)),
+                        runtime_asset_output_root=str(materialized['resolution'].get('runtime_output_root', str(plan.repo_root))),
+                        batch_budget=plan.batch_budget, ablate_skip_base=bool(getattr(plan, 'ablate_skip_base', False)),
+                        show_progress=plan.show_progress, log_every=plan.log_every,
+                        write_runtime_metrics_jsonl=plan.write_runtime_metrics_jsonl, print_epoch_summary=plan.print_epoch_summary,
+                    ),
+                )
+            else:
+                soft = run_reservoir_soft_em(
+                    output_root=plan.output_root,
+                    materialized_samples=reservoir_samples,
+                    config=ReservoirSoftEMConfig(
+                        dataset_name=plan.dataset_name, trajectory_source_branch=plan.trajectory_source_branch, mode=mode,
+                        device=plan.device, seed=plan.seed, smoke=plan.smoke, lambda_frame=(0.25 if plan.lambda_frame is None else plan.lambda_frame),
+                        t_dis_init=plan.t_dis_init, weight_decay=plan.weight_decay,
+                        base_epochs=(1 if plan.smoke else 5) if plan.base_epochs is None else plan.base_epochs,
+                        aug_epochs=(1 if plan.smoke else 5) if plan.aug_epochs is None else plan.aug_epochs,
+                        base_learning_rate=(5e-5 if plan.base_learning_rate is None else plan.base_learning_rate),
+                        aug_learning_rate=(5e-5 if plan.aug_learning_rate is None else plan.aug_learning_rate),
+                        runtime_asset_source=str(materialized['resolution'].get('runtime_asset_source','local_canonical_assets')),
+                        runtime_asset_source_local_incomplete=bool(materialized['resolution'].get('local_incomplete',False)),
+                        runtime_asset_output_root=str(materialized['resolution'].get('runtime_output_root', str(plan.repo_root))),
+                        batch_budget=plan.batch_budget, base_release_margin=float(plan.base_release_margin),
+                        ablate_skip_base=bool(getattr(plan, 'ablate_skip_base', False)),
+                        ablate_no_yprime_reward=bool(getattr(plan, 'ablate_no_yprime_reward', False)),
+                        show_progress=plan.show_progress, log_every=plan.log_every,
+                        write_runtime_metrics_jsonl=plan.write_runtime_metrics_jsonl, print_epoch_summary=plan.print_epoch_summary,
+                    ),
+                )
             summary['stages']['softem'] = soft
             summary['selected_checkpoint_path'] = soft.get('selected_checkpoint_path')
             summary['unknown_metrics'] = soft.get('unknown_metrics', {})
@@ -240,6 +320,5 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                     'reason': 'ablate_skip_base',
                 }
     summary['post_train_audit'] = _run_post_train_minimal_split_audit(plan)
-    out_path = plan.output_root / 'train' / 'pipeline_train_summary.json'
-    _write_json(out_path, summary)
+    out_path = _ensure_train_writeback(plan, summary, pre=summary['stages'].get('prealign'), soft=summary['stages'].get('softem'))
     return {'status':'PASS','summary_path':str(out_path),'summary':summary}
