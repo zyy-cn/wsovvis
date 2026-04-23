@@ -27,6 +27,7 @@ from videocutler.ext_stageb_ovvis.audit.gt_attribution_rank_audit import (
 from videocutler.ext_stageb_ovvis.eval.g8_bridge import load_projector_bundle, write_json
 
 MINIMAL_STAGES: Tuple[str, ...] = ('prealign', 'softem_base')
+ALT_STAGE: str = 'softem_aug'
 TRAIN_SPLIT_ORDER: Tuple[str, ...] = ('base_observed', 'base_unobserved')
 VAL_SPLIT_ORDER: Tuple[str, ...] = ('base', 'novel')
 DEFAULT_LAMBDA_FRAME = 0.25
@@ -81,8 +82,8 @@ def _split_order_for_dataset(dataset_name: str) -> Tuple[str, ...]:
 
 
 def _validate_stage(stage: str) -> str:
-    if stage not in (*MINIMAL_STAGES, 'all'):
-        raise ValueError(f'stage must be one of {MINIMAL_STAGES + ("all",)}, got {stage!r}')
+    if stage not in (*MINIMAL_STAGES, ALT_STAGE, 'all'):
+        raise ValueError(f'stage must be one of {MINIMAL_STAGES + (ALT_STAGE, "all")}, got {stage!r}')
     return stage
 
 
@@ -158,6 +159,8 @@ def _stage_row_source_path(output_root: Path, dataset_name: str, stage: str) -> 
         return output_root / 'train' / 'prealign' / 'proxy_records.jsonl'
     if stage == 'softem_base':
         return output_root / 'train' / 'softem_base' / 'responsibility_records.jsonl'
+    if stage == 'softem_aug':
+        return output_root / 'train' / 'softem_aug' / 'responsibility_records.jsonl'
     return None
 
 
@@ -465,8 +468,8 @@ def _build_dataset_comparison(results: Mapping[str, Mapping[str, Any]], *, split
 
 def run_stage_minimal_split_audit(config: MinimalSplitAuditConfig, stage: str, *, prepared_inputs: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     _require_dataset_name(config.dataset_name)
-    if stage not in MINIMAL_STAGES:
-        raise ValueError(f'stage must be one of {MINIMAL_STAGES}, got {stage!r}')
+    if stage not in (*MINIMAL_STAGES, ALT_STAGE):
+        raise ValueError(f'stage must be one of {MINIMAL_STAGES + (ALT_STAGE,)}, got {stage!r}')
     checkpoint_path = _stage_checkpoint_path(config.output_root, stage)
     summary_path = _stage_summary_path(config.output_root, config.dataset_name, stage)
     split_order = _split_order_for_dataset(config.dataset_name)
@@ -557,7 +560,7 @@ def run_stage_minimal_split_audit(config: MinimalSplitAuditConfig, stage: str, *
         'missing_sample_count': metadata.get('missing_sample_count'),
         'row_source_path': metadata.get('row_source_path'),
     })
-    summary.update(_new_chain_provenance(dataset_name=config.dataset_name, split_order=split_order, stage_scope=MINIMAL_STAGES))
+    summary.update(_new_chain_provenance(dataset_name=config.dataset_name, split_order=split_order, stage_scope=(stage,)))
     write_json(summary_path, summary)
     _write_progress(progress_path, status='COMPLETE', processed_rows=len(scored_rows), total_rows=len(scored_rows), checkpoint_path=checkpoint_path)
     return summary
@@ -567,7 +570,17 @@ def run_minimal_split_audit(config: MinimalSplitAuditConfig) -> Dict[str, Any]:
     _require_dataset_name(config.dataset_name)
     _validate_stage(config.stage)
     prepared = _materialize_shared_inputs(config)
-    stage_names = _iter_stage_names(config.stage)
+    if config.stage == 'all':
+        base_stage_path = _stage_row_source_path(config.output_root, config.dataset_name, 'softem_base')
+        aug_stage_path = _stage_row_source_path(config.output_root, config.dataset_name, 'softem_aug')
+        if base_stage_path is not None and base_stage_path.is_file():
+            stage_names = ('prealign', 'softem_base')
+        elif aug_stage_path is not None and aug_stage_path.is_file():
+            stage_names = ('prealign', 'softem_aug')
+        else:
+            stage_names = ('prealign',)
+    else:
+        stage_names = _iter_stage_names(config.stage)
     results: Dict[str, Any] = {}
     for stage in stage_names:
         results[stage] = run_stage_minimal_split_audit(config, stage, prepared_inputs=prepared)

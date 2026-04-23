@@ -8,9 +8,9 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_carrier_evidence
 from videocutler.ext_stageb_ovvis.audit.dropped_gt_attribution_audit import _as_int, _load_lvvis_split_reference
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
+from videocutler.ext_stageb_ovvis.audit._matrix_vocab_scoring import build_carrier_matrix_pack, compute_rank_metrics_batched, compute_fused_logits_matrix_numpy
 from videocutler.ext_stageb_ovvis.eval.external_lvvis import resolve_lvvis_annotation_paths
 from videocutler.ext_stageb_ovvis.eval.external_ytvis2019 import resolve_ytvis2019_annotation_paths
 from videocutler.ext_stageb_ovvis.eval.g8_bridge import (
@@ -19,7 +19,6 @@ from videocutler.ext_stageb_ovvis.eval.g8_bridge import (
     ProjectorBundle,
     build_infer_rows,
     canonical_checkpoint_relpath,
-    compute_fused_logits_chunked,
     load_json,
     load_projector_bundle,
     load_text_vocab_with_names,
@@ -326,24 +325,20 @@ def _score_row_full_vocab(
     vocab_matrix: np.ndarray,
     logit_chunk_size: int,
 ) -> np.ndarray:
-    carrier_vec = load_carrier_evidence(
-        row,
+    pack = build_carrier_matrix_pack(
+        [row],
         output_root=asset_root,
         dataset_name=dataset_name,
         trajectory_source_branch=trajectory_source_branch,
     )
-    frame_vectors: List[np.ndarray] = []
-    frame_vec = np.asarray(carrier_vec, dtype=np.float32)
-    _carrier_logits, _frame_logits, fused_logits = compute_fused_logits_chunked(
+    logits = compute_fused_logits_matrix_numpy(
+        carrier_matrix=np.asarray(pack["carrier_matrix"], dtype=np.float32),
         projector=bundle.projector,
-        carrier_vec=carrier_vec,
-        frame_vec=frame_vec,
-        candidate_matrix=vocab_matrix,
+        candidate_matrix=np.asarray(vocab_matrix, dtype=np.float32),
         temperature=float(bundle.temperature),
-        frame_vectors=[],
-        logit_chunk_size=logit_chunk_size,
+        batch_size=max(1, int(logit_chunk_size)),
     )
-    return np.asarray(fused_logits, dtype=np.float32)
+    return np.asarray(logits[0], dtype=np.float32)
 
 
 def _score_all_gt_rows(
@@ -365,9 +360,11 @@ def _score_all_gt_rows(
     base_vocab = {int(x) for x in base_vocab_ids}
     vocab_index = {int(raw_id): idx for idx, raw_id in enumerate(full_vocab_ids)}
     rows: List[Dict[str, Any]] = []
+    scoreable_samples: List[Dict[str, Any]] = []
+    scoreable_gt_indices: List[int] = []
     unsupported_hist: Dict[str, int] = {}
     total_rows = int(len(materialized_samples))
-    for row_index, sample in enumerate(materialized_samples, start=1):
+    for sample in materialized_samples:
         trajectory_id = str(sample.get("trajectory_id", "")).strip()
         sidecar = gt_sidecar_lookup.get(trajectory_id, {})
         gt_raw_id = _as_int(sidecar.get("matched_gt_raw_id_canonical"))
@@ -410,45 +407,57 @@ def _score_all_gt_rows(
             "margin_to_best_wrong": None,
             "stage_top1_id": None,
             "wrong_top1_is_base": False,
+            "_scoreable_for_metrics": False,
         }
+        gt_index = vocab_index.get(int(gt_raw_id)) if gt_raw_id is not None else None
+        if gt_available and gt_raw_id is not None and split_label is not None and gt_index is not None:
+            row["_scoreable_for_metrics"] = True
+            scoreable_samples.append(dict(sample))
+            scoreable_gt_indices.append(int(gt_index))
+        rows.append(row)
 
-        if not gt_available or gt_raw_id is None or split_label is None:
-            rows.append(row)
-            continue
-
-        gt_index = vocab_index.get(int(gt_raw_id))
-        if gt_index is None:
-            rows.append(row)
-            continue
-
-        logits = _score_row_full_vocab(
-            sample,
-            bundle=bundle,
-            asset_root=asset_roots.asset_root,
+    if scoreable_samples:
+        metrics_batch_size = max(1, int(logit_chunk_size))
+        pack = build_carrier_matrix_pack(
+            scoreable_samples,
+            output_root=asset_roots.asset_root,
             dataset_name=dataset_name,
             trajectory_source_branch=trajectory_source_branch,
-            vocab_matrix=vocab_matrix,
-            logit_chunk_size=logit_chunk_size,
         )
-        rank_payload = _rank_metrics_from_logits(logits, int(gt_index))
-        top1_id = rank_payload["top1_id"]
-        row.update(
-            {
-                "gt_rank": int(rank_payload["rank"]),
-                "normalized_gt_rank": float(rank_payload["normalized_rank"]),
-                "gt_is_top1": bool(rank_payload["top1"]),
-                "gt_top5": bool(rank_payload["top5"]),
-                "gt_top10": bool(rank_payload["top10"]),
-                "mrr": float(rank_payload["mrr"]),
-                "margin_to_best_wrong": rank_payload["margin_to_best_wrong"],
-                "stage_top1_id": top1_id,
-                "wrong_top1_is_base": bool(top1_id is not None and int(top1_id) != int(gt_raw_id) and int(top1_id) in base_vocab),
-            }
+        metrics = compute_rank_metrics_batched(
+            carrier_matrix=np.asarray(pack["carrier_matrix"], dtype=np.float32),
+            projector=bundle.projector,
+            candidate_matrix=np.asarray(vocab_matrix, dtype=np.float32),
+            temperature=float(bundle.temperature),
+            gt_indices=scoreable_gt_indices,
+            batch_size=metrics_batch_size,
+            progress_callback=progress_callback,
         )
-        rows.append(row)
-        if progress_callback is not None and (row_index == total_rows or row_index % max(1, int(progress_callback.__dict__.get("heartbeat_every", 256))) == 0):
-            progress_callback(row_index, total_rows)
-
+        score_ptr = 0
+        for row in rows:
+            if not bool(row.pop("_scoreable_for_metrics", False)):
+                continue
+            gt_raw_id = int(row["gt_raw_id_canonical"])
+            top1_idx = int(metrics["top1_index"][score_ptr])
+            top1_id = int(full_vocab_ids[top1_idx]) if 0 <= top1_idx < len(full_vocab_ids) else None
+            row.update(
+                {
+                    "gt_rank": int(metrics["rank"][score_ptr]),
+                    "normalized_gt_rank": float(metrics["normalized_rank"][score_ptr]),
+                    "gt_is_top1": bool(metrics["top1"][score_ptr]),
+                    "gt_top5": bool(metrics["top5"][score_ptr]),
+                    "gt_top10": bool(metrics["top10"][score_ptr]),
+                    "mrr": float(metrics["mrr"][score_ptr]),
+                    "margin_to_best_wrong": float(metrics["margin_to_best_wrong"][score_ptr]),
+                    "stage_top1_id": top1_id,
+                    "wrong_top1_is_base": bool(top1_id is not None and int(top1_id) != int(gt_raw_id) and int(top1_id) in base_vocab),
+                }
+            )
+            score_ptr += 1
+    elif progress_callback is not None:
+        progress_callback(total_rows, total_rows)
+    for row in rows:
+        row.pop("_scoreable_for_metrics", None)
     summary = _summarize_all_gt_subset(rows, stage_id=stage, split_order=split_order)
     summary["unsupported_gt_histogram"] = dict(sorted(unsupported_hist.items()))
     return rows, summary
@@ -852,9 +861,8 @@ def run_stage_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig, st
     vocab_index = {raw_id: idx for idx, raw_id in enumerate(vocab_ids)}
     bundle = load_projector_bundle(checkpoint_path, device=config.device)
 
-    ledger_rows: List[Dict[str, Any]] = []
-    normalized_ranks: List[float] = []
-    top1_values: List[int] = []
+    score_rows: List[Dict[str, Any]] = []
+    score_gt_indices: List[int] = []
     for row in matched_rows:
         trajectory_id = str(row["trajectory_id"])
         infer_row = infer_row_by_tid.get(trajectory_id)
@@ -863,28 +871,39 @@ def run_stage_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig, st
         gt_raw_id = int(row["best_gt_category_id"])
         if gt_raw_id not in vocab_index:
             raise KeyError(f"matched GT raw id {gt_raw_id} missing from dataset vocab")
-        logits = _score_row_full_vocab(
-            infer_row,
-            bundle=bundle,
-            asset_root=asset_roots.asset_root,
-            dataset_name=config.dataset_name,
-            trajectory_source_branch=config.trajectory_source_branch,
-            vocab_matrix=vocab_matrix,
-            logit_chunk_size=config.logit_chunk_size,
-        )
-        rank, normalized_rank, top1 = _rank_and_top1(logits, vocab_index[gt_raw_id])
-        normalized_ranks.append(float(normalized_rank))
-        top1_values.append(int(top1))
+        score_rows.append(dict(infer_row))
+        score_gt_indices.append(int(vocab_index[gt_raw_id]))
+
+    metrics_batch_size = max(1, int(config.logit_chunk_size))
+    pack = build_carrier_matrix_pack(
+        score_rows,
+        output_root=asset_roots.asset_root,
+        dataset_name=config.dataset_name,
+        trajectory_source_branch=config.trajectory_source_branch,
+    ) if score_rows else {"carrier_matrix": np.zeros((0, 0), dtype=np.float32), "rows": []}
+    metrics = compute_rank_metrics_batched(
+        carrier_matrix=np.asarray(pack["carrier_matrix"], dtype=np.float32),
+        projector=bundle.projector,
+        candidate_matrix=np.asarray(vocab_matrix, dtype=np.float32),
+        temperature=float(bundle.temperature),
+        gt_indices=score_gt_indices,
+        batch_size=metrics_batch_size,
+    )
+
+    ledger_rows: List[Dict[str, Any]] = []
+    normalized_ranks: List[float] = [float(x) for x in metrics["normalized_rank"]]
+    top1_values: List[int] = [int(bool(x)) for x in metrics["top1"]]
+    for row_idx, row in enumerate(matched_rows):
         ledger_rows.append(
             {
-                "trajectory_id": trajectory_id,
+                "trajectory_id": str(row["trajectory_id"]),
                 "video_id": int(row["video_id"]),
                 "gt_id": int(row["best_gt_id"]),
-                "gt_class_id": int(gt_raw_id),
+                "gt_class_id": int(row["best_gt_category_id"]),
                 "stage": stage,
-                "rank": int(rank),
-                "normalized_rank": float(normalized_rank),
-                "top1": int(top1),
+                "rank": int(metrics["rank"][row_idx]),
+                "normalized_rank": float(metrics["normalized_rank"][row_idx]),
+                "top1": int(bool(metrics["top1"][row_idx])),
             }
         )
 

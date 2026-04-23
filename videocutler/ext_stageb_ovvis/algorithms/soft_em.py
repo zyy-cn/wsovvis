@@ -117,7 +117,7 @@ def _append_jsonl(path: Path, row: Record) -> None:
 
 
 def _make_progress_bar(*, total: int, desc: str, enabled: bool):
-    if enabled and _tqdm_cls is not None and sys.stderr.isatty():
+    if enabled and _tqdm_cls is not None:
         return _tqdm_cls(total=max(1, int(total)), unit='batch', dynamic_ncols=True, leave=True, desc=desc)
 
     class _SilentProgress:

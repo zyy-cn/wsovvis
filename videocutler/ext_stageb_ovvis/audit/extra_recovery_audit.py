@@ -325,6 +325,51 @@ def _sidecar_match_rows(
     raise ValueError(f"unsupported trajectory_source_branch: {trajectory_source_branch}")
 
 
+def _gt_sidecar_candidate_dirs(output_root: Path, dataset_name: str, *, gt_sidecar_dir: str = "audit") -> List[Path]:
+    repo_root = _repo_root()
+    shared_bank_root = repo_root / "gt_sidecar_bank" / dataset_name / "mainline"
+    candidates = [
+        output_root / gt_sidecar_dir,
+        output_root / "audit",
+        output_root / "gt_sidecar_bank" / dataset_name / "mainline",
+        shared_bank_root,
+        repo_root / gt_sidecar_dir,
+        repo_root / "audit",
+    ]
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _load_existing_gt_sidecar_lookup(
+    *,
+    output_root: Path,
+    dataset_name: str,
+    gt_sidecar_dir: str = "audit",
+) -> Dict[str, Record]:
+    split = _dataset_split(dataset_name)
+    filenames = (
+        f"trajectory_gt_match_{split}_mainline.jsonl",
+        f"trajectory_gt_identity_{split}_gt.jsonl",
+    )
+    for sidecar_dir in _gt_sidecar_candidate_dirs(output_root, dataset_name, gt_sidecar_dir=gt_sidecar_dir):
+        lookup: Dict[str, Record] = {}
+        for name in filenames:
+            for row in _load_jsonl(sidecar_dir / name):
+                trajectory_id = str(row.get("trajectory_id", "")).strip()
+                if trajectory_id:
+                    lookup[trajectory_id] = dict(row)
+        if lookup:
+            return lookup
+    return {}
+
+
 def _load_or_generate_gt_sidecar_lookup(
     *,
     output_root: Path,
@@ -332,30 +377,32 @@ def _load_or_generate_gt_sidecar_lookup(
     clip_ids: Sequence[int],
     generate_sidecars: bool = True,
 ) -> Dict[str, Record]:
-    if generate_sidecars:
-        _sidecar_match_rows(
-            output_root=output_root,
-            dataset_name=dataset_name,
-            clip_ids=clip_ids,
-            trajectory_source_branch="mainline",
-        )
-        _sidecar_match_rows(
-            output_root=output_root,
-            dataset_name=dataset_name,
-            clip_ids=clip_ids,
-            trajectory_source_branch="gt_upper_bound",
-        )
-    sidecar_dir = output_root / "audit"
-    lookup: Dict[str, Record] = {}
-    for name in (
-        f"trajectory_gt_match_{_dataset_split(dataset_name)}_mainline.jsonl",
-        f"trajectory_gt_identity_{_dataset_split(dataset_name)}_gt.jsonl",
-    ):
-        for row in _load_jsonl(sidecar_dir / name):
-            trajectory_id = str(row.get("trajectory_id", "")).strip()
-            if trajectory_id:
-                lookup[trajectory_id] = dict(row)
-    return lookup
+    existing = _load_existing_gt_sidecar_lookup(
+        output_root=output_root,
+        dataset_name=dataset_name,
+        gt_sidecar_dir="audit",
+    )
+    if existing:
+        return existing
+    if not generate_sidecars:
+        return {}
+    _sidecar_match_rows(
+        output_root=output_root,
+        dataset_name=dataset_name,
+        clip_ids=clip_ids,
+        trajectory_source_branch="mainline",
+    )
+    _sidecar_match_rows(
+        output_root=output_root,
+        dataset_name=dataset_name,
+        clip_ids=clip_ids,
+        trajectory_source_branch="gt_upper_bound",
+    )
+    return _load_existing_gt_sidecar_lookup(
+        output_root=output_root,
+        dataset_name=dataset_name,
+        gt_sidecar_dir="audit",
+    )
 
 
 def _clip_summary_from_rows(rows: Sequence[Record]) -> List[Record]:

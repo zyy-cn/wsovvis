@@ -4,6 +4,7 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict
+from tqdm.auto import tqdm
 from videocutler.ext_stageb_ovvis.metrics.collector import collect_external_eval, collect_gt_attribution_rank, collect_runtime_metrics, run_inference
 from videocutler.ext_stageb_ovvis.pipeline.plans import TestPlan
 
@@ -12,7 +13,7 @@ REPO_ASSET_LINK_NAMES = ('exports', 'exports_gt', 'carrier_bank', 'carrier_bank_
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
 
 
 @contextmanager
@@ -49,10 +50,60 @@ def _bootstrap_asset_links(target_root: Path, asset_root: Path) -> None:
 def run_test_pipeline(plan: TestPlan) -> Dict[str, Any]:
     _bootstrap_asset_links(Path(plan.repo_root), Path(plan.asset_root))
     _bootstrap_asset_links(Path(plan.output_root), Path(plan.asset_root))
-    with _pushd(plan.repo_root):
-        inference_summary = run_inference(output_root=plan.output_root, dataset_name=plan.dataset_name, device=plan.device, seed=plan.seed, logit_chunk_size=plan.logit_chunk_size, smoke=plan.smoke, ckpt_path=plan.ckpt_path)
-        runtime_metrics = collect_runtime_metrics(plan.output_root)
-        gt_attr = collect_gt_attribution_rank(output_root=plan.output_root, dataset_name=plan.dataset_name, device=plan.device)
-        external = collect_external_eval(output_root=plan.output_root, exp_name=plan.exp_name, seed=plan.seed, smoke=plan.smoke)
-    payload={'exp_name':plan.exp_name,'pipeline':plan.pipeline,'stage_scope':plan.stage_scope,'dataset_name':plan.dataset_name,'benchmark':plan.benchmark,'repo_root':str(plan.repo_root),'asset_root':str(plan.asset_root),'inference':inference_summary,'train':runtime_metrics,'gt_attribution_rank':gt_attr,'external_eval':external}
-    path=plan.output_root/'final_summary.json'; _write_json(path,payload); return {'status':'PASS','summary_path':str(path),'summary':payload}
+    stage_bar = tqdm(total=3, desc='test stages', unit='stage', leave=True)
+    try:
+        with _pushd(plan.repo_root):
+            stage_bar.set_postfix_str('inference')
+            inference_summary = run_inference(
+                output_root=plan.output_root,
+                dataset_name=plan.dataset_name,
+                device=plan.device,
+                seed=plan.seed,
+                logit_chunk_size=plan.logit_chunk_size,
+                smoke=plan.smoke,
+                ckpt_path=plan.ckpt_path,
+                show_progress=True,
+            )
+            runtime_metrics = collect_runtime_metrics(plan.output_root)
+            stage_bar.update(1)
+
+            stage_bar.set_postfix_str('gt attribution rank')
+            gt_attr = collect_gt_attribution_rank(
+                output_root=plan.output_root,
+                dataset_name=plan.dataset_name,
+                device=plan.device,
+                metrics_profile=plan.metrics_profile,
+                selected_for_infer=str(inference_summary.get('selected_for_infer', 'augmented')),
+                show_progress=True,
+            )
+            stage_bar.update(1)
+
+            stage_bar.set_postfix_str('external eval')
+            external = collect_external_eval(
+                output_root=plan.output_root,
+                exp_name=plan.exp_name,
+                seed=plan.seed,
+                smoke=plan.smoke,
+                show_progress=True,
+            )
+            stage_bar.update(1)
+
+        payload = {
+            'exp_name': plan.exp_name,
+            'pipeline': plan.pipeline,
+            'stage_scope': plan.stage_scope,
+            'dataset_name': plan.dataset_name,
+            'benchmark': plan.benchmark,
+            'metrics_profile': plan.metrics_profile,
+            'repo_root': str(plan.repo_root),
+            'asset_root': str(plan.asset_root),
+            'inference': inference_summary,
+            'train': runtime_metrics,
+            'gt_attribution_rank': gt_attr,
+            'external_eval': external,
+        }
+        path = plan.output_root / 'final_summary.json'
+        _write_json(path, payload)
+        return {'status': 'PASS', 'summary_path': str(path), 'summary': payload}
+    finally:
+        stage_bar.close()

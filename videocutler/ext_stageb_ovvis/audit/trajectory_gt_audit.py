@@ -20,6 +20,14 @@ Record = Dict[str, Any]
 _STAGE_ORDER = {"prealign": 0, "softem_base": 1, "softem_aug": 2}
 
 
+def _repo_root() -> Path:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "codex" / "control" / "CURRENT_TASK.json").exists():
+            return parent
+    return current.parents[3]
+
+
 def _load_jsonl(path: Path) -> List[Record]:
     rows: List[Record] = []
     if not path.is_file():
@@ -104,11 +112,21 @@ def _load_gt_sidecar_records(
 ) -> List[Record]:
     split = "train" if "train" in str(dataset_name) else "val"
     branch_suffix = "mainline" if trajectory_source_branch == "mainline" else "gt"
+    repo_root = _repo_root()
+    shared_bank_root = repo_root / "gt_sidecar_bank" / dataset_name / "mainline"
     candidates = [
         output_root / gt_sidecar_dir / f"trajectory_gt_match_{split}_{branch_suffix}.jsonl",
         output_root / gt_sidecar_dir / f"trajectory_gt_identity_{split}_{branch_suffix}.jsonl",
         output_root / "audit" / f"trajectory_gt_match_{split}_{branch_suffix}.jsonl",
         output_root / "audit" / f"trajectory_gt_identity_{split}_{branch_suffix}.jsonl",
+        output_root / "gt_sidecar_bank" / dataset_name / "mainline" / f"trajectory_gt_match_{split}_{branch_suffix}.jsonl",
+        output_root / "gt_sidecar_bank" / dataset_name / "mainline" / f"trajectory_gt_identity_{split}_{branch_suffix}.jsonl",
+        shared_bank_root / f"trajectory_gt_match_{split}_{branch_suffix}.jsonl",
+        shared_bank_root / f"trajectory_gt_identity_{split}_{branch_suffix}.jsonl",
+        repo_root / gt_sidecar_dir / f"trajectory_gt_match_{split}_{branch_suffix}.jsonl",
+        repo_root / gt_sidecar_dir / f"trajectory_gt_identity_{split}_{branch_suffix}.jsonl",
+        repo_root / "audit" / f"trajectory_gt_match_{split}_{branch_suffix}.jsonl",
+        repo_root / "audit" / f"trajectory_gt_identity_{split}_{branch_suffix}.jsonl",
     ]
     for candidate in candidates:
         if candidate.is_file():

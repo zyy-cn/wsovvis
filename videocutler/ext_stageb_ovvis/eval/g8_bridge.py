@@ -11,9 +11,13 @@ import torch
 import torch.nn.functional as F
 
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
+    _coerce_temperature_tensor,
+    _project_candidate_matrix,
+    _resolve_module_device,
     load_carrier_evidence,
     score_carrier_logits_torch,
 )
+from tqdm.auto import tqdm
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import _load_projector_from_checkpoint
 from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_carrier_records
 from videocutler.ext_stageb_ovvis.banks.text_bank import load_text_vocab as load_text_bank_vocab
@@ -109,6 +113,13 @@ def load_jsonl(path: Path) -> List[Record]:
 def write_json(path: Path, payload: Dict[str, Any] | list[Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', encoding='utf-8') as handle:
+        for row in rows:
+            handle.write(json.dumps(dict(row), ensure_ascii=False) + '\n')
 
 
 def require_dataset_name(dataset_name: str, *, allowed: tuple[str, ...] = ALLOWED_DATASET_NAMES) -> str:
@@ -412,10 +423,6 @@ def build_infer_rows(
         if carrier_record is None:
             _bump("missing_carrier_record")
             continue
-        frame_paths = list(carrier_record.get("frame_carriers_norm_paths", [])) if isinstance(carrier_record, Mapping) else []
-        if not frame_paths:
-            _bump("missing_runtime_frame_paths")
-            continue
         rows.append(
             {
                 "trajectory_id": trajectory_id,
@@ -429,6 +436,8 @@ def build_infer_rows(
         "trajectory_count": {"total": len(trajectory_rows), "retained": len(rows)},
         "carrier_count": {"total": len(carrier_rows)},
     }
+
+
 
 
 def _chunk_slices(total: int, chunk_size: int) -> Iterable[Tuple[int, int]]:
@@ -484,19 +493,17 @@ def score_infer_row(
         dataset_name=dataset_name,
         trajectory_source_branch=trajectory_source_branch,
     )
-    frame_vectors: List[np.ndarray] = []
-    frame_vec = np.asarray(carrier_vec, dtype=np.float32)
     _carrier_logits, _frame_logits, fused_logits = compute_fused_logits_chunked(
         projector=bundle.projector,
         carrier_vec=carrier_vec,
-        frame_vec=frame_vec,
+        frame_vec=np.asarray(carrier_vec, dtype=np.float32),
         candidate_matrix=text_matrix,
         temperature=bundle.temperature,
-        frame_vectors=frame_vectors,
+        frame_vectors=(),
         logit_chunk_size=logit_chunk_size,
     )
     if fused_logits.size == 0:
-        raise ValueError("empty fused logits")
+        raise ValueError('empty fused logits')
     all_logits = np.concatenate([fused_logits, np.asarray([bundle.unknown_logit], dtype=np.float32)], axis=0)
     logits_tensor = torch.from_numpy(all_logits.astype(np.float32))
     probs = torch.softmax(logits_tensor, dim=0).detach().cpu().numpy().astype(np.float32)
@@ -506,31 +513,167 @@ def score_infer_row(
     top1_raw_id = int(text_vocab_ids[top1_idx])
     top1_prob = float(known_probs[top1_idx])
     if fused_logits.size >= 2:
-        top2_idx = int(np.argsort(-fused_logits, kind="mergesort")[1])
+        top2_idx = int(np.argsort(-fused_logits, kind='mergesort')[1])
         margin_top1_top2 = float(fused_logits[top1_idx] - fused_logits[top2_idx])
     else:
         margin_top1_top2 = float(fused_logits[top1_idx] - bundle.unknown_logit)
     margin_top1_vs_unknown = float(fused_logits[top1_idx] - bundle.unknown_logit)
-    trajectory_record = row.get("trajectory_record") if isinstance(row.get("trajectory_record"), Mapping) else {}
-    generator_score = float(trajectory_record.get("pred_score", 1.0) or 1.0)
-    valid_carrier = bool(trajectory_record.get("valid_carrier", True))
+    trajectory_record = row.get('trajectory_record') if isinstance(row.get('trajectory_record'), Mapping) else {}
+    generator_score = float(trajectory_record.get('pred_score', 1.0) or 1.0)
+    valid_carrier = bool(trajectory_record.get('valid_carrier', True))
     return {
-        "trajectory_id": str(row.get("trajectory_id", "")),
-        "clip_id": int(row.get("clip_id", row.get("video_id", 0))),
-        "video_id": int(row.get("video_id", row.get("clip_id", 0))),
-        "generator_score": float(generator_score),
-        "score": float(max(0.0, min(1.0, generator_score * top1_prob))),
-        "category_id": top1_raw_id,
-        "top1_known_raw_id": top1_raw_id,
-        "top1_known_name": str(class_name_map.get(top1_raw_id, f"raw_id_{top1_raw_id}")),
-        "top1_known_prob": float(top1_prob),
-        "unknown_prob": float(unknown_prob),
-        "margin_top1_top2": float(margin_top1_top2),
-        "margin_top1_vs_unknown": float(margin_top1_vs_unknown),
-        "valid_carrier": bool(valid_carrier),
-        "trajectory_record": dict(trajectory_record),
+        'trajectory_id': str(row.get('trajectory_id', '')),
+        'clip_id': int(row.get('clip_id', row.get('video_id', 0))),
+        'video_id': int(row.get('video_id', row.get('clip_id', 0))),
+        'generator_score': float(generator_score),
+        'score': float(max(0.0, min(1.0, generator_score * top1_prob))),
+        'category_id': top1_raw_id,
+        'top1_known_raw_id': top1_raw_id,
+        'top1_known_name': str(class_name_map.get(top1_raw_id, f'raw_id_{top1_raw_id}')),
+        'top1_known_prob': float(top1_prob),
+        'unknown_prob': float(unknown_prob),
+        'margin_top1_top2': float(margin_top1_top2),
+        'margin_top1_vs_unknown': float(margin_top1_vs_unknown),
+        'valid_carrier': bool(valid_carrier),
+        'trajectory_record': dict(trajectory_record),
     }
 
+
+def build_carrier_only_infer_pack(
+    infer_rows: Sequence[Mapping[str, Any]],
+    *,
+    asset_root: Path,
+    dataset_name: str,
+    trajectory_source_branch: str,
+    show_progress: bool = True,
+) -> Dict[str, Any]:
+    carrier_vectors: List[np.ndarray] = []
+    row_manifest: List[Record] = []
+    trajectory_records: List[Dict[str, Any]] = []
+    iterator = tqdm(infer_rows, desc='infer: load carrier', unit='traj', leave=True) if show_progress else infer_rows
+    try:
+        for row_idx, row in enumerate(iterator):
+            carrier_vec = load_carrier_evidence(
+                row,
+                output_root=asset_root,
+                dataset_name=dataset_name,
+                trajectory_source_branch=trajectory_source_branch,
+            )
+            carrier_vectors.append(np.asarray(carrier_vec, dtype=np.float32))
+            trajectory_record = dict(row.get('trajectory_record', {})) if isinstance(row.get('trajectory_record'), Mapping) else {}
+            trajectory_records.append(trajectory_record)
+            row_manifest.append({
+                'row_idx': int(row_idx),
+                'trajectory_id': str(row.get('trajectory_id', '')),
+                'join_key': str(row.get('trajectory_id', '')),
+                'clip_id': int(row.get('clip_id', row.get('video_id', 0))),
+                'video_id': int(row.get('video_id', row.get('clip_id', 0))),
+                'generator_score': float(trajectory_record.get('pred_score', 1.0) or 1.0),
+                'valid_carrier': bool(trajectory_record.get('valid_carrier', True)),
+            })
+    finally:
+        if show_progress and hasattr(iterator, 'close'):
+            iterator.close()
+    if not carrier_vectors:
+        raise ValueError('no carrier vectors for inference')
+    carrier_matrix = np.stack(carrier_vectors, axis=0).astype(np.float32)
+    return {
+        'carrier_matrix': carrier_matrix,
+        'row_manifest': row_manifest,
+        'trajectory_records': trajectory_records,
+    }
+
+
+def score_infer_rows_matrix(
+    *,
+    carrier_matrix: np.ndarray,
+    bundle: ProjectorBundle,
+    text_matrix: np.ndarray,
+    show_progress: bool = True,
+) -> Dict[str, np.ndarray]:
+    progress = tqdm(total=3, desc='infer: matrix score', unit='step', leave=True) if show_progress else None
+    try:
+        device = _resolve_module_device(bundle.projector)
+        carrier_tensor = torch.from_numpy(np.asarray(carrier_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
+        carrier_tensor = F.normalize(carrier_tensor, p=2.0, dim=-1)
+        if progress is not None:
+            progress.set_postfix_str('carrier tensor ready')
+            progress.update(1)
+        candidate_tensor = _project_candidate_matrix(projector=bundle.projector, candidate_matrix=text_matrix, device=device)
+        if progress is not None:
+            progress.set_postfix_str('text tensor projected')
+            progress.update(1)
+        temperature_tensor = _coerce_temperature_tensor(bundle.temperature, device=device)
+        fused_logits_t = torch.matmul(carrier_tensor, candidate_tensor.t()) / temperature_tensor
+        unknown_col = torch.full((int(fused_logits_t.shape[0]), 1), float(bundle.unknown_logit), device=device, dtype=fused_logits_t.dtype)
+        probs_t = torch.softmax(torch.cat([fused_logits_t, unknown_col], dim=1), dim=1)
+        if progress is not None:
+            progress.set_postfix_str('logits/probs ready')
+            progress.update(1)
+        return {
+            'fused_logits': np.asarray(fused_logits_t.detach().cpu().numpy(), dtype=np.float32),
+            'known_probs': np.asarray(probs_t[:, :-1].detach().cpu().numpy(), dtype=np.float32),
+            'unknown_probs': np.asarray(probs_t[:, -1].detach().cpu().numpy(), dtype=np.float32),
+        }
+    finally:
+        if progress is not None:
+            progress.close()
+
+
+def materialize_scored_rows_from_matrix(
+    *,
+    row_manifest: Sequence[Mapping[str, Any]],
+    trajectory_records: Sequence[Mapping[str, Any]],
+    text_vocab_ids: Sequence[int],
+    class_name_map: Mapping[int, str],
+    fused_logits: np.ndarray,
+    known_probs: np.ndarray,
+    unknown_probs: np.ndarray,
+    show_progress: bool = True,
+) -> List[Dict[str, Any]]:
+    if int(fused_logits.shape[0]) != len(row_manifest):
+        raise ValueError('row_manifest length does not match fused_logits rows')
+    if int(known_probs.shape[0]) != len(row_manifest) or int(unknown_probs.shape[0]) != len(row_manifest):
+        raise ValueError('probability rows do not match row_manifest length')
+    if int(fused_logits.shape[1]) != len(text_vocab_ids):
+        raise ValueError('text vocab axis does not match fused_logits width')
+    rows: List[Dict[str, Any]] = []
+    iterator = tqdm(range(len(row_manifest)), desc='infer: materialize rows', unit='traj', leave=True) if show_progress else range(len(row_manifest))
+    try:
+        for row_idx in iterator:
+            manifest = row_manifest[row_idx]
+            trajectory_record = dict(trajectory_records[row_idx]) if row_idx < len(trajectory_records) else {}
+            row_logits = np.asarray(fused_logits[row_idx], dtype=np.float32)
+            row_known_probs = np.asarray(known_probs[row_idx], dtype=np.float32)
+            row_unknown_prob = float(unknown_probs[row_idx])
+            top1_idx = int(np.argmax(row_logits))
+            top1_raw_id = int(text_vocab_ids[top1_idx])
+            top1_prob = float(row_known_probs[top1_idx])
+            if row_logits.size >= 2:
+                top2_idx = int(np.argsort(-row_logits, kind='mergesort')[1])
+                margin_top1_top2 = float(row_logits[top1_idx] - row_logits[top2_idx])
+            else:
+                margin_top1_top2 = float(row_logits[top1_idx])
+            rows.append({
+                'trajectory_id': str(manifest.get('trajectory_id', '')),
+                'clip_id': int(manifest.get('clip_id', manifest.get('video_id', 0))),
+                'video_id': int(manifest.get('video_id', manifest.get('clip_id', 0))),
+                'generator_score': float(manifest.get('generator_score', 1.0) or 1.0),
+                'score': float(max(0.0, min(1.0, float(manifest.get('generator_score', 1.0) or 1.0) * top1_prob))),
+                'category_id': top1_raw_id,
+                'top1_known_raw_id': top1_raw_id,
+                'top1_known_name': str(class_name_map.get(top1_raw_id, f'raw_id_{top1_raw_id}')),
+                'top1_known_prob': float(top1_prob),
+                'unknown_prob': float(row_unknown_prob),
+                'margin_top1_top2': float(margin_top1_top2),
+                'margin_top1_vs_unknown': float(row_logits[top1_idx]),
+                'valid_carrier': bool(manifest.get('valid_carrier', True)),
+                'trajectory_record': trajectory_record,
+            })
+    finally:
+        if show_progress and hasattr(iterator, 'close'):
+            iterator.close()
+    return rows
 
 def densify_segmentations(trajectory_record: Mapping[str, Any], *, video_length: int) -> List[Any]:
     frame_indices = [int(x) for x in list(trajectory_record.get("frame_indices", []))]

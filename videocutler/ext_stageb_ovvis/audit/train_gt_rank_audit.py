@@ -8,10 +8,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_carrier_evidence
 from videocutler.ext_stageb_ovvis.audit.extra_recovery_audit import _load_or_generate_gt_sidecar_lookup
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import Phase1MaterializationConfig, materialize_phase1_training_samples
-from videocutler.ext_stageb_ovvis.eval.g8_bridge import compute_fused_logits_chunked, load_projector_bundle
+from videocutler.ext_stageb_ovvis.eval.g8_bridge import load_projector_bundle
+from videocutler.ext_stageb_ovvis.audit._matrix_vocab_scoring import build_carrier_matrix_pack, compute_rank_metrics_batched
 from videocutler.ext_stageb_ovvis.banks.text_bank import load_text_vocab
 
 Record = Dict[str, Any]
@@ -192,6 +192,9 @@ def _score_stage_rows(
 
     ledger_rows: List[Record] = []
     total_prediction_count = len(samples)
+    score_rows: List[Record] = []
+    score_gt_indices: List[int] = []
+    score_meta: List[Record] = []
     for sample in samples:
         trajectory_id = str(sample.get("trajectory_id", "")).strip()
         gt_record = dict(gt_sidecar_lookup.get(trajectory_id, {}))
@@ -203,38 +206,9 @@ def _score_stage_rows(
             continue
         observed_raw_ids = _unique_ints(sample.get("observed_raw_ids", []))
         supervision_split = _split_label(gt_class_id=int(gt_class_id), observed_raw_ids=observed_raw_ids)
-        try:
-            carrier_vec = load_carrier_evidence(
-                sample,
-                output_root=output_root,
-                dataset_name=dataset_name,
-                trajectory_source_branch=trajectory_source_branch,
-            )
-            frame_vec = np.asarray(carrier_vec, dtype=np.float32)
-            _carrier_logits, _frame_logits, fused_logits = compute_fused_logits_chunked(
-                projector=bundle.projector,
-                carrier_vec=carrier_vec,
-                frame_vec=frame_vec,
-                candidate_matrix=text_matrix,
-                temperature=bundle.temperature,
-                frame_vectors=[],
-                logit_chunk_size=int(logit_chunk_size),
-            )
-            rank, normalized_rank, is_top1 = _rank_and_top1_from_logits(fused_logits, gt_index=int(gt_index))
-        except Exception as exc:
-            ledger_rows.append(
-                {
-                    "stage": stage,
-                    "trajectory_id": trajectory_id,
-                    "clip_id": int((sample.get("trajectory_record") or {}).get("clip_id", -1)),
-                    "gt_class_id": int(gt_class_id),
-                    "observed_raw_ids": observed_raw_ids,
-                    "supervision_split": supervision_split,
-                    "audit_status": f"score_failed:{type(exc).__name__}",
-                }
-            )
-            continue
-        ledger_rows.append(
+        score_rows.append(dict(sample))
+        score_gt_indices.append(int(gt_index))
+        score_meta.append(
             {
                 "stage": stage,
                 "trajectory_id": trajectory_id,
@@ -242,12 +216,35 @@ def _score_stage_rows(
                 "gt_class_id": int(gt_class_id),
                 "observed_raw_ids": observed_raw_ids,
                 "supervision_split": supervision_split,
-                "gt_rank": int(rank),
-                "normalized_gt_rank": float(normalized_rank),
-                "gt_is_top1": bool(is_top1),
-                "audit_status": "ok",
             }
         )
+
+    if score_rows:
+        metrics_batch_size = max(1, int(logit_chunk_size))
+        pack = build_carrier_matrix_pack(
+            score_rows,
+            output_root=output_root,
+            dataset_name=dataset_name,
+            trajectory_source_branch=trajectory_source_branch,
+        )
+        metrics = compute_rank_metrics_batched(
+            carrier_matrix=np.asarray(pack["carrier_matrix"], dtype=np.float32),
+            projector=bundle.projector,
+            candidate_matrix=np.asarray(text_matrix, dtype=np.float32),
+            temperature=float(bundle.temperature),
+            gt_indices=score_gt_indices,
+            batch_size=metrics_batch_size,
+        )
+        for row_idx, meta in enumerate(score_meta):
+            ledger_rows.append(
+                {
+                    **meta,
+                    "gt_rank": int(metrics["rank"][row_idx]),
+                    "normalized_gt_rank": float(metrics["normalized_rank"][row_idx]),
+                    "gt_is_top1": bool(metrics["top1"][row_idx]),
+                    "audit_status": "ok",
+                }
+            )
 
     ok_rows = [row for row in ledger_rows if str(row.get("audit_status")) == "ok"]
     summary = _aggregate_rows(ok_rows, total_prediction_count=total_prediction_count)

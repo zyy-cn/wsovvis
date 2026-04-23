@@ -17,6 +17,7 @@ from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import (
     load_text_vocab,
     _project_candidate_matrix,
 )
+from videocutler.ext_stageb_ovvis.audit._matrix_vocab_scoring import build_carrier_matrix_pack, compute_fused_logits_and_cosine_matrix_numpy
 from videocutler.ext_stageb_ovvis.audit.trajectory_gt_audit import (
     _STAGE_ORDER,  # reuse stable ordering for summaries
     _extract_gt_available,
@@ -189,6 +190,8 @@ def build_projector_quality_rows(
     text_vocab_ids, _text_records, text_matrix = load_text_vocab(output_root)
     text_id_to_index = {int(raw_id): idx for idx, raw_id in enumerate(text_vocab_ids)}
     rows: List[Record] = []
+    score_rows: List[Record] = []
+    score_row_indices: List[int] = []
 
     for sample in materialized_samples:
         trajectory_id = str(sample.get("trajectory_id", "")).strip()
@@ -254,19 +257,33 @@ def build_projector_quality_rows(
         sample_valid = bool(sample.get("sample_valid", False))
         traj_locator = str(carrier_record.get("z_norm_path", "")).strip() if isinstance(carrier_record, Mapping) else ""
         if sample_valid and traj_locator and gt_available_for_audit:
+            score_row_indices.append(len(rows))
+            score_rows.append(dict(sample))
+        rows.append(row)
+
+    if score_rows:
+        pack = build_carrier_matrix_pack(
+            score_rows,
+            output_root=output_root,
+            dataset_name=dataset_name,
+            trajectory_source_branch=trajectory_source_branch,
+        )
+        fused_logits_matrix, cosine_matrix = compute_fused_logits_and_cosine_matrix_numpy(
+            carrier_matrix=np.asarray(pack["carrier_matrix"], dtype=np.float32),
+            projector=projector,
+            candidate_matrix=np.asarray(text_matrix, dtype=np.float32),
+            temperature=float(temperature),
+            batch_size=512,
+        )
+        for score_idx, row_idx in enumerate(score_row_indices):
+            row = rows[row_idx]
+            gt_class_id = row.get("gt_class_id")
+            observed_raw_ids = [int(x) for x in list(row.get("observed_raw_ids", []))]
+            candidate_ids_known = [int(x) for x in list(row.get("candidate_ids_known", []))]
+            candidate_ids_extra = [int(x) for x in list(row.get("candidate_ids_extra", []))]
             try:
-                carrier_vec = load_carrier_evidence(
-                    sample,
-                    output_root=output_root,
-                    dataset_name=dataset_name,
-                    trajectory_source_branch=trajectory_source_branch,
-                )
-                _, _, fused_logits, cosine_scores, fused_query = _compute_query_and_scores(
-                    projector=projector,
-                    carrier_vec=carrier_vec,
-                    text_matrix=text_matrix,
-                    temperature=float(temperature),
-                )
+                fused_logits = np.asarray(fused_logits_matrix[score_idx], dtype=np.float32)
+                cosine_scores = np.asarray(cosine_matrix[score_idx], dtype=np.float32)
                 probs = torch.softmax(torch.from_numpy(fused_logits), dim=0).detach().cpu().numpy().astype(np.float64)
                 order = np.argsort(-np.asarray(fused_logits, dtype=np.float64), kind="mergesort")
                 k = min(max(int(topk), 1), int(len(order)))
@@ -303,12 +320,12 @@ def build_projector_quality_rows(
                     row["is_gt_top1"] = bool(row["gt_rank_full_vocab"] == 1)
                     row["is_gt_in_topk"] = bool(row["gt_rank_full_vocab"] is not None and row["gt_rank_full_vocab"] <= k)
 
-                stage_domain_ids, _, extra_domain_ids = build_stage_domain_indices(
+                stage_domain_ids, _, _extra_domain_ids = build_stage_domain_indices(
                     candidate_ids_known,
                     candidate_ids_extra,
                     stage_id=stage_id,
                 )
-                closed_candidate_ids = sorted(dict.fromkeys([*candidate_ids_known, *candidate_ids_extra, *( [gt_class_id] if gt_class_id is not None else [] )]))
+                closed_candidate_ids = sorted(dict.fromkeys([*candidate_ids_known, *candidate_ids_extra, *([gt_class_id] if gt_class_id is not None else [])]))
                 row["closed_set_candidate_ids"] = closed_candidate_ids
                 stage_domain_logits = [0.0]
                 stage_domain_ids_for_scores: List[int] = []
@@ -324,24 +341,26 @@ def build_projector_quality_rows(
                     stage_domain_ids_for_scores.append(int(gt_class_id))
                 stage_domain_logits_arr = np.asarray(stage_domain_logits, dtype=np.float64)
                 if gt_class_id is not None and gt_class_id in stage_domain_ids_for_scores:
-                    gt_stage_idx = stage_domain_ids_for_scores.index(int(gt_class_id)) + 1  # +1 for unknown slot
+                    gt_stage_idx = stage_domain_ids_for_scores.index(int(gt_class_id)) + 1
                     row["gt_rank_stage_domain"] = _rank_from_scores(stage_domain_logits_arr, gt_stage_idx)
                     row["closed_set_gt_rank"] = row["gt_rank_stage_domain"]
-                    row["closed_set_gt_score"] = float(torch.softmax(torch.from_numpy(stage_domain_logits_arr), dim=0).detach().cpu().numpy()[gt_stage_idx])
+                    stage_probs = torch.softmax(torch.from_numpy(stage_domain_logits_arr), dim=0).detach().cpu().numpy()
+                    row["closed_set_gt_score"] = float(stage_probs[gt_stage_idx])
                     row["closed_set_top1_id"] = "unknown"
                     if len(stage_domain_logits_arr) > 1:
                         best_known_idx = int(np.argmax(stage_domain_logits_arr[1:])) + 1
                         if best_known_idx >= 1:
                             row["closed_set_top1_id"] = int(stage_domain_ids_for_scores[best_known_idx - 1])
-                            row["closed_set_top1_score"] = float(torch.softmax(torch.from_numpy(stage_domain_logits_arr), dim=0).detach().cpu().numpy()[best_known_idx])
+                            row["closed_set_top1_score"] = float(stage_probs[best_known_idx])
                     row["closed_set_is_gt_top1"] = bool(row["gt_rank_stage_domain"] == 1)
                 elif gt_class_id is not None and gt_class_id in text_id_to_index:
                     row["gt_rank_stage_domain"] = None
                     row["closed_set_gt_rank"] = None
-
             except Exception as exc:  # pragma: no cover - defensive path
-                row["invalid_reasons"] = sorted(set(row["invalid_reasons"] + [f"audit_projection_failed:{type(exc).__name__}"]))
+                row["invalid_reasons"] = sorted(set(list(row.get("invalid_reasons", [])) + [f"audit_projection_failed:{type(exc).__name__}"]))
 
+    for row in rows:
+        trajectory_id = str(row.get("trajectory_id", ""))
         prev = previous_by_trajectory.get(trajectory_id)
         if prev is not None and row["gt_available_for_audit"] and row["gt_rank_full_vocab"] is not None and row["gt_score"] is not None:
             prev_rank = prev.get("gt_rank_full_vocab")
@@ -357,10 +376,7 @@ def build_projector_quality_rows(
                 except Exception:
                     row["delta_gt_score_vs_prev"] = None
 
-        rows.append(row)
-
     return rows
-
 
 def summarize_projector_quality_rows(stage_rows: Mapping[str, Sequence[Record]]) -> Dict[str, Any]:
     ordered_stage_ids = sorted(stage_rows.keys(), key=lambda item: (_STAGE_ORDER.get(str(item), 99), str(item)))
