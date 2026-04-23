@@ -19,7 +19,7 @@ def _maybe_tqdm(iterable, *, enabled: bool, **kwargs):
 from videocutler.ext_stageb_ovvis.algorithms._training_budget import build_dynamic_microbatches, resolve_default_batch_budget
 from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_text_vocab, score_carrier_logits_torch, observed_mass_loss
 from videocutler.ext_stageb_ovvis.algorithms.prealign import _prepare_examples as _prepare_prealign_examples
-from videocutler.ext_stageb_ovvis.algorithms.soft_em import _prepare_examples as _prepare_softem_examples
+from videocutler.ext_stageb_ovvis.algorithms.soft_em import _prepare_examples as _prepare_softem_examples, _build_runtime_extra_cache, _apply_runtime_extra_cache
 from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
 from videocutler.ext_stageb_ovvis.utils.unknown_metrics import UnknownMetricsAccumulator
 Record=Dict[str,Any]
@@ -28,7 +28,7 @@ class ReservoirPrealignConfig:
     dataset_name:str; trajectory_source_branch:str='mainline'; device:str='cpu'; seed:int=0; smoke:bool=False; lambda_frame:float=0.25; epochs:int=1; learning_rate:float=1e-4; weight_decay:float=1e-2; t_dis_init:float=0.07; projector:ProjectorConfig=ProjectorConfig(); runtime_asset_source:str='local_canonical_assets'; runtime_asset_source_local_incomplete:bool=False; runtime_asset_output_root:str=''; batch_budget:int|None=None; show_progress:bool=True; log_every:int=10; write_runtime_metrics_jsonl:bool=True; print_epoch_summary:bool=True
 @dataclass(frozen=True)
 class ReservoirSoftEMConfig:
-    dataset_name:str; trajectory_source_branch:str='mainline'; mode:str='base_then_aug'; device:str='cpu'; seed:int=0; smoke:bool=False; lambda_frame:float=0.25; t_dis_init:float=0.07; weight_decay:float=1e-2; projector:ProjectorConfig=ProjectorConfig(); base_epochs:int=1; aug_epochs:int=1; base_learning_rate:float=5e-5; aug_learning_rate:float=5e-5; runtime_asset_source:str='local_canonical_assets'; runtime_asset_source_local_incomplete:bool=False; runtime_asset_output_root:str=''; batch_budget:int|None=None; base_release_margin:float=0.0; ablate_skip_base:bool=False; ablate_no_yprime_reward:bool=False; show_progress:bool=True; log_every:int=10; write_runtime_metrics_jsonl:bool=True; print_epoch_summary:bool=True
+    dataset_name:str; trajectory_source_branch:str='mainline'; mode:str='base_then_aug'; device:str='cpu'; seed:int=0; smoke:bool=False; lambda_frame:float=0.25; t_dis_init:float=0.07; weight_decay:float=1e-2; projector:ProjectorConfig=ProjectorConfig(); base_epochs:int=1; aug_epochs:int=1; base_learning_rate:float=5e-5; aug_learning_rate:float=5e-5; runtime_asset_source:str='local_canonical_assets'; runtime_asset_source_local_incomplete:bool=False; runtime_asset_output_root:str=''; batch_budget:int|None=None; k_extra:int=2; extra_alpha:float=0.25; base_release_margin:float=0.0; ablate_skip_base:bool=False; ablate_no_yprime_reward:bool=False; show_progress:bool=True; log_every:int=10; write_runtime_metrics_jsonl:bool=True; print_epoch_summary:bool=True
 
 def _set_seed(seed:int)->None:
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -115,7 +115,42 @@ def run_reservoir_soft_em(*, output_root:Path, materialized_samples:Sequence[Rec
         leave=True,
     ):
         is_aug=stage_id=='softem_aug'; learning_rate=float(config.aug_learning_rate if is_aug else config.base_learning_rate); epochs=int(config.aug_epochs if is_aug else config.base_epochs); [group.update({'lr':learning_rate}) for group in optimizer.param_groups]; stage_examples=[]; staged_domain_counts=[]
-        for ex in examples:
+        stage_source_examples=list(examples)
+        runtime_extra_cache={}
+        if is_aug and not bool(config.ablate_skip_base):
+            runtime_extra_cache=_build_runtime_extra_cache(
+                examples=examples,
+                text_projector=projector,
+                theta_t=theta_t,
+                output_root=output_root,
+                k_extra=int(config.k_extra),
+                alpha=float(config.extra_alpha),
+                lambda_frame=float(config.lambda_frame),
+                device=device,
+            )
+            if runtime_extra_cache:
+                stage_source_examples=_apply_runtime_extra_cache(
+                    examples,
+                    runtime_extra_cache=runtime_extra_cache,
+                    output_root=output_root,
+                )
+                if bool(config.write_runtime_metrics_jsonl):
+                    nonempty_count=int(sum(1 for row in stage_source_examples if len(list(row.get('candidate_ids_extra', []))) > 0))
+                    _append_jsonl(
+                        runtime_root/'softem_aug'/'runtime_metrics.jsonl',
+                        {
+                            'row_type':'runtime_extra_cache_summary',
+                            'timestamp':datetime.now(timezone.utc).isoformat(),
+                            'stage':'softem_aug',
+                            'clip_cache_count':int(len(runtime_extra_cache)),
+                            'example_count':int(len(stage_source_examples)),
+                            'example_with_nonempty_extra_count':nonempty_count,
+                            'example_with_nonempty_extra_rate':float(nonempty_count/ max(len(stage_source_examples), 1)),
+                            'k_extra':int(config.k_extra),
+                            'extra_alpha':float(config.extra_alpha),
+                        },
+                    )
+        for ex in stage_source_examples:
             domain_ids, known_ids, extra_ids = _stage_domain_ids(ex, is_aug=is_aug, ablate_no_yprime_reward=bool(config.ablate_no_yprime_reward))
             if len(domain_ids) <= 0:
                 continue
@@ -158,5 +193,14 @@ def run_reservoir_soft_em(*, output_root:Path, materialized_samples:Sequence[Rec
         if (not is_aug) or bool(config.ablate_skip_base):
             current_unknown_metrics=unknown_metrics.finalize(distributed=False)
             stage_summary['unknown_metrics']=current_unknown_metrics
+        if is_aug and not bool(config.ablate_skip_base):
+            stage_summary['runtime_extra_cache_metrics']={
+                'clip_cache_count':int(len(runtime_extra_cache)),
+                'example_count':int(len(stage_source_examples)),
+                'example_with_nonempty_extra_count':int(sum(1 for row in stage_source_examples if len(list(row.get('candidate_ids_extra', []))) > 0)),
+                'example_with_nonempty_extra_rate':float(sum(1 for row in stage_source_examples if len(list(row.get('candidate_ids_extra', []))) > 0)/max(len(stage_source_examples),1)),
+                'k_extra':int(config.k_extra),
+                'extra_alpha':float(config.extra_alpha),
+            }
         _write_json(stage_dir/'stage_summary.json', stage_summary); stage_reports.append({'stage_id':stage_id,'responsibility_records_path':resp_rel,'train_state_path':train_state_rel,'checkpoint_last_path':str((Path('train')/stage_id/'checkpoints'/ckpt_name).as_posix()),'record_count_output':int(len(rows)),'loss_mean':_mean_or_zero(losses),'loss_last':float(losses[-1]) if losses else 0.0,'optimization_loss_mean':_mean_or_zero(batch_losses),'optimization_loss_last':float(batch_losses[-1]) if batch_losses else 0.0,'batch_budget':int(batch_budget),'loss_normalization':'effective_trajectory_count'})
     return {'stage_reports':stage_reports,'record_count_input':int(len(materialized_samples)),'record_count_trainable':int(len(examples)),'record_count_output':int(len(final_examples)),'coverage_ratio_trainable':float(len(examples)/max(len(materialized_samples),1)),'skipped_reason_histogram':skipped,'selected_checkpoint_path':stage_reports[-1]['checkpoint_last_path'] if stage_reports else '','unknown_metrics':current_unknown_metrics}

@@ -223,7 +223,7 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                     runtime_asset_source=str(materialized['resolution'].get('runtime_asset_source','local_canonical_assets')),
                     runtime_asset_source_local_incomplete=bool(materialized['resolution'].get('local_incomplete',False)),
                     runtime_asset_output_root=str(materialized['resolution'].get('runtime_output_root', str(plan.repo_root))),
-                    batch_budget=plan.batch_budget, base_release_margin=float(plan.base_release_margin),
+                    batch_budget=plan.batch_budget, k_extra=int(plan.k_extra), extra_alpha=float(plan.extra_alpha), base_release_margin=float(plan.base_release_margin),
                     ablate_skip_base=bool(getattr(plan, 'ablate_skip_base', False)),
                     ablate_no_yprime_reward=bool(getattr(plan, 'ablate_no_yprime_reward', False)),
                     show_progress=plan.show_progress, log_every=plan.log_every,

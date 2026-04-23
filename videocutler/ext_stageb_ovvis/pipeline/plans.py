@@ -43,6 +43,8 @@ class TrainPlan:
     t_dis_init:float=0.07
     smoke_max_trajectories:int=128
     subset_fraction:Optional[float]=None
+    k_extra:int=2
+    extra_alpha:float=0.25
     base_release_margin:float=0.0
     ablate_skip_base:bool=False
     ablate_no_yprime_reward:bool=False
@@ -103,7 +105,7 @@ def resolve_train_plan(args)->TrainPlan:
         aug_learning_rate=None if args.aug_learning_rate is None else float(args.aug_learning_rate),
         weight_decay=float(args.weight_decay), lambda_frame=None if args.lambda_frame is None else float(args.lambda_frame),
         lambda_cov=float(args.lambda_cov), t_dis_init=float(args.t_dis_init), smoke_max_trajectories=int(args.smoke_max_trajectories),
-        subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction), base_release_margin=float(args.base_release_margin),
+        subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction), k_extra=int(args.k_extra), extra_alpha=float(args.extra_alpha), base_release_margin=float(args.base_release_margin),
         ablate_skip_base=bool(getattr(args, 'ablate_skip_base', False)),
         ablate_no_yprime_reward=bool(getattr(args, 'ablate_no_yprime_reward', False)), show_progress=bool(args.show_progress),
         log_every=int(args.log_every), write_runtime_metrics_jsonl=bool(args.write_runtime_metrics_jsonl),
