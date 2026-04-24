@@ -5,6 +5,8 @@ from typing import Optional
 
 _ALLOWED_PIPELINES=('legacy','reservoir_v1')
 _ALLOWED_TRAINING_SEMANTICS=('legacy_scta','reservoir_release')
+_ALLOWED_BASE_EM_REFRESH_POLICIES=('stage_once','epoch_start')
+_ALLOWED_UNKNOWN_MODES=('prototype','scalar_bias')
 _ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug')
 _ALLOWED_METRICS_PROFILES=('default','formal')
 _ALLOWED_BENCHMARKS=('lvvis',)
@@ -48,6 +50,9 @@ class TrainPlan:
     k_extra:int=2
     extra_alpha:float=0.25
     base_release_margin:float=0.0
+    em_subiterations:int=2
+    base_em_refresh_policy:str='stage_once'
+    unknown_mode:str='prototype'
     ablate_skip_base:bool=False
     ablate_no_yprime_reward:bool=False
     show_progress:bool=True
@@ -109,6 +114,9 @@ def resolve_train_plan(args)->TrainPlan:
         weight_decay=float(args.weight_decay), lambda_frame=None if args.lambda_frame is None else float(args.lambda_frame),
         lambda_cov=float(args.lambda_cov), t_dis_init=float(args.t_dis_init), smoke_max_trajectories=int(args.smoke_max_trajectories),
         subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction), k_extra=int(getattr(args, 'k_extra', 2)), extra_alpha=float(getattr(args, 'extra_alpha', 0.25)), base_release_margin=float(args.base_release_margin),
+        em_subiterations=max(0, int(getattr(args, 'em_subiterations', 2))),
+        base_em_refresh_policy=_require(str(getattr(args, 'base_em_refresh_policy', 'stage_once')), _ALLOWED_BASE_EM_REFRESH_POLICIES, 'base_em_refresh_policy'),
+        unknown_mode=_require(str(getattr(args, 'unknown_mode', 'prototype')), _ALLOWED_UNKNOWN_MODES, 'unknown_mode'),
         ablate_skip_base=bool(getattr(args, 'ablate_skip_base', False)),
         ablate_no_yprime_reward=bool(getattr(args, 'ablate_no_yprime_reward', False)), show_progress=bool(args.show_progress),
         log_every=int(args.log_every), write_runtime_metrics_jsonl=bool(args.write_runtime_metrics_jsonl),

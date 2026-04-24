@@ -576,7 +576,12 @@ def run_prealign_mass_probe(config: PrealignMassProbeConfig) -> Dict[str, Any]:
             clip_vectors.append(_normalize_np(np.mean(carrier_stack, axis=0)))
         z_clip = torch.from_numpy(np.asarray(clip_vectors, dtype=np.float32)).to(device=device, dtype=torch.float32)
         logits_vocab_t = torch.matmul(F.normalize(z_clip, p=2.0, dim=-1), text_proj.t()) / temperature
-        logits_unknown_t = _unknown_score(z_clip, unknown_prototype, temperature)
+        unknown_mode = str(checkpoint_payload.get('unknown_mode', 'prototype'))
+        if unknown_mode == 'scalar_bias':
+            b_u_value = float(checkpoint_payload.get('b_u', 0.0))
+            logits_unknown_t = torch.ones((int(z_clip.shape[0]),), device=z_clip.device, dtype=z_clip.dtype) * b_u_value
+        else:
+            logits_unknown_t = _unknown_score(z_clip, unknown_prototype, temperature)
     _progress_update(stage_bar)
     logits_vocab = logits_vocab_t.detach().cpu().numpy().astype(np.float64)
     logits_unknown = logits_unknown_t.detach().cpu().numpy().reshape(-1).astype(np.float64)
