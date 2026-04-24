@@ -165,6 +165,180 @@ def _prepare_probe_examples(
     return {"examples": examples, "skipped_reason_histogram": skipped}
 
 
+
+def _unique_int_list(values: Sequence[Any]) -> List[int]:
+    seen: set[int] = set()
+    out: List[int] = []
+    for value in values:
+        try:
+            item = int(value)
+        except Exception:
+            continue
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _load_stage_responsibility_candidate_overrides(
+    *,
+    run_root: Path,
+    stage_id: str,
+) -> Tuple[Dict[str, Record], Dict[str, Any]]:
+    """Load stage-authoritative candidate domains from responsibility records.
+
+    Phase-1 materialization intentionally stores empty runtime-only extras.
+    For softem_aug and equivalent stages, the authoritative candidate_ids_extra
+    are emitted by training into train/<stage>/responsibility_records.jsonl.
+    The extra probe must consume that stage truth instead of stale phase-1
+    placeholders.
+    """
+    path = Path(run_root).expanduser().resolve() / "train" / str(stage_id) / "responsibility_records.jsonl"
+    meta: Dict[str, Any] = {
+        "stage_id": str(stage_id),
+        "path": str(path),
+        "exists": bool(path.is_file()),
+        "applied": False,
+        "record_count": 0,
+        "override_count": 0,
+        "nonempty_extra_count": 0,
+        "nonempty_extra_rate": None,
+        "overlap_extra_known_count": 0,
+        "source": "stage_responsibility_records",
+    }
+    if not path.is_file():
+        return {}, meta
+
+    overrides: Dict[str, Record] = {}
+    total = 0
+    nonempty = 0
+    overlap = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            total += 1
+            trajectory_id = str(row.get("trajectory_id", "")).strip()
+            if not trajectory_id:
+                continue
+            known = _unique_int_list(list(row.get("candidate_ids_known", []) or []))
+            known_set = {int(x) for x in known}
+            extra = [int(x) for x in _unique_int_list(list(row.get("candidate_ids_extra", []) or [])) if int(x) not in known_set]
+            if extra:
+                nonempty += 1
+            if known_set & {int(x) for x in extra}:
+                overlap += 1
+            override: Record = {
+                "trajectory_id": trajectory_id,
+                "candidate_ids_known": known,
+                "candidate_ids_extra": extra,
+                "candidate_proposal_source": "stage_responsibility_records_runtime_authoritative",
+                "candidate_source": "stage_responsibility_records_runtime_authoritative",
+            }
+            if row.get("clip_id") is not None:
+                try:
+                    override["clip_id"] = int(row.get("clip_id"))
+                except Exception:
+                    pass
+            if row.get("video_id") is not None:
+                try:
+                    override["video_id"] = int(row.get("video_id"))
+                except Exception:
+                    pass
+            overrides[trajectory_id] = override
+
+    meta.update(
+        {
+            "record_count": int(total),
+            "override_count": int(len(overrides)),
+            "nonempty_extra_count": int(nonempty),
+            "nonempty_extra_rate": float(nonempty / total) if total else None,
+            "overlap_extra_known_count": int(overlap),
+        }
+    )
+    return overrides, meta
+
+
+def _apply_stage_candidate_overrides(
+    examples: Sequence[Mapping[str, Any]],
+    overrides: Mapping[str, Mapping[str, Any]],
+    *,
+    stage_id: str,
+) -> Tuple[List[Record], Dict[str, Any]]:
+    """Apply stage-authoritative candidates and scope to responsibility rows.
+
+    When responsibility_records exist, they define the actual stage scope. This
+    prevents smoke checkpoints from being analyzed against the full phase-1
+    materialization and ensures candidate_ids_extra are the runtime values
+    actually consumed by training.
+    """
+    meta: Dict[str, Any] = {
+        "stage_id": str(stage_id),
+        "applied": False,
+        "input_example_count": int(len(examples)),
+        "override_count": int(len(overrides)),
+        "matched_override_count": 0,
+        "missing_from_materialized_count": 0,
+        "effective_example_count": int(len(examples)),
+        "candidate_source": "phase1_materialization",
+    }
+    if not overrides:
+        return [dict(ex) for ex in examples], meta
+
+    by_tid = {str(ex.get("trajectory_id", "")).strip(): dict(ex) for ex in examples}
+    effective: List[Record] = []
+    missing = 0
+    for trajectory_id, override in overrides.items():
+        base = by_tid.get(str(trajectory_id))
+        if base is None:
+            missing += 1
+            continue
+        merged = dict(base)
+        merged["candidate_ids_known"] = _unique_int_list(list(override.get("candidate_ids_known", []) or []))
+        merged["candidate_ids_extra"] = _unique_int_list(list(override.get("candidate_ids_extra", []) or []))
+        merged["candidate_proposal_source"] = str(
+            override.get("candidate_proposal_source", "stage_responsibility_records_runtime_authoritative")
+        )
+        merged["candidate_source"] = str(override.get("candidate_source", merged.get("candidate_source", "")))
+        if override.get("clip_id") is not None:
+            try:
+                merged["clip_id"] = int(override.get("clip_id"))
+            except Exception:
+                pass
+        if override.get("video_id") is not None:
+            try:
+                merged["video_id"] = int(override.get("video_id"))
+            except Exception:
+                pass
+        effective.append(merged)
+
+    if not effective:
+        meta.update(
+            {
+                "missing_from_materialized_count": int(missing),
+                "effective_example_count": int(len(examples)),
+                "candidate_source": "phase1_materialization_fallback_no_override_match",
+            }
+        )
+        return [dict(ex) for ex in examples], meta
+
+    meta.update(
+        {
+            "applied": True,
+            "matched_override_count": int(len(effective)),
+            "missing_from_materialized_count": int(missing),
+            "effective_example_count": int(len(effective)),
+            "candidate_source": "stage_responsibility_records_runtime_authoritative",
+        }
+    )
+    return effective, meta
+
 def _default_checkpoint_path(run_root: Path, stage_id: str) -> Path:
     if stage_id == "prealign":
         return run_root / "train" / "prealign" / "checkpoints" / "prealign_last.pth"
@@ -611,12 +785,21 @@ def _run_stage_probe(
             "extra_applicable": bool(stage_id in EXTRA_APPLICABLE_STAGES),
         }
         return payload
+    stage_candidate_overrides, stage_candidate_override_meta = _load_stage_responsibility_candidate_overrides(
+        run_root=Path(config.run_root).expanduser().resolve(),
+        stage_id=str(stage_id),
+    )
+    effective_examples, stage_candidate_scope_meta = _apply_stage_candidate_overrides(
+        examples,
+        stage_candidate_overrides,
+        stage_id=str(stage_id),
+    )
     device = torch.device(str(config.device))
     projector, theta_t, unknown_prototype, checkpoint_payload = _load_reservoir_checkpoint(checkpoint_path, device=device)
     projector.eval()
     temperature = _compute_t_dis(theta_t).detach()
     logits_vocab, logits_unknown = _score_batches(
-        examples=examples,
+        examples=effective_examples,
         projector=projector,
         text_vocab_matrix=np.asarray(text_vocab_matrix, dtype=np.float32),
         unknown_prototype=unknown_prototype,
@@ -628,7 +811,7 @@ def _run_stage_probe(
     )
     rows = _build_row_metrics(
         stage_id=str(stage_id),
-        examples=examples,
+        examples=effective_examples,
         logits_vocab=logits_vocab,
         logits_unknown=logits_unknown,
         text_vocab_ids=text_vocab_ids,
@@ -654,6 +837,10 @@ def _run_stage_probe(
         "text_vocab_size": int(len(text_vocab_ids)),
         "temperature": float(temperature.detach().cpu().item()),
         "extra_applicable": bool(stage_id in EXTRA_APPLICABLE_STAGES),
+        "candidate_authority": {
+            "responsibility_overrides": dict(stage_candidate_override_meta),
+            "effective_scope": dict(stage_candidate_scope_meta),
+        },
         "summary": summary,
         "failure_buckets": failure_buckets,
         "checkpoint_payload_meta": {

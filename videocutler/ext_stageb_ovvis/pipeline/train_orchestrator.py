@@ -279,7 +279,7 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                         aug_epochs=(1 if plan.smoke else 5) if plan.aug_epochs is None else plan.aug_epochs,
                         base_learning_rate=(5e-5 if plan.base_learning_rate is None else plan.base_learning_rate),
                         aug_learning_rate=(5e-5 if plan.aug_learning_rate is None else plan.aug_learning_rate),
-                        k_extra=int(getattr(plan, 'k_extra', 2)), extra_alpha=float(getattr(plan, 'extra_alpha', 0.25)),
+                        k_extra=int(getattr(plan, 'k_extra', 2)), extra_alpha=float(getattr(plan, 'extra_alpha', 0.25)), extra_selection_mode=str(getattr(plan, 'extra_selection_mode', 'trajectory_epoch_topk_nonYprime')), clip_extra_obs_sim_max=float(getattr(plan, 'clip_extra_obs_sim_max', 0.90)), clip_extra_allow_empty=bool(getattr(plan, 'clip_extra_allow_empty', True)),
                         em_subiterations=max(0, int(getattr(plan, 'em_subiterations', 2))),
                         base_em_refresh_policy=str(getattr(plan, 'base_em_refresh_policy', 'stage_once')),
                         unknown_mode=str(getattr(plan, 'unknown_mode', 'prototype')),
