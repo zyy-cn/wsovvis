@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import build_stage_domain_indices, refine_responsibilities, score_carrier_logits_torch
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import build_stage_domain_indices, load_text_vocab, refine_responsibilities, score_carrier_logits_torch
 from videocutler.ext_stageb_ovvis.algorithms._training_budget import build_dynamic_microbatches, resolve_default_batch_budget
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import (
     UNKNOWN_INIT_MODE_CHOICES,
@@ -48,6 +48,142 @@ def _write_jsonl(path: Path, rows: Sequence[Record]) -> None:
     with path.open('w', encoding='utf-8') as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + '\n')
+
+
+def _project_text_vocab_for_epoch_extra(*, projector: Projector, vocab_matrix: np.ndarray, device: torch.device) -> torch.Tensor:
+    vocab_np = np.asarray(vocab_matrix, dtype=np.float32)
+    if vocab_np.ndim != 2:
+        raise ValueError('text vocab matrix must be rank-2')
+    vocab_tensor = torch.from_numpy(vocab_np).to(device=device, dtype=torch.float32)
+    input_dim = int(getattr(getattr(projector, 'config', None), 'input_dim', vocab_tensor.shape[-1]))
+    output_dim = int(getattr(getattr(projector, 'config', None), 'output_dim', vocab_tensor.shape[-1]))
+    if int(vocab_tensor.shape[-1]) == input_dim:
+        vocab_tensor = projector(vocab_tensor)
+    elif int(vocab_tensor.shape[-1]) == output_dim:
+        vocab_tensor = F.normalize(vocab_tensor, p=2.0, dim=-1)
+    else:
+        raise ValueError(
+            f'text vocab width {int(vocab_tensor.shape[-1])} does not match projector input/output dims '
+            f'({input_dim}, {output_dim})'
+        )
+    return F.normalize(vocab_tensor, p=2.0, dim=-1)
+
+
+def _extra_summary_from_examples(*, stage_examples_by_tid: Mapping[str, Mapping[str, Any]], k_extra: int, extra_alpha: float, selection_mode: str, clip_cache_count: int = 0, snapshot_id: str = '') -> Dict[str, Any]:
+    example_count = int(len(stage_examples_by_tid))
+    extra_tuples: List[Tuple[int, ...]] = []
+    extra_ids: List[int] = []
+    clip_to_tuples: Dict[int, set[Tuple[int, ...]]] = {}
+    for ex in stage_examples_by_tid.values():
+        extra = tuple(int(x) for x in list(ex.get('candidate_ids_extra', [])))
+        if extra:
+            extra_tuples.append(extra)
+            extra_ids.extend(list(extra))
+        clip_to_tuples.setdefault(int(ex.get('clip_id', -1)), set()).add(extra)
+    clip_unique_hist: Dict[str, int] = {}
+    for tuples in clip_to_tuples.values():
+        key = str(int(len(tuples)))
+        clip_unique_hist[key] = int(clip_unique_hist.get(key, 0) + 1)
+    example_with_nonempty_extra_count = int(sum(1 for ex in stage_examples_by_tid.values() if list(ex.get('candidate_ids_extra', []))))
+    summary = {
+        'selection_mode': str(selection_mode),
+        'clip_cache_count': int(clip_cache_count),
+        'example_count': example_count,
+        'example_with_nonempty_extra_count': example_with_nonempty_extra_count,
+        'example_with_nonempty_extra_rate': float(example_with_nonempty_extra_count / max(example_count, 1)),
+        'k_extra': int(k_extra),
+        'extra_alpha': float(extra_alpha),
+        'unique_extra_ids_count': int(len(set(extra_ids))),
+        'unique_extra_tuples_count': int(len(set(extra_tuples))),
+        'clip_unique_extra_tuple_histogram': dict(sorted(clip_unique_hist.items(), key=lambda kv: int(kv[0]))),
+    }
+    if snapshot_id:
+        summary['snapshot_id'] = str(snapshot_id)
+    return summary
+
+
+def _build_trajectory_epoch_topk_non_yprime_state(*, base_examples: Sequence[Mapping[str, Any]], text_projector: Projector, theta_t: torch.nn.Parameter, output_root: Path, k_extra: int, extra_alpha: float, device: torch.device, snapshot_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Build one fixed per-trajectory extra snapshot for an aug epoch.
+
+    This is intentionally epoch-wise, not iteration-wise: the returned examples are
+    fixed for the whole following epoch.  Each trajectory gets exactly top-k raw IDs
+    from the full text vocabulary after masking its observed/Y' raw IDs.
+    """
+    raw_ids, text_records, vocab_matrix = load_text_vocab(output_root)
+    raw_id_list = [int(x) for x in raw_ids]
+    raw_to_col = {int(raw_id): int(idx) for idx, raw_id in enumerate(raw_id_list)}
+    records_by_raw = {int(record['raw_id']): dict(record) for record in text_records}
+    matrix_by_raw = {int(raw_id): np.asarray(vocab_matrix[int(idx)], dtype=np.float32) for idx, raw_id in enumerate(raw_id_list)}
+    k = min(max(int(k_extra), 1), max(len(raw_id_list) - 1, 1))
+    was_training = bool(text_projector.training)
+    text_projector.eval()
+    stage_examples: List[Dict[str, Any]] = []
+    snapshot_rows: List[Record] = []
+    try:
+        with torch.no_grad():
+            vocab_projected = _project_text_vocab_for_epoch_extra(projector=text_projector, vocab_matrix=vocab_matrix, device=device)
+            temperature = _compute_t_dis(theta_t)
+            batch_size = 2048
+            for start in range(0, len(base_examples), batch_size):
+                batch_examples = list(base_examples[start:start + batch_size])
+                carriers = np.stack([_normalize_np(np.asarray(ex['carrier_vec'], dtype=np.float32)) for ex in batch_examples], axis=0).astype(np.float32)
+                carrier_tensor = torch.from_numpy(carriers).to(device=device, dtype=torch.float32)
+                carrier_tensor = F.normalize(carrier_tensor, p=2.0, dim=-1)
+                logits = torch.matmul(carrier_tensor, vocab_projected.t()) / temperature
+                mask = torch.zeros_like(logits, dtype=torch.bool)
+                for row_idx, ex in enumerate(batch_examples):
+                    for raw_id in list(ex.get('candidate_ids_known', [])):
+                        col = raw_to_col.get(int(raw_id))
+                        if col is not None:
+                            mask[int(row_idx), int(col)] = True
+                logits = logits.masked_fill(mask, float('-inf'))
+                top_cols = torch.topk(logits, k=int(k), dim=-1).indices.detach().cpu().numpy().astype(np.int64)
+                for row_idx, ex in enumerate(batch_examples):
+                    known_count = int(len(list(ex.get('candidate_ids_known', []))))
+                    chosen: List[int] = []
+                    for col in top_cols[int(row_idx)].tolist():
+                        raw_id = int(raw_id_list[int(col)])
+                        if raw_id in {int(x) for x in list(ex.get('candidate_ids_known', []))}:
+                            continue
+                        if raw_id not in chosen:
+                            chosen.append(raw_id)
+                        if len(chosen) >= int(k_extra):
+                            break
+                    if len(chosen) < int(k_extra):
+                        for raw_id in raw_id_list:
+                            if raw_id in {int(x) for x in list(ex.get('candidate_ids_known', []))} or raw_id in chosen:
+                                continue
+                            chosen.append(int(raw_id))
+                            if len(chosen) >= int(k_extra):
+                                break
+                    chosen = chosen[:int(k_extra)]
+                    known_matrix = np.asarray(ex['candidate_matrix'], dtype=np.float32)[:known_count]
+                    extra_matrix = np.stack([matrix_by_raw[int(raw_id)] for raw_id in chosen], axis=0).astype(np.float32) if chosen else np.zeros((0, int(known_matrix.shape[-1])), dtype=np.float32)
+                    candidate_matrix = np.concatenate([known_matrix, extra_matrix], axis=0).astype(np.float32)
+                    candidate_records = list(ex.get('candidate_records', []))[:known_count] + [records_by_raw[int(raw_id)] for raw_id in chosen]
+                    new_ex = dict(ex)
+                    new_ex['candidate_ids_extra'] = [int(x) for x in chosen]
+                    new_ex['candidate_matrix'] = candidate_matrix
+                    new_ex['candidate_records'] = candidate_records
+                    stage_examples.append(new_ex)
+                    snapshot_rows.append({
+                        'dataset_name': str(new_ex.get('dataset_name', 'lvvis_train_base')),
+                        'clip_id': int(new_ex.get('clip_id', -1)),
+                        'video_id': int(new_ex.get('video_id', -1)),
+                        'trajectory_id': str(new_ex.get('trajectory_id', '')),
+                        'candidate_ids_known': [int(x) for x in list(new_ex.get('candidate_ids_known', []))],
+                        'candidate_ids_extra': [int(x) for x in chosen],
+                        'selection_mode': 'trajectory_epoch_topk_nonYprime',
+                        'snapshot_id': str(snapshot_id),
+                    })
+    finally:
+        text_projector.train(was_training)
+    stage_examples_by_tid = {str(ex['trajectory_id']): dict(ex) for ex in stage_examples}
+    summary = _extra_summary_from_examples(stage_examples_by_tid=stage_examples_by_tid, k_extra=int(k_extra), extra_alpha=float(extra_alpha), selection_mode='trajectory_epoch_topk_nonYprime', clip_cache_count=0, snapshot_id=str(snapshot_id))
+    snapshot_dir = output_root / 'train' / 'softem_aug' / 'extra_snapshots'
+    _write_jsonl(snapshot_dir / f'{snapshot_id}.jsonl', snapshot_rows)
+    _write_json(snapshot_dir / f'{snapshot_id}_summary.json', summary)
+    return stage_examples, {'__summary__': summary, '__snapshot_id__': str(snapshot_id)}
 
 
 @dataclass(frozen=True)
@@ -255,12 +391,20 @@ def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: s
     return rows, sample_trace
 
 
-def _refresh_stage_runtime_state_unknown(*, stage_id: str, unknown_init_mode: str, base_examples: Sequence[Mapping[str, Any]], base_cache: ResponsibilityCache, text_projector: Projector, theta_t: torch.nn.Parameter, unknown_prototype: torch.nn.Parameter, output_root: Path, k_extra: int, extra_alpha: float, lambda_frame: float, lambda_cov: float, em_subiterations: int, device: torch.device) -> Tuple[Dict[str, Dict[str, Any]], ResponsibilityCache, Dict[int, Dict[str, Any]], List[Dict[str, Any]]]:
-    runtime_extra_cache: Dict[int, Dict[str, Any]] = {}
+def _refresh_stage_runtime_state_unknown(*, stage_id: str, unknown_init_mode: str, base_examples: Sequence[Mapping[str, Any]], base_cache: ResponsibilityCache, text_projector: Projector, theta_t: torch.nn.Parameter, unknown_prototype: torch.nn.Parameter, output_root: Path, k_extra: int, extra_alpha: float, lambda_frame: float, lambda_cov: float, em_subiterations: int, device: torch.device, snapshot_id: str = 'stage_start') -> Tuple[Dict[str, Dict[str, Any]], ResponsibilityCache, Dict[str, Any], List[Dict[str, Any]]]:
+    runtime_extra_cache: Dict[str, Any] = {}
     stage_examples = list(base_examples)
     if str(stage_id) == 'softem_aug':
-        runtime_extra_cache = _build_runtime_extra_cache(examples=base_examples, text_projector=text_projector, theta_t=theta_t, output_root=output_root, k_extra=int(k_extra), alpha=float(extra_alpha), lambda_frame=float(lambda_frame), device=device)
-        stage_examples = _apply_runtime_extra_cache(base_examples, runtime_extra_cache=runtime_extra_cache, output_root=output_root)
+        stage_examples, runtime_extra_cache = _build_trajectory_epoch_topk_non_yprime_state(
+            base_examples=base_examples,
+            text_projector=text_projector,
+            theta_t=theta_t,
+            output_root=output_root,
+            k_extra=int(k_extra),
+            extra_alpha=float(extra_alpha),
+            device=device,
+            snapshot_id=str(snapshot_id),
+        )
 
     stage_examples_by_clip: Dict[int, List[Dict[str, Any]]] = {}
     stage_examples_by_tid: Dict[str, Dict[str, Any]] = {}
@@ -279,17 +423,17 @@ def _refresh_stage_runtime_state_unknown(*, stage_id: str, unknown_init_mode: st
     return stage_examples_by_tid, refreshed_cache, runtime_extra_cache, stage_trace_sample
 
 
-def _runtime_extra_cache_metrics(stage_examples_by_tid: Mapping[str, Mapping[str, Any]], runtime_extra_cache: Mapping[int, Mapping[str, Any]], *, k_extra: int, extra_alpha: float) -> Dict[str, Any]:
-    example_count = int(len(stage_examples_by_tid))
-    example_with_nonempty_extra_count = int(sum(1 for ex in stage_examples_by_tid.values() if list(ex.get('candidate_ids_extra', []))))
-    return {
-        'clip_cache_count': int(len(runtime_extra_cache)),
-        'example_count': example_count,
-        'example_with_nonempty_extra_count': example_with_nonempty_extra_count,
-        'example_with_nonempty_extra_rate': float(example_with_nonempty_extra_count / max(example_count, 1)),
-        'k_extra': int(k_extra),
-        'extra_alpha': float(extra_alpha),
-    }
+def _runtime_extra_cache_metrics(stage_examples_by_tid: Mapping[str, Mapping[str, Any]], runtime_extra_cache: Mapping[Any, Mapping[str, Any]], *, k_extra: int, extra_alpha: float) -> Dict[str, Any]:
+    payload_summary = None
+    if isinstance(runtime_extra_cache, Mapping):
+        maybe_summary = runtime_extra_cache.get('__summary__')  # type: ignore[arg-type]
+        if isinstance(maybe_summary, Mapping):
+            payload_summary = dict(maybe_summary)
+    if payload_summary is not None:
+        payload_summary['k_extra'] = int(k_extra)
+        payload_summary['extra_alpha'] = float(extra_alpha)
+        return payload_summary
+    return _extra_summary_from_examples(stage_examples_by_tid=stage_examples_by_tid, k_extra=int(k_extra), extra_alpha=float(extra_alpha), selection_mode='legacy_static_or_empty', clip_cache_count=0)
 
 
 def _stage_cfg_with_skip(config: LegacySCTABackendConfig) -> List[SoftEMStageConfig]:
@@ -338,7 +482,7 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         refresh_interval = max(int(refresh_interval), 1)
         stage_trace_sample: List[Dict[str, Any]] = []
 
-        active_examples_by_tid, cache, runtime_extra_cache, stage_trace_sample = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(1, int(config.em_subiterations)), device=device)
+        active_examples_by_tid, cache, runtime_extra_cache, stage_trace_sample = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(1, int(config.em_subiterations)), device=device, snapshot_id='epoch_000' if str(stage.stage_id) == 'softem_aug' else 'stage_start')
 
         if audit_callback is not None:
             audit_callback({'dataset_name': str(config.dataset_name), 'trajectory_source_branch': str(config.trajectory_source_branch), 'stage_id': str(stage.stage_id), 'snapshot_id': 'stage_start', 'phase': 'stage_start', 'output_root': output_root, 'materialized_samples': materialized_samples, 'text_projector': text_projector, 'projector': text_projector, 'theta_T': theta_t, 'unknown_prototype': unknown_prototype, 'device': str(device), 'temperature': float(_compute_t_dis(theta_t).detach().cpu().item()), 'seed': int(config.seed), 'mode': str(config.mode)})
@@ -429,11 +573,6 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                         if stage.stage_id == 'softem_aug':
                             metric_row['extra_mean_responsibility'] = float(np.mean(sample_extra_responsibilities))
                         _append_jsonl(runtime_metrics_path, metric_row)
-                    if since_refresh >= current_refresh_interval:
-                        active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(1, int(config.em_subiterations)), device=device)
-                        if not stage_trace_sample:
-                            stage_trace_sample = refreshed_trace
-                        since_refresh = 0
             epoch_summary = {'stage': str(stage.stage_id), 'epoch': int(epoch_index) + 1, 'microbatch_count': int(len(epoch_batch_losses)), 'loss_mean': float(np.mean(epoch_losses)) if epoch_losses else 0.0, 'loss_last': float(epoch_losses[-1]) if epoch_losses else 0.0, 'optimization_loss_mean': float(np.mean(epoch_batch_losses)) if epoch_batch_losses else 0.0, 'optimization_loss_last': float(epoch_batch_losses[-1]) if epoch_batch_losses else 0.0, 'effective_responsibility_unit_count_total': int(np.sum(epoch_effective_counts)) if epoch_effective_counts else 0, 'effective_responsibility_unit_count_mean': float(np.mean(epoch_effective_counts)) if epoch_effective_counts else 0.0, 'unknown_mean_responsibility_epoch': float(np.mean(epoch_unknown_responsibilities)) if epoch_unknown_responsibilities else 0.0, 'observed_mean_responsibility_epoch': float(np.mean(epoch_observed_responsibilities)) if epoch_observed_responsibilities else 0.0, 'responsibility_entropy_epoch': float(np.mean(epoch_entropies)) if epoch_entropies else 0.0}
             if str(stage.stage_id) == 'softem_aug':
                 epoch_summary['extra_mean_responsibility_epoch'] = float(np.mean(epoch_extra_responsibilities)) if epoch_extra_responsibilities else 0.0
@@ -453,6 +592,13 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                 _append_jsonl(runtime_metrics_path, {'row_type': 'epoch_summary', 'timestamp': datetime.now(timezone.utc).isoformat(), **epoch_summary})
             if audit_callback is not None:
                 audit_callback({'dataset_name': str(config.dataset_name), 'trajectory_source_branch': str(config.trajectory_source_branch), 'stage_id': str(stage.stage_id), 'snapshot_id': f'epoch_{int(epoch_index) + 1:03d}', 'phase': 'epoch_end', 'output_root': output_root, 'materialized_samples': materialized_samples, 'text_projector': text_projector, 'projector': text_projector, 'theta_T': theta_t, 'unknown_prototype': unknown_prototype, 'device': str(device), 'temperature': float(_compute_t_dis(theta_t).detach().cpu().item()), 'seed': int(config.seed), 'mode': str(config.mode)})
+            if str(stage.stage_id) == 'softem_aug' and int(epoch_index) + 1 < int(stage.epochs):
+                next_snapshot_id = f'epoch_{int(epoch_index) + 1:03d}'
+                active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(1, int(config.em_subiterations)), device=device, snapshot_id=next_snapshot_id)
+                if not stage_trace_sample:
+                    stage_trace_sample = refreshed_trace
+                if bool(config.write_runtime_metrics_jsonl):
+                    _append_jsonl(runtime_metrics_path, {'row_type': 'runtime_extra_cache_summary', 'timestamp': datetime.now(timezone.utc).isoformat(), 'stage': str(stage.stage_id), 'phase': 'epoch_refresh', **_runtime_extra_cache_metrics(active_examples_by_tid, runtime_extra_cache, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha))})
         stage_dir = output_root / 'train' / stage.stage_id
         ckpt_dir = stage_dir / 'checkpoints'
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -476,7 +622,7 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         if str(stage.stage_id) == 'softem_aug':
             stage_summary['runtime_extra_cache_metrics'] = _runtime_extra_cache_metrics(active_examples_by_tid, runtime_extra_cache, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha))
         _write_json(stage_dir / 'stage_summary.json', stage_summary)
-        stage_reports.append({'stage_id': str(stage.stage_id), 'responsibility_records_path': str(stage.responsibility_relpath), 'train_state_path': str(stage.train_state_relpath), 'checkpoint_last_path': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'record_count_output': int(len(rows)), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'batch_budget': int(batch_budget), 'loss_normalization': 'effective_responsibility_unit_count', 'stage_summary_relpath': str((Path('train') / stage.stage_id / 'stage_summary.json').as_posix()), 'stage_summary_payload': dict(stage_summary)})
+        stage_reports.append({'stage_id': str(stage.stage_id), 'responsibility_records_path': str(stage.responsibility_relpath), 'train_state_path': str(stage.train_state_relpath), 'checkpoint_last_path': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'record_count_output': int(len(rows)), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'batch_budget': int(batch_budget), 'loss_normalization': 'effective_responsibility_unit_count'})
         current_checkpoint = checkpoint_path
         current_unknown_metrics = dict(stage_summary.get('unknown_metrics', {}))
         final_examples = [active_examples_by_tid[tid] for tid in active_examples_by_tid.keys()]

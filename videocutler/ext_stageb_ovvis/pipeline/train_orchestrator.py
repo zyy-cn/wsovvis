@@ -22,11 +22,10 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + '\n', encoding='utf-8')
 
 
-@contextmanager
 
 
 def _canonical_mirror_output_root(plan: TrainPlan) -> Path:
-    default_root = plan.repo_root / 'codex' / 'outputs' / 'G8_inference_and_eval' / str(plan.exp_name)
+    default_root = Path(plan.repo_root) / 'codex' / 'outputs' / 'G8_inference_and_eval' / str(plan.exp_name)
     try:
         return default_root.resolve()
     except Exception:
@@ -77,6 +76,9 @@ def _ensure_train_writeback(plan: TrainPlan, summary: Dict[str, Any], *, pre: Di
         out_path = root / 'train' / 'pipeline_train_summary.json'
         _write_json(out_path, summary)
     return roots[0] / 'train' / 'pipeline_train_summary.json'
+
+
+@contextmanager
 def _pushd(path: Path):
     old = Path.cwd()
     os.chdir(path)
@@ -188,8 +190,6 @@ def _run_post_train_minimal_split_audit(plan: TrainPlan) -> Dict[str, Any]:
 
 
 def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
-    for root in _iter_writeback_roots(plan):
-        (root / 'train').mkdir(parents=True, exist_ok=True)
     materialized = _materialize(plan)
     summary = {
         'exp_name': plan.exp_name,
