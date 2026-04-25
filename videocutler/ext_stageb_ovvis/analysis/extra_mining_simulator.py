@@ -272,6 +272,43 @@ def _trajectory_id_from_formal_record(record: Mapping[str, Any]) -> Optional[str
     return None
 
 
+def _gt_raw_id_from_formal_record(record: Mapping[str, Any]) -> Optional[int]:
+    for key in (
+        "gt_raw_id",
+        "matched_gt_raw_id_canonical",
+        "canonical_gt_raw_id",
+        "gt_class_raw_id",
+        "gt_class_id",
+        "raw_gt_id",
+    ):
+        value = record.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            return int(value)
+        except Exception:
+            continue
+    for parent_key in ("gt", "formal_gt", "matched_gt", "sidecar", "diagnostics"):
+        nested = record.get(parent_key)
+        if isinstance(nested, Mapping):
+            nested_value = _gt_raw_id_from_formal_record(nested)
+            if nested_value is not None:
+                return int(nested_value)
+    return None
+
+
+def _int_from_record(record: Mapping[str, Any], keys: Sequence[str], default: int = -1) -> int:
+    for key in keys:
+        value = record.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            return int(value)
+        except Exception:
+            continue
+    return int(default)
+
+
 def _record_matches_formal_split(record: Mapping[str, Any], formal_split: str) -> bool:
     for key in ("split", "split_name", "formal_split", "minimal_split", "subset"):
         value = record.get(key)
@@ -352,6 +389,85 @@ def _apply_formal_authority_row_filter(
             f"but {len(missing_ids)} are missing from simulator rows; examples={missing_ids[:10]}"
         )
     return filtered, meta
+
+def _rows_from_formal_authority_records(
+    *,
+    authority_records: Sequence[Mapping[str, Any]],
+    examples_by_tid: Mapping[str, Mapping[str, Any]],
+    existing_examples_by_tid: Mapping[str, Mapping[str, Any]],
+    text_vocab_ids: Sequence[int],
+    formal_split: str,
+) -> Tuple[List[Record], Dict[str, Any]]:
+    vocab_set = {int(x) for x in text_vocab_ids}
+    rows: List[Record] = []
+    missing_example_ids: List[str] = []
+    missing_gt_ids: List[str] = []
+    gt_not_in_vocab: List[str] = []
+    seen: set[str] = set()
+    for rec in authority_records:
+        if not _record_matches_formal_split(rec, str(formal_split)):
+            continue
+        tid = _trajectory_id_from_formal_record(rec)
+        if tid is None or tid in seen:
+            continue
+        seen.add(tid)
+        ex = examples_by_tid.get(tid)
+        if ex is None:
+            missing_example_ids.append(tid)
+            continue
+        gt_raw_id = _gt_raw_id_from_formal_record(rec)
+        if gt_raw_id is None:
+            missing_gt_ids.append(tid)
+            continue
+        if int(gt_raw_id) not in vocab_set:
+            gt_not_in_vocab.append(tid)
+            continue
+        existing = dict(existing_examples_by_tid.get(tid, {}))
+        existing_extra = _unique_int_list(existing.get("candidate_ids_extra", []))
+        existing_known = _unique_int_list(existing.get("candidate_ids_known", ex.get("candidate_ids_known", [])))
+        observed_raw_ids = _unique_int_list(ex.get("observed_raw_ids", []))
+        clip_id = _int_from_record(ex, ("clip_id",), default=_int_from_record(rec, ("clip_id",), default=-1))
+        video_id = _int_from_record(ex, ("video_id",), default=_int_from_record(rec, ("video_id",), default=-1))
+        rows.append(
+            {
+                "trajectory_id": tid,
+                "clip_id": int(clip_id),
+                "video_id": int(video_id),
+                "gt_raw_id": int(gt_raw_id),
+                "observed_raw_ids": observed_raw_ids,
+                "candidate_ids_known": _unique_int_list(ex.get("candidate_ids_known", [])),
+                "existing_candidate_ids_known": existing_known,
+                "existing_candidate_ids_extra": [int(x) for x in existing_extra if int(x) not in {int(y) for y in existing_known}],
+                "carrier_vec": np.asarray(ex.get("carrier_vec"), dtype=np.float32),
+            }
+        )
+    meta = {
+        "status": "PASS",
+        "authority_record_count": int(len(authority_records)),
+        "authority_id_count": int(len(seen)),
+        "filtered_row_count": int(len(rows)),
+        "missing_example_count": int(len(missing_example_ids)),
+        "missing_example_examples": missing_example_ids[:20],
+        "missing_gt_count": int(len(missing_gt_ids)),
+        "missing_gt_examples": missing_gt_ids[:20],
+        "gt_not_in_vocab_count": int(len(gt_not_in_vocab)),
+        "gt_not_in_vocab_examples": gt_not_in_vocab[:20],
+        "source": "formal_authority_row_diagnostics",
+    }
+    if missing_example_ids:
+        meta["status"] = "MISSING_EXAMPLES"
+        raise RuntimeError(
+            "formal row authority ids were found, but some ids are missing from materialized examples; "
+            f"missing={len(missing_example_ids)} examples={missing_example_ids[:10]}"
+        )
+    if missing_gt_ids:
+        meta["status"] = "MISSING_GT_RAW_ID"
+        raise RuntimeError(
+            "formal row authority records are missing usable gt_raw_id fields; "
+            f"missing={len(missing_gt_ids)} examples={missing_gt_ids[:10]}"
+        )
+    return rows, meta
+
 
 def _unique_int_list(values: Sequence[Any]) -> List[int]:
     seen: set[int] = set()
@@ -718,20 +834,34 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
     existing_examples, existing_meta = _apply_existing_stage_extras(examples=examples, run_root=run_root, stage_id=str(config.stage_id), imports=imports)
     existing_by_tid = {str(ex.get("trajectory_id", "")): dict(ex) for ex in existing_examples}
     text_vocab_ids, text_records, text_vocab_matrix = imports["load_text_vocab"](runtime_output_root)
-    sidecar_root = Path(config.sidecar_root).expanduser().resolve() if config.sidecar_root else run_root
-    sidecar_lookup = imports["load_gt_sidecar_lookup"](sidecar_root, dataset_name=str(config.dataset_name), trajectory_source_branch=str(config.trajectory_source_branch))
-    rows = _formal_rows(
-        examples=examples,
-        existing_examples_by_tid=existing_by_tid,
-        text_vocab_ids=text_vocab_ids,
-        sidecar_lookup=sidecar_lookup,
-        dataset_name=str(config.dataset_name),
-        formal_split=str(config.formal_split),
-        imports=imports,
-    )
-    if not rows:
-        raise RuntimeError("no formal rows available for simulator")
-    rows, formal_row_authority_meta = _apply_formal_authority_row_filter(rows=rows, config=config)
+    formal_authority_path = _discover_formal_row_diagnostics_path(config)
+    if formal_authority_path is not None and formal_authority_path.exists():
+        authority_records = _read_jsonl_records(formal_authority_path)
+        examples_by_tid = {str(ex.get("trajectory_id", "")): dict(ex) for ex in examples if str(ex.get("trajectory_id", "")).strip()}
+        rows, formal_row_authority_meta = _rows_from_formal_authority_records(
+            authority_records=authority_records,
+            examples_by_tid=examples_by_tid,
+            existing_examples_by_tid=existing_by_tid,
+            text_vocab_ids=text_vocab_ids,
+            formal_split=str(config.formal_split),
+        )
+        formal_row_authority_meta["path"] = str(formal_authority_path)
+        formal_row_authority_meta["input_example_count"] = int(len(examples))
+    else:
+        sidecar_root = Path(config.sidecar_root).expanduser().resolve() if config.sidecar_root else run_root
+        sidecar_lookup = imports["load_gt_sidecar_lookup"](sidecar_root, dataset_name=str(config.dataset_name), trajectory_source_branch=str(config.trajectory_source_branch))
+        rows = _formal_rows(
+            examples=examples,
+            existing_examples_by_tid=existing_by_tid,
+            text_vocab_ids=text_vocab_ids,
+            sidecar_lookup=sidecar_lookup,
+            dataset_name=str(config.dataset_name),
+            formal_split=str(config.formal_split),
+            imports=imports,
+        )
+        if not rows:
+            raise RuntimeError("no formal rows available for simulator")
+        rows, formal_row_authority_meta = _apply_formal_authority_row_filter(rows=rows, config=config)
     if not rows:
         raise RuntimeError("formal row authority filtering produced no rows")
     existing = _existing_baseline(rows)
