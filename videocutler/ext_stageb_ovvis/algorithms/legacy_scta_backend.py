@@ -513,6 +513,8 @@ class LegacySCTABackendConfig:
     extra_activation_margin: float = 0.0
     extra_penalty_scale: float = 1.0
     extra_consensus_bonus_lambda: float = 0.0
+    extra_coverage_mode: str = 'observed_only'
+    extra_coverage_scale: float = 0.0
     extra_refresh_interval_iters: Optional[int] = None
     runtime_asset_source: str = 'local_canonical_assets'
     runtime_asset_source_local_incomplete: bool = False
@@ -681,6 +683,70 @@ def _build_clip_extra_consensus_bonus_context(
     return {key: float(lam * (value - mean_support)) for key, value in log_support.items()}
 
 
+
+
+def _build_clip_extra_coverage_context(
+    *,
+    current_masses_by_tid: Mapping[str, Mapping[str, float]],
+    clip_examples: Sequence[Mapping[str, Any]],
+    extra_ids_by_tid: Mapping[str, Sequence[int]],
+) -> Dict[str, float]:
+    """Return clip-level mass M_e for active extra classes only.
+
+    The computation uses only the current small-domain responsibilities and the
+    already-mined active extra ids. It does not rescore carriers against the
+    full vocabulary and is therefore GPU/throughput friendly.
+    """
+    extra_ids: List[int] = []
+    for ex in clip_examples:
+        tid = str(ex['trajectory_id'])
+        for raw_id in extra_ids_by_tid.get(tid, []):
+            raw = int(raw_id)
+            if raw not in extra_ids:
+                extra_ids.append(raw)
+    context: Dict[str, float] = {}
+    for raw_id in extra_ids:
+        key = str(int(raw_id))
+        total = 0.0
+        for ex in clip_examples:
+            tid = str(ex['trajectory_id'])
+            total += max(0.0, float(current_masses_by_tid.get(tid, {}).get(key, 0.0)))
+        context[key] = float(total)
+    return context
+
+
+def _extra_coverage_metrics_from_cache(cache: ResponsibilityCache, *, extra_coverage_mode: str, extra_coverage_scale: float) -> Dict[str, Any]:
+    """Compact diagnostics for unified extra-coverage contexts."""
+    values: List[float] = []
+    rows_with_context = 0
+    positive = 0
+    nonzero = 0
+    for row in cache.by_trajectory_id.values():
+        ctx = row.get('extra_coverage_context', {})
+        if not isinstance(ctx, Mapping) or not ctx:
+            continue
+        rows_with_context += 1
+        for value in ctx.values():
+            v = float(value)
+            values.append(v)
+            if abs(v) > 1e-12:
+                nonzero += 1
+            if v > 0.0:
+                positive += 1
+    arr = np.asarray(values, dtype=np.float32) if values else np.zeros((0,), dtype=np.float32)
+    return {
+        'extra_coverage_mode': str(extra_coverage_mode),
+        'extra_coverage_scale': float(extra_coverage_scale),
+        'extra_coverage_enabled': bool(str(extra_coverage_mode) == 'unified_with_yprime' and float(extra_coverage_scale) != 0.0),
+        'extra_coverage_context_row_count': int(rows_with_context),
+        'extra_coverage_context_value_count': int(arr.size),
+        'extra_coverage_context_mean': float(np.mean(arr)) if arr.size else 0.0,
+        'extra_coverage_context_p95': float(np.quantile(arr, 0.95)) if arr.size else 0.0,
+        'extra_coverage_context_positive_rate': float(positive / max(int(arr.size), 1)),
+        'extra_coverage_context_nonzero_rate': float(nonzero / max(int(arr.size), 1)),
+    }
+
+
 def _extra_consensus_metrics_from_cache(cache: ResponsibilityCache, *, extra_consensus_bonus_lambda: float) -> Dict[str, Any]:
     """Compact diagnostics for consensus bonuses stored in responsibility rows."""
     lam = float(extra_consensus_bonus_lambda)
@@ -712,7 +778,7 @@ def _extra_consensus_metrics_from_cache(cache: ResponsibilityCache, *, extra_con
         'extra_consensus_bonus_nonzero_rate': float(nonzero / max(int(arr.size), 1)),
     }
 
-def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: str, clip_examples: Sequence[Mapping[str, Any]], base_cache: ResponsibilityCache, text_projector: Projector, theta_t: torch.nn.Parameter, unknown_prototype: torch.nn.Parameter, b_u: torch.nn.Parameter, unknown_mode: str, em_subiterations: int, lambda_cov: float, extra_penalty_scale: float, extra_consensus_bonus_lambda: float, device: torch.device) -> Tuple[List[Record], List[Dict[str, Any]]]:
+def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: str, clip_examples: Sequence[Mapping[str, Any]], base_cache: ResponsibilityCache, text_projector: Projector, theta_t: torch.nn.Parameter, unknown_prototype: torch.nn.Parameter, b_u: torch.nn.Parameter, unknown_mode: str, em_subiterations: int, lambda_cov: float, extra_penalty_scale: float, extra_consensus_bonus_lambda: float, extra_coverage_mode: str, extra_coverage_scale: float, device: torch.device) -> Tuple[List[Record], List[Dict[str, Any]]]:
     t_dis = _compute_t_dis(theta_t)
     per_tid_model_logits: Dict[str, np.ndarray] = {}
     per_tid_domain_ids: Dict[str, List[int]] = {}
@@ -749,6 +815,15 @@ def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: s
             extra_ids_by_tid=per_tid_extra_ids,
             extra_consensus_bonus_lambda=float(extra_consensus_bonus_lambda) if str(stage_id) == 'softem_aug' else 0.0,
         )
+        extra_coverage_context = _build_clip_extra_coverage_context(
+            current_masses_by_tid=current_masses_by_tid,
+            clip_examples=clip_examples,
+            extra_ids_by_tid=per_tid_extra_ids,
+        ) if (str(stage_id) == 'softem_aug' and str(extra_coverage_mode) == 'unified_with_yprime' and float(extra_coverage_scale) != 0.0) else {}
+        extra_coverage_bonus_context = {
+            str(key): float(0.1 * float(lambda_cov) * float(extra_coverage_scale) * math.log(1.0 + max(0.0, float(value))))
+            for key, value in extra_coverage_context.items()
+        }
         for ex in clip_examples:
             tid = str(ex['trajectory_id'])
             coverage_context = _build_clip_coverage_context(current_masses_by_tid=current_masses_by_tid, clip_examples=clip_examples, known_ids=per_tid_known_ids[tid])
@@ -758,6 +833,11 @@ def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: s
                     key = str(int(raw_id))
                     if key in extra_consensus_context:
                         model_logits_for_refine[int(idx)] += float(extra_consensus_context[key])
+            if extra_coverage_bonus_context:
+                for idx, raw_id in enumerate(per_tid_domain_ids[tid]):
+                    key = str(int(raw_id))
+                    if key in extra_coverage_bonus_context:
+                        model_logits_for_refine[int(idx)] += float(extra_coverage_bonus_context[key])
             refined_init, refined_final, refine_trace = refine_responsibilities(
                 initial_mass=current_masses_by_tid[tid],
                 model_logits=model_logits_for_refine,
@@ -774,7 +854,12 @@ def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: s
             refine_trace['extra_consensus_bonus_lambda'] = float(extra_consensus_bonus_lambda) if str(stage_id) == 'softem_aug' else 0.0
             refine_trace['extra_consensus_bonus_context'] = {str(k): float(v) for k, v in extra_consensus_context.items()}
             refine_trace['extra_consensus_bonus_applied_to'] = sorted(int(k) for k in extra_consensus_context.keys())
-            trace_by_tid[tid].append({'subiteration_index': int(subiter_idx), 'r_init': dict(refined_init), 'r_final': dict(refined_final), 'coverage_context': dict(coverage_context), 'extra_consensus_bonus_context': {str(k): float(v) for k, v in extra_consensus_context.items()}, 'coverage_bonus_applied_to': list(refine_trace.get('coverage_bonus_applied_to', [])), 'refine_trace': dict(refine_trace)})
+            refine_trace['extra_coverage_mode'] = str(extra_coverage_mode) if str(stage_id) == 'softem_aug' else 'observed_only'
+            refine_trace['extra_coverage_scale'] = float(extra_coverage_scale) if str(stage_id) == 'softem_aug' else 0.0
+            refine_trace['extra_coverage_context'] = {str(k): float(v) for k, v in extra_coverage_context.items()}
+            refine_trace['extra_coverage_bonus_context'] = {str(k): float(v) for k, v in extra_coverage_bonus_context.items()}
+            refine_trace['extra_coverage_bonus_applied_to'] = sorted(int(k) for k in extra_coverage_bonus_context.keys())
+            trace_by_tid[tid].append({'subiteration_index': int(subiter_idx), 'r_init': dict(refined_init), 'r_final': dict(refined_final), 'coverage_context': dict(coverage_context), 'extra_consensus_bonus_context': {str(k): float(v) for k, v in extra_consensus_context.items()}, 'extra_coverage_context': {str(k): float(v) for k, v in extra_coverage_context.items()}, 'extra_coverage_bonus_context': {str(k): float(v) for k, v in extra_coverage_bonus_context.items()}, 'coverage_bonus_applied_to': list(refine_trace.get('coverage_bonus_applied_to', [])), 'extra_coverage_bonus_applied_to': list(refine_trace.get('extra_coverage_bonus_applied_to', [])), 'refine_trace': dict(refine_trace)})
             next_masses_by_tid[tid] = dict(refined_final)
         current_masses_by_tid = next_masses_by_tid
 
@@ -796,6 +881,10 @@ def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: s
             'extra_penalty_scale': float(extra_penalty_scale),
             'extra_consensus_bonus_lambda': float(extra_consensus_bonus_lambda) if str(stage_id) == 'softem_aug' else 0.0,
             'extra_consensus_bonus_context': dict(trace_by_tid[tid][-1].get('extra_consensus_bonus_context', {})) if trace_by_tid[tid] else {},
+            'extra_coverage_mode': str(extra_coverage_mode) if str(stage_id) == 'softem_aug' else 'observed_only',
+            'extra_coverage_scale': float(extra_coverage_scale) if str(stage_id) == 'softem_aug' else 0.0,
+            'extra_coverage_context': dict(trace_by_tid[tid][-1].get('extra_coverage_context', {})) if trace_by_tid[tid] else {},
+            'extra_coverage_bonus_context': dict(trace_by_tid[tid][-1].get('extra_coverage_bonus_context', {})) if trace_by_tid[tid] else {},
             'unknown_slot': 'unknown',
             'r_init': dict(initial_masses_by_tid[tid]),
             'r_final': dict(current_masses_by_tid[tid]),
@@ -810,7 +899,7 @@ def _compute_clip_refinement_rows_unknown(*, stage_id: str, unknown_init_mode: s
     return rows, sample_trace
 
 
-def _refresh_stage_runtime_state_unknown(*, stage_id: str, unknown_init_mode: str, base_examples: Sequence[Mapping[str, Any]], base_cache: ResponsibilityCache, text_projector: Projector, theta_t: torch.nn.Parameter, unknown_prototype: torch.nn.Parameter, b_u: torch.nn.Parameter, unknown_mode: str, output_root: Path, k_extra: int, extra_alpha: float, lambda_frame: float, lambda_cov: float, em_subiterations: int, device: torch.device, snapshot_id: str = 'stage_start', extra_selection_mode: str = 'trajectory_epoch_topk_nonYprime', clip_extra_obs_sim_max: float = 0.90, clip_extra_allow_empty: bool = True, extra_activation_mode: str = 'always', extra_activation_margin: float = 0.0, extra_penalty_scale: float = 1.0, extra_consensus_bonus_lambda: float = 0.0) -> Tuple[Dict[str, Dict[str, Any]], ResponsibilityCache, Dict[str, Any], List[Dict[str, Any]]]:
+def _refresh_stage_runtime_state_unknown(*, stage_id: str, unknown_init_mode: str, base_examples: Sequence[Mapping[str, Any]], base_cache: ResponsibilityCache, text_projector: Projector, theta_t: torch.nn.Parameter, unknown_prototype: torch.nn.Parameter, b_u: torch.nn.Parameter, unknown_mode: str, output_root: Path, k_extra: int, extra_alpha: float, lambda_frame: float, lambda_cov: float, em_subiterations: int, device: torch.device, snapshot_id: str = 'stage_start', extra_selection_mode: str = 'trajectory_epoch_topk_nonYprime', clip_extra_obs_sim_max: float = 0.90, clip_extra_allow_empty: bool = True, extra_activation_mode: str = 'always', extra_activation_margin: float = 0.0, extra_penalty_scale: float = 1.0, extra_consensus_bonus_lambda: float = 0.0, extra_coverage_mode: str = 'observed_only', extra_coverage_scale: float = 0.0) -> Tuple[Dict[str, Dict[str, Any]], ResponsibilityCache, Dict[str, Any], List[Dict[str, Any]]]:
     runtime_extra_cache: Dict[str, Any] = {}
     stage_examples = list(base_examples)
     if str(stage_id) == 'softem_aug':
@@ -857,7 +946,7 @@ def _refresh_stage_runtime_state_unknown(*, stage_id: str, unknown_init_mode: st
     refreshed_rows: List[Record] = []
     stage_trace_sample: List[Dict[str, Any]] = []
     for clip_id in sorted(stage_examples_by_clip.keys()):
-        rows, sample_trace = _compute_clip_refinement_rows_unknown(stage_id=stage_id, unknown_init_mode=str(unknown_init_mode), clip_examples=stage_examples_by_clip[int(clip_id)], base_cache=base_cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, b_u=b_u, unknown_mode=str(unknown_mode), em_subiterations=em_subiterations, lambda_cov=lambda_cov, extra_penalty_scale=float(extra_penalty_scale), extra_consensus_bonus_lambda=float(extra_consensus_bonus_lambda), device=device)
+        rows, sample_trace = _compute_clip_refinement_rows_unknown(stage_id=stage_id, unknown_init_mode=str(unknown_init_mode), clip_examples=stage_examples_by_clip[int(clip_id)], base_cache=base_cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, b_u=b_u, unknown_mode=str(unknown_mode), em_subiterations=em_subiterations, lambda_cov=lambda_cov, extra_penalty_scale=float(extra_penalty_scale), extra_consensus_bonus_lambda=float(extra_consensus_bonus_lambda), extra_coverage_mode=str(extra_coverage_mode), extra_coverage_scale=float(extra_coverage_scale), device=device)
         refreshed_rows.extend(rows)
         if not stage_trace_sample:
             stage_trace_sample = sample_trace
@@ -940,7 +1029,7 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         refresh_interval = max(int(refresh_interval), 1)
         stage_trace_sample: List[Dict[str, Any]] = []
 
-        active_examples_by_tid, cache, runtime_extra_cache, stage_trace_sample = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, b_u=b_u, unknown_mode=str(config.unknown_mode), output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(0, int(config.em_subiterations)), device=device, snapshot_id='epoch_000' if str(stage.stage_id) == 'softem_aug' else 'stage_start', extra_selection_mode=str(config.extra_selection_mode), clip_extra_obs_sim_max=float(config.clip_extra_obs_sim_max), clip_extra_allow_empty=bool(config.clip_extra_allow_empty), extra_activation_mode=str(config.extra_activation_mode), extra_activation_margin=float(config.extra_activation_margin), extra_penalty_scale=float(config.extra_penalty_scale), extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda))
+        active_examples_by_tid, cache, runtime_extra_cache, stage_trace_sample = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, b_u=b_u, unknown_mode=str(config.unknown_mode), output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(0, int(config.em_subiterations)), device=device, snapshot_id='epoch_000' if str(stage.stage_id) == 'softem_aug' else 'stage_start', extra_selection_mode=str(config.extra_selection_mode), clip_extra_obs_sim_max=float(config.clip_extra_obs_sim_max), clip_extra_allow_empty=bool(config.clip_extra_allow_empty), extra_activation_mode=str(config.extra_activation_mode), extra_activation_margin=float(config.extra_activation_margin), extra_penalty_scale=float(config.extra_penalty_scale), extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda), extra_coverage_mode=str(config.extra_coverage_mode), extra_coverage_scale=float(config.extra_coverage_scale))
         base_em_refresh_policy = str(getattr(config, 'base_em_refresh_policy', 'stage_once'))
         if base_em_refresh_policy not in {'stage_once', 'epoch_start'}:
             raise ValueError(f"base_em_refresh_policy must be 'stage_once' or 'epoch_start', got {base_em_refresh_policy!r}")
@@ -1061,7 +1150,7 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                 audit_callback({'dataset_name': str(config.dataset_name), 'trajectory_source_branch': str(config.trajectory_source_branch), 'stage_id': str(stage.stage_id), 'snapshot_id': f'epoch_{int(epoch_index) + 1:03d}', 'phase': 'epoch_end', 'output_root': output_root, 'materialized_samples': materialized_samples, 'text_projector': text_projector, 'projector': text_projector, 'theta_T': theta_t, 'unknown_prototype': unknown_prototype, 'b_u': b_u, 'unknown_mode': str(config.unknown_mode), 'device': str(device), 'temperature': float(_compute_t_dis(theta_t).detach().cpu().item()), 'seed': int(config.seed), 'mode': str(config.mode)})
             if str(stage.stage_id) == 'softem_aug' and int(epoch_index) + 1 < int(stage.epochs):
                 next_snapshot_id = f'epoch_{int(epoch_index) + 1:03d}'
-                active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, b_u=b_u, unknown_mode=str(config.unknown_mode), output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(0, int(config.em_subiterations)), device=device, snapshot_id=next_snapshot_id, extra_selection_mode=str(config.extra_selection_mode), clip_extra_obs_sim_max=float(config.clip_extra_obs_sim_max), clip_extra_allow_empty=bool(config.clip_extra_allow_empty), extra_activation_mode=str(config.extra_activation_mode), extra_activation_margin=float(config.extra_activation_margin), extra_penalty_scale=float(config.extra_penalty_scale), extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda))
+                active_examples_by_tid, cache, runtime_extra_cache, refreshed_trace = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, b_u=b_u, unknown_mode=str(config.unknown_mode), output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(0, int(config.em_subiterations)), device=device, snapshot_id=next_snapshot_id, extra_selection_mode=str(config.extra_selection_mode), clip_extra_obs_sim_max=float(config.clip_extra_obs_sim_max), clip_extra_allow_empty=bool(config.clip_extra_allow_empty), extra_activation_mode=str(config.extra_activation_mode), extra_activation_margin=float(config.extra_activation_margin), extra_penalty_scale=float(config.extra_penalty_scale), extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda), extra_coverage_mode=str(config.extra_coverage_mode), extra_coverage_scale=float(config.extra_coverage_scale))
                 if not stage_trace_sample:
                     stage_trace_sample = refreshed_trace
                 if bool(config.write_runtime_metrics_jsonl):
@@ -1075,20 +1164,21 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         for tid in active_examples_by_tid.keys():
             ex = active_examples_by_tid[tid]
             target_row = cache.by_trajectory_id[str(tid)]
-            row = {'dataset_name': str(config.dataset_name), 'clip_id': int(ex['clip_id']), 'video_id': int(ex['video_id']), 'trajectory_id': str(ex['trajectory_id']), 'candidate_ids_known': [int(x) for x in ex['candidate_ids_known']], 'candidate_ids_extra': [int(x) for x in ex['candidate_ids_extra']], 'candidate_ids_extra_mined': [int(x) for x in list(ex.get('candidate_ids_extra_mined', ex.get('candidate_ids_extra', [])))], 'extra_active': bool(ex.get('extra_active', bool(list(ex.get('candidate_ids_extra', []))))), 'extra_activation_mode': str(ex.get('extra_activation_mode', getattr(config, 'extra_activation_mode', 'always'))), 'extra_activation_margin': float(ex.get('extra_activation_margin', 0.0)), 'extra_activation_margin_threshold': float(ex.get('extra_activation_margin_threshold', getattr(config, 'extra_activation_margin', 0.0))), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_consensus_bonus_context': dict(target_row.get('extra_consensus_bonus_context', {})), 'unknown_slot': 'unknown', 'r_init': dict(target_row['r_init']), 'r_final': dict(target_row['r_final']), 'coverage_bonus_applied_to': list(target_row.get('coverage_bonus_applied_to', [])), 'refine_trace': dict(target_row.get('refine_trace', {})), 'em_subiterations': int(target_row.get('em_subiterations', max(0, int(config.em_subiterations)))), 'em_subiteration_count': int(target_row.get('em_subiteration_count', 0)), 'join_key': str(ex['trajectory_id'])}
+            row = {'dataset_name': str(config.dataset_name), 'clip_id': int(ex['clip_id']), 'video_id': int(ex['video_id']), 'trajectory_id': str(ex['trajectory_id']), 'candidate_ids_known': [int(x) for x in ex['candidate_ids_known']], 'candidate_ids_extra': [int(x) for x in ex['candidate_ids_extra']], 'candidate_ids_extra_mined': [int(x) for x in list(ex.get('candidate_ids_extra_mined', ex.get('candidate_ids_extra', [])))], 'extra_active': bool(ex.get('extra_active', bool(list(ex.get('candidate_ids_extra', []))))), 'extra_activation_mode': str(ex.get('extra_activation_mode', getattr(config, 'extra_activation_mode', 'always'))), 'extra_activation_margin': float(ex.get('extra_activation_margin', 0.0)), 'extra_activation_margin_threshold': float(ex.get('extra_activation_margin_threshold', getattr(config, 'extra_activation_margin', 0.0))), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_consensus_bonus_context': dict(target_row.get('extra_consensus_bonus_context', {})), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'extra_coverage_context': dict(target_row.get('extra_coverage_context', {})), 'extra_coverage_bonus_context': dict(target_row.get('extra_coverage_bonus_context', {})), 'unknown_slot': 'unknown', 'r_init': dict(target_row['r_init']), 'r_final': dict(target_row['r_final']), 'coverage_bonus_applied_to': list(target_row.get('coverage_bonus_applied_to', [])), 'refine_trace': dict(target_row.get('refine_trace', {})), 'em_subiterations': int(target_row.get('em_subiterations', max(0, int(config.em_subiterations)))), 'em_subiteration_count': int(target_row.get('em_subiteration_count', 0)), 'join_key': str(ex['trajectory_id'])}
             if 'subiteration_trace' in target_row:
                 row['subiteration_trace'] = list(target_row['subiteration_trace'])
             rows.append(row)
             unknown_mass = float(target_row['r_final'].get('unknown', 0.0))
             unknown_metrics.update_base(torch.tensor([1.0 - unknown_mass], device=device, dtype=torch.float32))
         _write_jsonl(output_root / stage.responsibility_relpath, rows)
-        torch.save({'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'text_projector_state_dict': text_projector.state_dict(), 'text_projector_config': {'input_dim': int(text_projector.config.input_dim), 'hidden_dim': int(text_projector.config.hidden_dim), 'output_dim': int(text_projector.config.output_dim), 'dropout': float(text_projector.config.dropout), 'use_layernorm': bool(text_projector.config.use_layernorm)}, 'theta_T': float(theta_t.detach().cpu().item()), 'b_u': float(b_u.detach().cpu().item()), 'unknown_mode': str(config.unknown_mode), 'unknown_prototype': F.normalize(unknown_prototype.detach().cpu(), p=2.0, dim=0), 'seed': int(config.seed), 'mode': str(config.mode), 'global_step': int(iteration_index), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda)}, checkpoint_path)
-        train_state = {'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'selected_for_infer': str(stage.selected_for_infer), 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'checkpoint_selected': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'global_step': int(iteration_index), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda)}
+        torch.save({'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'text_projector_state_dict': text_projector.state_dict(), 'text_projector_config': {'input_dim': int(text_projector.config.input_dim), 'hidden_dim': int(text_projector.config.hidden_dim), 'output_dim': int(text_projector.config.output_dim), 'dropout': float(text_projector.config.dropout), 'use_layernorm': bool(text_projector.config.use_layernorm)}, 'theta_T': float(theta_t.detach().cpu().item()), 'b_u': float(b_u.detach().cpu().item()), 'unknown_mode': str(config.unknown_mode), 'unknown_prototype': F.normalize(unknown_prototype.detach().cpu(), p=2.0, dim=0), 'seed': int(config.seed), 'mode': str(config.mode), 'global_step': int(iteration_index), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale)}, checkpoint_path)
+        train_state = {'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'selected_for_infer': str(stage.selected_for_infer), 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'checkpoint_selected': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'global_step': int(iteration_index), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale)}
         _write_json(output_root / stage.train_state_relpath, train_state)
-        stage_summary = {'stage_id': str(stage.stage_id), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'b_u': float(b_u.detach().cpu().item()), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'unknown_metrics': unknown_metrics.finalize(distributed=False)}
+        stage_summary = {'stage_id': str(stage.stage_id), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'b_u': float(b_u.detach().cpu().item()), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'unknown_metrics': unknown_metrics.finalize(distributed=False)}
         if str(stage.stage_id) == 'softem_aug':
             stage_summary['runtime_extra_cache_metrics'] = _runtime_extra_cache_metrics(active_examples_by_tid, runtime_extra_cache, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha))
             stage_summary['runtime_extra_cache_metrics'].update(_extra_consensus_metrics_from_cache(cache, extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda)))
+            stage_summary['runtime_extra_cache_metrics'].update(_extra_coverage_metrics_from_cache(cache, extra_coverage_mode=str(config.extra_coverage_mode), extra_coverage_scale=float(config.extra_coverage_scale)))
         _write_json(stage_dir / 'stage_summary.json', stage_summary)
         stage_reports.append({'stage_id': str(stage.stage_id), 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'responsibility_records_path': str(stage.responsibility_relpath), 'train_state_path': str(stage.train_state_relpath), 'checkpoint_last_path': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'record_count_output': int(len(rows)), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'batch_budget': int(batch_budget), 'loss_normalization': 'effective_responsibility_unit_count'})
         current_checkpoint = checkpoint_path
