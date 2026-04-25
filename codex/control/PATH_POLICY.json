@@ -1,8 +1,10 @@
 {
   "task_id": "G8_inference_and_eval-task",
-  "task_truth_stamp": "eeecd22fbf23380e81e019b19efea8a803fb33bd970b74e635bfbae2bd9934c0",
+  "task_truth_stamp": "962ae1a2138c44a47621c240e9e21948fce349ed57f37590c5c323391cf16e4e",
   "active_gate": "G8_inference_and_eval",
   "allow_paths": [
+    "videocutler/ext_stageb_ovvis/analysis/extra_mining_simulator.py",
+    "videocutler/ext_stageb_ovvis/analysis/extra_mining_score_registry.py",
     "videocutler/ext_stageb_ovvis/algorithms/_g7_semantics.py",
     "videocutler/ext_stageb_ovvis/algorithms/reservoir_v1.py",
     "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
@@ -24,6 +26,7 @@
     "videocutler/run_stageb_eval_lvvis.py",
     "videocutler/run_stageb_eval_ytvis2019.py",
     "videocutler/run_stageb_audit_g7_gt_attribution_rank.py",
+    "videocutler/run_stageb_analysis_extra_mining_simulator.py",
     "videocutler/run_stageb_test.py",
     "videocutler/run_stageb_train.py",
     "videocutler/run_stageb_train_softem.py",

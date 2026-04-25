@@ -309,6 +309,54 @@ def _int_from_record(record: Mapping[str, Any], keys: Sequence[str], default: in
     return int(default)
 
 
+def _value_from_aliases(record: Mapping[str, Any], keys: Sequence[str]) -> Tuple[Any, Optional[str]]:
+    for key in keys:
+        if key not in record:
+            continue
+        value = record.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value, str(key)
+    return None, None
+
+
+def _bool_from_aliases(record: Mapping[str, Any], keys: Sequence[str]) -> Tuple[Optional[bool], Optional[str]]:
+    value, field_name = _value_from_aliases(record, keys)
+    if field_name is None:
+        return None, None
+    if isinstance(value, bool):
+        return bool(value), field_name
+    if isinstance(value, (int, float)):
+        return bool(value), field_name
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True, field_name
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False, field_name
+    return None, None
+
+
+def _int_from_aliases(record: Mapping[str, Any], keys: Sequence[str]) -> Tuple[Optional[int], Optional[str]]:
+    value, field_name = _value_from_aliases(record, keys)
+    if field_name is None:
+        return None, None
+    try:
+        return int(value), field_name
+    except Exception:
+        return None, None
+
+
+def _int_list_from_aliases(record: Mapping[str, Any], keys: Sequence[str]) -> Tuple[List[int], Optional[str]]:
+    value, field_name = _value_from_aliases(record, keys)
+    if field_name is None:
+        return [], None
+    if isinstance(value, (list, tuple)):
+        return _unique_int_list(list(value)), field_name
+    return _unique_int_list([value]), field_name
+
+
 def _record_matches_formal_split(record: Mapping[str, Any], formal_split: str) -> bool:
     for key in ("split", "split_name", "formal_split", "minimal_split", "subset"):
         value = record.get(key)
@@ -395,6 +443,7 @@ def _rows_from_formal_authority_records(
     authority_records: Sequence[Mapping[str, Any]],
     examples_by_tid: Mapping[str, Mapping[str, Any]],
     existing_examples_by_tid: Mapping[str, Mapping[str, Any]],
+    responsibility_records_by_tid: Mapping[str, Mapping[str, Any]],
     text_vocab_ids: Sequence[int],
     formal_split: str,
 ) -> Tuple[List[Record], Dict[str, Any]]:
@@ -403,6 +452,7 @@ def _rows_from_formal_authority_records(
     missing_example_ids: List[str] = []
     missing_gt_ids: List[str] = []
     gt_not_in_vocab: List[str] = []
+    missing_resp_ids: List[str] = []
     seen: set[str] = set()
     for rec in authority_records:
         if not _record_matches_formal_split(rec, str(formal_split)):
@@ -423,11 +473,54 @@ def _rows_from_formal_authority_records(
             gt_not_in_vocab.append(tid)
             continue
         existing = dict(existing_examples_by_tid.get(tid, {}))
+        resp = dict(responsibility_records_by_tid.get(tid, {}))
+        if not resp:
+            missing_resp_ids.append(tid)
         existing_extra = _unique_int_list(existing.get("candidate_ids_extra", []))
         existing_known = _unique_int_list(existing.get("candidate_ids_known", ex.get("candidate_ids_known", [])))
         observed_raw_ids = _unique_int_list(ex.get("observed_raw_ids", []))
         clip_id = _int_from_record(ex, ("clip_id",), default=_int_from_record(rec, ("clip_id",), default=-1))
         video_id = _int_from_record(ex, ("video_id",), default=_int_from_record(rec, ("video_id",), default=-1))
+        formal_gt_raw_id, formal_gt_raw_id_field = _int_from_aliases(
+            rec,
+            ("gt_raw_id", "matched_gt_raw_id_canonical", "gt_category_id", "raw_gt_category_id"),
+        )
+        formal_gt_contiguous_id, formal_gt_contiguous_id_field = _int_from_aliases(
+            rec,
+            ("gt_contiguous_id", "gt_category_contiguous_id"),
+        )
+        formal_extra_raw_ids, formal_extra_raw_field = _int_list_from_aliases(
+            rec,
+            ("candidate_ids_extra", "extra_candidate_ids", "extra_raw_ids", "candidate_extra_raw_ids"),
+        )
+        formal_extra_contiguous_ids, formal_extra_contiguous_field = _int_list_from_aliases(
+            rec,
+            ("candidate_ids_extra_contiguous", "extra_contiguous_ids"),
+        )
+        formal_existing_bool, formal_existing_bool_field = _bool_from_aliases(
+            rec,
+            ("gt_in_extra_candidate", "gt_in_extra", "gt_in_extra_topk_candidate"),
+        )
+        resp_gt_raw_id, resp_gt_raw_id_field = _int_from_aliases(
+            resp,
+            ("gt_raw_id", "matched_gt_raw_id_canonical", "gt_category_id", "raw_gt_category_id"),
+        )
+        resp_gt_contiguous_id, resp_gt_contiguous_id_field = _int_from_aliases(
+            resp,
+            ("gt_contiguous_id", "gt_category_contiguous_id"),
+        )
+        resp_extra_raw_ids, resp_extra_raw_field = _int_list_from_aliases(
+            resp,
+            ("candidate_ids_extra", "extra_candidate_ids", "extra_raw_ids", "candidate_extra_raw_ids"),
+        )
+        resp_extra_contiguous_ids, resp_extra_contiguous_field = _int_list_from_aliases(
+            resp,
+            ("candidate_ids_extra_contiguous", "extra_contiguous_ids"),
+        )
+        resp_existing_bool, resp_existing_bool_field = _bool_from_aliases(
+            resp,
+            ("gt_in_extra_candidate", "gt_in_extra", "gt_in_extra_topk_candidate"),
+        )
         rows.append(
             {
                 "trajectory_id": tid,
@@ -438,6 +531,27 @@ def _rows_from_formal_authority_records(
                 "candidate_ids_known": _unique_int_list(ex.get("candidate_ids_known", [])),
                 "existing_candidate_ids_known": existing_known,
                 "existing_candidate_ids_extra": [int(x) for x in existing_extra if int(x) not in {int(y) for y in existing_known}],
+                "formal_gt_raw_id": None if formal_gt_raw_id is None else int(formal_gt_raw_id),
+                "formal_gt_raw_id_field_used": formal_gt_raw_id_field,
+                "formal_gt_contiguous_id": None if formal_gt_contiguous_id is None else int(formal_gt_contiguous_id),
+                "formal_gt_contiguous_id_field_used": formal_gt_contiguous_id_field,
+                "formal_extra_raw_ids": [int(x) for x in formal_extra_raw_ids],
+                "formal_extra_raw_field_used": formal_extra_raw_field,
+                "formal_extra_contiguous_ids": [int(x) for x in formal_extra_contiguous_ids],
+                "formal_extra_contiguous_field_used": formal_extra_contiguous_field,
+                "formal_existing_bool": formal_existing_bool,
+                "formal_existing_bool_field_used": formal_existing_bool_field,
+                "responsibility_joined": bool(resp),
+                "resp_gt_raw_id": None if resp_gt_raw_id is None else int(resp_gt_raw_id),
+                "resp_gt_raw_id_field_used": resp_gt_raw_id_field,
+                "resp_gt_contiguous_id": None if resp_gt_contiguous_id is None else int(resp_gt_contiguous_id),
+                "resp_gt_contiguous_id_field_used": resp_gt_contiguous_id_field,
+                "resp_extra_raw_ids": [int(x) for x in resp_extra_raw_ids],
+                "resp_extra_raw_field_used": resp_extra_raw_field,
+                "resp_extra_contiguous_ids": [int(x) for x in resp_extra_contiguous_ids],
+                "resp_extra_contiguous_field_used": resp_extra_contiguous_field,
+                "resp_existing_bool": resp_existing_bool,
+                "resp_existing_bool_field_used": resp_existing_bool_field,
                 "carrier_vec": np.asarray(ex.get("carrier_vec"), dtype=np.float32),
             }
         )
@@ -452,6 +566,9 @@ def _rows_from_formal_authority_records(
         "missing_gt_examples": missing_gt_ids[:20],
         "gt_not_in_vocab_count": int(len(gt_not_in_vocab)),
         "gt_not_in_vocab_examples": gt_not_in_vocab[:20],
+        "joined_resp_count": int(len(rows) - len(missing_resp_ids)),
+        "missing_resp_count": int(len(missing_resp_ids)),
+        "missing_resp_examples": missing_resp_ids[:20],
         "source": "formal_authority_row_diagnostics",
     }
     if missing_example_ids:
@@ -467,6 +584,72 @@ def _rows_from_formal_authority_records(
             f"missing={len(missing_gt_ids)} examples={missing_gt_ids[:10]}"
         )
     return rows, meta
+
+
+def _build_label_maps(text_records: Sequence[Mapping[str, Any]]) -> Tuple[Dict[int, int], Dict[int, int]]:
+    raw_to_contiguous: Dict[int, int] = {}
+    contiguous_to_raw: Dict[int, int] = {}
+    for record in text_records:
+        raw_id = record.get("raw_id")
+        contiguous_id = record.get("contiguous_id")
+        if raw_id is None or contiguous_id is None:
+            continue
+        try:
+            raw_int = int(raw_id)
+            contiguous_int = int(contiguous_id)
+        except Exception:
+            continue
+        raw_to_contiguous[raw_int] = contiguous_int
+        contiguous_to_raw[contiguous_int] = raw_int
+    return raw_to_contiguous, contiguous_to_raw
+
+
+def _baseline_eval_from_ids(
+    *,
+    gt_raw_id: Optional[int],
+    gt_contiguous_id: Optional[int],
+    extra_raw_ids: Sequence[int],
+    extra_contiguous_ids: Sequence[int],
+    raw_to_contiguous: Mapping[int, int],
+    contiguous_to_raw: Mapping[int, int],
+) -> Tuple[Optional[bool], Optional[str], Optional[str]]:
+    raw_ids = _unique_int_list(extra_raw_ids)
+    contiguous_ids = _unique_int_list(extra_contiguous_ids)
+    if gt_raw_id is not None and raw_ids:
+        return bool(int(gt_raw_id) in {int(x) for x in raw_ids}), "raw", None
+    if gt_contiguous_id is not None and contiguous_ids:
+        return bool(int(gt_contiguous_id) in {int(x) for x in contiguous_ids}), "contiguous", None
+    if gt_raw_id is not None and contiguous_ids:
+        mapped = raw_to_contiguous.get(int(gt_raw_id))
+        if mapped is None:
+            return None, None, f"missing_official_raw_to_contiguous_mapping_for_gt_raw_id={int(gt_raw_id)}"
+        return bool(int(mapped) in {int(x) for x in contiguous_ids}), "raw_to_contiguous_via_official_mapping", None
+    if gt_contiguous_id is not None and raw_ids:
+        mapped = contiguous_to_raw.get(int(gt_contiguous_id))
+        if mapped is None:
+            return None, None, f"missing_official_contiguous_to_raw_mapping_for_gt_contiguous_id={int(gt_contiguous_id)}"
+        return bool(int(mapped) in {int(x) for x in raw_ids}), "contiguous_to_raw_via_official_mapping", None
+    return None, None, "ambiguous_or_missing_gt_and_extra_id_spaces"
+
+
+def _summarize_used_fields(values: Sequence[Optional[str]]) -> Optional[str]:
+    present = [str(v) for v in values if v]
+    if not present:
+        return None
+    ordered = sorted(set(present))
+    return ordered[0] if len(ordered) == 1 else "|".join(ordered)
+
+
+def _load_responsibility_records_by_tid(run_root: Path, stage_id: str) -> Dict[str, Record]:
+    path = Path(run_root).expanduser().resolve() / "train" / str(stage_id) / "responsibility_records.jsonl"
+    records = _read_jsonl_records(path)
+    by_tid: Dict[str, Record] = {}
+    for record in records:
+        tid = _trajectory_id_from_formal_record(record)
+        if tid is None:
+            continue
+        by_tid[str(tid)] = dict(record)
+    return by_tid
 
 
 def _unique_int_list(values: Sequence[Any]) -> List[int]:
@@ -648,16 +831,159 @@ def _zscore(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return (x - torch.mean(x)) / torch.clamp(torch.std(x), min=float(eps))
 
 
-def _existing_baseline(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    gt_in = [int(row["gt_raw_id"]) in {int(x) for x in list(row.get("existing_candidate_ids_extra", []))} for row in rows]
-    count = int(sum(1 for x in gt_in if x))
-    total = int(len(gt_in))
+def _existing_baseline(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    text_records: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+) -> Dict[str, Any]:
+    raw_to_contiguous, contiguous_to_raw = _build_label_maps(text_records)
+    debug_examples: List[Dict[str, Any]] = []
+    gt_field_used_values: List[Optional[str]] = []
+    extra_field_used_values: List[Optional[str]] = []
+    id_space_used_values: List[Optional[str]] = []
+    source_values: List[Optional[str]] = []
+    blocked_rows: List[Dict[str, Any]] = []
+    hits: List[bool] = []
+    joined_resp_count = 0
+    missing_resp_count = 0
+    extra_nonempty_count = 0
+    for row in rows:
+        gt_raw_id = row.get("formal_gt_raw_id", row.get("gt_raw_id"))
+        gt_contiguous_id = row.get("formal_gt_contiguous_id")
+        gt_field_used = row.get("formal_gt_raw_id_field_used") or ("gt_raw_id" if row.get("gt_raw_id") is not None else None)
+        extra_field_used = None
+        id_space_used = None
+        source = None
+        hit: Optional[bool] = None
+
+        if bool(row.get("responsibility_joined")):
+            joined_resp_count += 1
+        else:
+            missing_resp_count += 1
+
+        formal_extra_raw_ids = _unique_int_list(row.get("formal_extra_raw_ids", []))
+        formal_extra_contiguous_ids = _unique_int_list(row.get("formal_extra_contiguous_ids", []))
+        resp_extra_raw_ids = _unique_int_list(row.get("resp_extra_raw_ids", []))
+        resp_extra_contiguous_ids = _unique_int_list(row.get("resp_extra_contiguous_ids", []))
+        if formal_extra_raw_ids or formal_extra_contiguous_ids or resp_extra_raw_ids or resp_extra_contiguous_ids:
+            extra_nonempty_count += 1
+
+        if row.get("formal_existing_bool") is not None:
+            hit = bool(row.get("formal_existing_bool"))
+            source = f"formal_row_boolean:{row.get('formal_existing_bool_field_used')}"
+            extra_field_used = row.get("formal_extra_raw_field_used") or row.get("formal_extra_contiguous_field_used")
+            id_space_used = "boolean_authority"
+        else:
+            hit, id_space_used, error = _baseline_eval_from_ids(
+                gt_raw_id=None if gt_raw_id is None else int(gt_raw_id),
+                gt_contiguous_id=None if gt_contiguous_id is None else int(gt_contiguous_id),
+                extra_raw_ids=formal_extra_raw_ids,
+                extra_contiguous_ids=formal_extra_contiguous_ids,
+                raw_to_contiguous=raw_to_contiguous,
+                contiguous_to_raw=contiguous_to_raw,
+            )
+            if hit is not None:
+                source = "formal_row_candidates"
+                extra_field_used = row.get("formal_extra_raw_field_used") or row.get("formal_extra_contiguous_field_used")
+            else:
+                hit, id_space_used, error = _baseline_eval_from_ids(
+                    gt_raw_id=None if gt_raw_id is None else int(gt_raw_id),
+                    gt_contiguous_id=None if gt_contiguous_id is None else int(gt_contiguous_id),
+                    extra_raw_ids=resp_extra_raw_ids,
+                    extra_contiguous_ids=resp_extra_contiguous_ids,
+                    raw_to_contiguous=raw_to_contiguous,
+                    contiguous_to_raw=contiguous_to_raw,
+                )
+                if hit is not None:
+                    source = "responsibility_join_candidates"
+                    extra_field_used = row.get("resp_extra_raw_field_used") or row.get("resp_extra_contiguous_field_used")
+                else:
+                    source = "BLOCKED"
+                    blocked_rows.append(
+                        {
+                            "trajectory_id": row.get("trajectory_id"),
+                            "gt_raw_id": gt_raw_id,
+                            "gt_contiguous_id": gt_contiguous_id,
+                            "formal_gt_field_used": gt_field_used,
+                            "formal_gt_contiguous_field_used": row.get("formal_gt_contiguous_id_field_used"),
+                            "formal_extra_raw_field_used": row.get("formal_extra_raw_field_used"),
+                            "formal_extra_contiguous_field_used": row.get("formal_extra_contiguous_field_used"),
+                            "resp_extra_raw_field_used": row.get("resp_extra_raw_field_used"),
+                            "resp_extra_contiguous_field_used": row.get("resp_extra_contiguous_field_used"),
+                            "id_space_guess": id_space_used,
+                            "error": error,
+                        }
+                    )
+
+        gt_field_used_values.append(gt_field_used or row.get("formal_gt_contiguous_id_field_used"))
+        extra_field_used_values.append(extra_field_used)
+        id_space_used_values.append(id_space_used)
+        source_values.append(source)
+        if hit is not None:
+            hits.append(bool(hit))
+
+        if len(debug_examples) < 20:
+            debug_examples.append(
+                {
+                    "trajectory_id": row.get("trajectory_id"),
+                    "gt_raw_id": gt_raw_id,
+                    "gt_contiguous_id": gt_contiguous_id,
+                    "formal_gt_field_used": gt_field_used,
+                    "formal_gt_contiguous_field_used": row.get("formal_gt_contiguous_id_field_used"),
+                    "formal_existing_bool": row.get("formal_existing_bool"),
+                    "formal_existing_bool_field_used": row.get("formal_existing_bool_field_used"),
+                    "formal_extra_raw_ids": formal_extra_raw_ids,
+                    "formal_extra_raw_field_used": row.get("formal_extra_raw_field_used"),
+                    "formal_extra_contiguous_ids": formal_extra_contiguous_ids,
+                    "formal_extra_contiguous_field_used": row.get("formal_extra_contiguous_field_used"),
+                    "resp_joined": bool(row.get("responsibility_joined")),
+                    "resp_extra_raw_ids": resp_extra_raw_ids,
+                    "resp_extra_raw_field_used": row.get("resp_extra_raw_field_used"),
+                    "resp_extra_contiguous_ids": resp_extra_contiguous_ids,
+                    "resp_extra_contiguous_field_used": row.get("resp_extra_contiguous_field_used"),
+                    "gt_in_extra": hit,
+                    "existing_baseline_source": source,
+                    "id_space_used": id_space_used,
+                }
+            )
+
+    debug_payload = {
+        "formal_row_count": int(len(rows)),
+        "joined_resp_count": int(joined_resp_count),
+        "missing_resp_count": int(missing_resp_count),
+        "extra_nonempty_rate": float(extra_nonempty_count / max(int(len(rows)), 1)),
+        "gt_field_used": _summarize_used_fields(gt_field_used_values),
+        "extra_field_used": _summarize_used_fields(extra_field_used_values),
+        "id_space_used": _summarize_used_fields(id_space_used_values),
+        "existing_baseline_source": _summarize_used_fields(source_values),
+        "example_rows": debug_examples,
+    }
+    debug_path = output_dir / "baseline_join_debug.json"
+    _write_json(debug_path, debug_payload)
+    if blocked_rows:
+        raise RuntimeError(
+            "BLOCKED existing baseline could not determine GT/extra id-space alignment; "
+            f"gt_field_used={debug_payload['gt_field_used']} "
+            f"extra_field_used={debug_payload['extra_field_used']} "
+            f"id_space_used={debug_payload['id_space_used']} "
+            f"examples={blocked_rows[:5]} "
+            f"debug_path={debug_path}"
+        )
+
+    count = int(sum(1 for x in hits if x))
+    total = int(len(hits))
     return {
         "variant": "existing_stage_extra",
         "formal_gt_count": total,
         "gt_in_extra_count": count,
         "gt_not_in_extra_count": int(total - count),
         "gt_in_extra_rate": float(count / max(total, 1)),
+        "gt_id_field_used": debug_payload["gt_field_used"],
+        "extra_candidate_field_used": debug_payload["extra_field_used"],
+        "id_space_used": debug_payload["id_space_used"],
+        "existing_baseline_source": debug_payload["existing_baseline_source"],
+        "baseline_join_debug_path": str(debug_path),
     }
 
 
@@ -833,6 +1159,7 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
     examples, materialization_meta = _materialize_examples(config, imports)
     existing_examples, existing_meta = _apply_existing_stage_extras(examples=examples, run_root=run_root, stage_id=str(config.stage_id), imports=imports)
     existing_by_tid = {str(ex.get("trajectory_id", "")): dict(ex) for ex in existing_examples}
+    responsibility_records_by_tid = _load_responsibility_records_by_tid(run_root, str(config.stage_id))
     text_vocab_ids, text_records, text_vocab_matrix = imports["load_text_vocab"](runtime_output_root)
     formal_authority_path = _discover_formal_row_diagnostics_path(config)
     if formal_authority_path is not None and formal_authority_path.exists():
@@ -842,6 +1169,7 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
             authority_records=authority_records,
             examples_by_tid=examples_by_tid,
             existing_examples_by_tid=existing_by_tid,
+            responsibility_records_by_tid=responsibility_records_by_tid,
             text_vocab_ids=text_vocab_ids,
             formal_split=str(config.formal_split),
         )
@@ -864,7 +1192,7 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
         rows, formal_row_authority_meta = _apply_formal_authority_row_filter(rows=rows, config=config)
     if not rows:
         raise RuntimeError("formal row authority filtering produced no rows")
-    existing = _existing_baseline(rows)
+    existing = _existing_baseline(rows, text_records=text_records, output_dir=output_dir)
     _validate_existing_baseline(existing, config)
     checkpoint_path = Path(config.checkpoint_path).expanduser().resolve() if config.checkpoint_path else _checkpoint_path(run_root, str(config.checkpoint_stage))
     text_projected, temperature, ckpt_meta = _project_text(checkpoint_path=checkpoint_path, text_vocab_matrix=np.asarray(text_vocab_matrix, dtype=np.float32), device=device, imports=imports)
@@ -917,6 +1245,10 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
         "temperature": float(temperature),
         "formal_gt_count": int(len(rows)),
         "existing_stage_extra_baseline": existing,
+        "gt_id_field_used": existing.get("gt_id_field_used"),
+        "extra_candidate_field_used": existing.get("extra_candidate_field_used"),
+        "id_space_used": existing.get("id_space_used"),
+        "existing_baseline_source": existing.get("existing_baseline_source"),
         "variant_count": int(len(variant_results)),
         "variants": variant_results_sorted,
         "materialization_meta": materialization_meta,
@@ -1035,6 +1367,42 @@ def synthetic_self_test() -> Dict[str, Any]:
     registry = _synthetic_self_test()
     # Minimal evaluator sanity check.
     device = torch.device("cpu")
+    tmp_output_dir = Path("/tmp/wsovvis_extra_mining_simulator_self_test")
+    baseline = _existing_baseline(
+        [
+            {
+                "trajectory_id": "t0",
+                "gt_raw_id": 12,
+                "formal_gt_raw_id": 12,
+                "formal_gt_raw_id_field_used": "gt_raw_id",
+                "formal_existing_bool": True,
+                "formal_existing_bool_field_used": "gt_in_extra",
+                "formal_extra_raw_ids": [12, 15],
+                "formal_extra_raw_field_used": "candidate_ids_extra",
+                "responsibility_joined": True,
+            },
+            {
+                "trajectory_id": "t1",
+                "gt_raw_id": 13,
+                "formal_gt_raw_id": 13,
+                "formal_gt_raw_id_field_used": "gt_raw_id",
+                "formal_extra_raw_ids": [],
+                "resp_extra_raw_ids": [14, 16],
+                "resp_extra_raw_field_used": "candidate_ids_extra",
+                "responsibility_joined": True,
+            },
+        ],
+        text_records=[
+            {"raw_id": 12, "contiguous_id": 0},
+            {"raw_id": 13, "contiguous_id": 1},
+            {"raw_id": 14, "contiguous_id": 2},
+            {"raw_id": 15, "contiguous_id": 3},
+            {"raw_id": 16, "contiguous_id": 4},
+        ],
+        output_dir=tmp_output_dir,
+    )
+    if int(baseline.get("formal_gt_count", -1)) != 2 or abs(float(baseline.get("gt_in_extra_rate", -1.0)) - 0.5) > 1e-9:
+        raise AssertionError(f"baseline self-test failed: {baseline}")
     raw_ids = list(range(10, 19))
     rows = [
         {"trajectory_id": "t0", "clip_id": 1, "gt_raw_id": 12},
@@ -1079,4 +1447,4 @@ def synthetic_self_test() -> Dict[str, Any]:
         person_cols=[],
     )
     assert metrics["formal_gt_count"] == 3
-    return {"status": "PASS", "registry": registry, "evaluator": metrics}
+    return {"status": "PASS", "registry": registry, "baseline": baseline, "evaluator": metrics}
