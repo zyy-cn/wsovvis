@@ -45,6 +45,7 @@ class ExtraMiningSimulatorConfig:
     checkpoint_stage: str = "softem_aug"
     checkpoint_path: Optional[Path] = None
     sidecar_root: Optional[Path] = None
+    formal_row_diagnostics_path: Optional[Path] = None
     output_dir: Optional[Path] = None
     smoke: bool = False
     smoke_max_trajectories: int = 128
@@ -237,6 +238,120 @@ def _formal_rows(
         )
     return rows
 
+
+
+def _read_jsonl_records(path: Path) -> List[Record]:
+    records: List[Record] = []
+    if not path.exists():
+        return records
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                records.append(dict(payload))
+    return records
+
+
+def _trajectory_id_from_formal_record(record: Mapping[str, Any]) -> Optional[str]:
+    for key in (
+        "trajectory_id",
+        "main_trajectory_id",
+        "row_trajectory_id",
+        "formal_trajectory_id",
+        "trajectory_key",
+    ):
+        value = record.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _record_matches_formal_split(record: Mapping[str, Any], formal_split: str) -> bool:
+    for key in ("split", "split_name", "formal_split", "minimal_split", "subset"):
+        value = record.get(key)
+        if value is not None:
+            return str(value) == str(formal_split)
+    return True
+
+
+def _discover_formal_row_diagnostics_path(config: ExtraMiningSimulatorConfig) -> Optional[Path]:
+    if config.formal_row_diagnostics_path is not None:
+        return Path(config.formal_row_diagnostics_path).expanduser().resolve()
+    run_root = Path(config.run_root).expanduser().resolve()
+    direct = (
+        run_root
+        / "analysis"
+        / "extra_mining_recall_diagnosis"
+        / str(config.dataset_name)
+        / str(config.stage_id)
+        / "formal_aligned_row_diagnostics.jsonl"
+    )
+    if direct.exists():
+        return direct
+    root = run_root / "analysis" / "extra_mining_recall_diagnosis"
+    if not root.exists():
+        return None
+    candidates = sorted(root.rglob("formal_aligned_row_diagnostics.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def _apply_formal_authority_row_filter(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    config: ExtraMiningSimulatorConfig,
+) -> Tuple[List[Record], Dict[str, Any]]:
+    path = _discover_formal_row_diagnostics_path(config)
+    if path is None or not path.exists():
+        meta = {
+            "status": "NO_FORMAL_ROW_DIAGNOSTICS_FOUND",
+            "path": None if path is None else str(path),
+            "input_row_count": int(len(rows)),
+            "filtered_row_count": int(len(rows)),
+        }
+        if config.expected_formal_gt_count is not None and int(len(rows)) != int(config.expected_formal_gt_count):
+            raise RuntimeError(
+                "formal row authority missing: split-derived row count is "
+                f"{len(rows)} but expected {config.expected_formal_gt_count}. "
+                "Run/provide extra_mining_recall_diagnosis/.../formal_aligned_row_diagnostics.jsonl "
+                "or pass --formal_row_diagnostics_path explicitly. Refusing to use the larger probe universe."
+            )
+        return [dict(r) for r in rows], meta
+
+    authority_records = _read_jsonl_records(path)
+    authority_ids = {
+        tid
+        for rec in authority_records
+        if _record_matches_formal_split(rec, str(config.formal_split))
+        for tid in [_trajectory_id_from_formal_record(rec)]
+        if tid is not None
+    }
+    if not authority_ids:
+        raise RuntimeError(f"formal row diagnostics exists but no usable trajectory_id records were found: {path}")
+    row_by_tid = {str(row.get("trajectory_id", "")): dict(row) for row in rows if str(row.get("trajectory_id", "")).strip()}
+    filtered = [row_by_tid[tid] for tid in sorted(authority_ids) if tid in row_by_tid]
+    missing_ids = sorted(tid for tid in authority_ids if tid not in row_by_tid)
+    meta = {
+        "status": "PASS" if not missing_ids else "MISSING_JOINED_ROWS",
+        "path": str(path),
+        "authority_record_count": int(len(authority_records)),
+        "authority_id_count": int(len(authority_ids)),
+        "input_row_count": int(len(rows)),
+        "filtered_row_count": int(len(filtered)),
+        "missing_join_count": int(len(missing_ids)),
+        "missing_join_examples": missing_ids[:20],
+    }
+    if missing_ids:
+        raise RuntimeError(
+            f"formal row diagnostics authority has {len(authority_ids)} ids, "
+            f"but {len(missing_ids)} are missing from simulator rows; examples={missing_ids[:10]}"
+        )
+    return filtered, meta
 
 def _unique_int_list(values: Sequence[Any]) -> List[int]:
     seen: set[int] = set()
@@ -598,7 +713,6 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
     run_root = Path(config.run_root).expanduser().resolve()
     runtime_output_root = Path(config.runtime_output_root).expanduser().resolve()
     output_dir = Path(config.output_dir).expanduser().resolve() if config.output_dir else _default_output_dir(run_root)
-    output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(str(config.device))
     examples, materialization_meta = _materialize_examples(config, imports)
     existing_examples, existing_meta = _apply_existing_stage_extras(examples=examples, run_root=run_root, stage_id=str(config.stage_id), imports=imports)
@@ -617,6 +731,9 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
     )
     if not rows:
         raise RuntimeError("no formal rows available for simulator")
+    rows, formal_row_authority_meta = _apply_formal_authority_row_filter(rows=rows, config=config)
+    if not rows:
+        raise RuntimeError("formal row authority filtering produced no rows")
     existing = _existing_baseline(rows)
     _validate_existing_baseline(existing, config)
     checkpoint_path = Path(config.checkpoint_path).expanduser().resolve() if config.checkpoint_path else _checkpoint_path(run_root, str(config.checkpoint_stage))
@@ -674,6 +791,7 @@ def run_extra_mining_simulator(config: ExtraMiningSimulatorConfig) -> Dict[str, 
         "variants": variant_results_sorted,
         "materialization_meta": materialization_meta,
         "existing_candidate_meta": existing_meta,
+        "formal_row_authority_meta": formal_row_authority_meta,
         "person_cols": [int(x) for x in person_cols],
         "config": _config_payload(config),
     }

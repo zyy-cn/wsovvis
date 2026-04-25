@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint_stage", default="softem_aug", choices=("prealign", "softem_base", "softem_aug"))
     p.add_argument("--checkpoint_path", default=None)
     p.add_argument("--sidecar_root", default=None)
+    p.add_argument("--formal_row_diagnostics_path", default=None)
     p.add_argument("--output_dir", default=None)
     p.add_argument("--smoke", type=_parse_bool, default=False)
     p.add_argument("--smoke_max_trajectories", type=int, default=128)
@@ -111,6 +112,7 @@ def main() -> int:
         checkpoint_stage=str(args.checkpoint_stage),
         checkpoint_path=Path(args.checkpoint_path).expanduser().resolve() if args.checkpoint_path else None,
         sidecar_root=Path(args.sidecar_root).expanduser().resolve() if args.sidecar_root else None,
+        formal_row_diagnostics_path=Path(args.formal_row_diagnostics_path).expanduser().resolve() if args.formal_row_diagnostics_path else None,
         output_dir=Path(args.output_dir).expanduser().resolve() if args.output_dir else None,
         smoke=bool(args.smoke),
         smoke_max_trajectories=int(args.smoke_max_trajectories),
