@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--aug_nce_tau', type=float, default=0.07)
     p.add_argument('--aug_nce_positive_min_resp', type=float, default=0.0)
     p.add_argument('--aug_nce_include_unknown', type=_parse_bool, default=False)
+    p.add_argument('--aug_soft_ce_impl', default='legacy_loop', choices=('legacy_loop','batched'))
+    p.add_argument('--aug_soft_ce_equivalence_check_batches', type=int, default=0)
     return p.parse_args()
 def main() -> int:
     result=run_train_pipeline(resolve_train_plan(parse_args())); print(result['summary_path']); return 0
