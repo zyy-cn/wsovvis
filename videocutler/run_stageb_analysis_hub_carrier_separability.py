@@ -436,7 +436,13 @@ def _materialize_rows_and_carriers(config: AuditConfig) -> Tuple[List[Record], n
         if not bool(sidecar.get('audit_usable', False)) or gt_raw_id is None:
             skipped_no_gt += 1
             continue
-        split = _all_gt_split_label(config.dataset_name, int(gt_raw_id), prepared['base_vocab_ids'])
+        observed_raw_ids = [int(x) for x in list(sample.get('observed_raw_ids', []))]
+        split = _all_gt_split_label(
+            dataset_name=config.dataset_name,
+            gt_raw_id=int(gt_raw_id),
+            observed_raw_ids=observed_raw_ids,
+            base_vocab_ids=prepared['base_vocab_ids'],
+        )
         if split not in requested_splits:
             skipped_split += 1
             continue
