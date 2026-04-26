@@ -91,7 +91,11 @@ class DiagnosisConfig:
     emit_weak_label_cooccurrence: bool
     emit_fully_missed_class_report: bool
     emit_fully_missed_trajectory_weighted_report: bool
+    emit_hub_collapse_rescue_audit: bool
     emit_full_class_cooccurrence: bool
+    hub_collapse_risk_threshold: float
+    hub_collapse_low_alone_threshold: float
+    hub_collapse_top_examples: int
     strong_hub_cooccurrence_threshold: float
     weak_unobservable_present_threshold: float
     weak_unobservable_alone_threshold: float
@@ -1682,6 +1686,330 @@ def _fully_missed_trajectory_weighted_payload(rows: Sequence[Mapping[str, Any]])
         "all_rows_for_csv": big_mode_rows + subtype_rows + co_level_rows,
     }
 
+
+def _hub_collapse_rescue_audit_payload(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    gt_class_cooccurrence: Mapping[str, Any],
+    weak_class_cooccurrence: Mapping[str, Any],
+    hub_raw_ids: Sequence[int],
+    records_by_raw: Mapping[int, Mapping[str, Any]],
+    risk_threshold: float,
+    low_alone_threshold: float,
+    current_k: int,
+    top_examples: int,
+) -> Dict[str, Any]:
+    """Find high co-occurrence-risk rows that are nevertheless rescued.
+
+    This is a pure read-only aggregation over formal-aligned row diagnostics and class
+    co-occurrence payloads. It does not rescore rows and does not alter training semantics.
+    """
+    joined = _rows_joined(rows)
+    hub_set = {int(x) for x in hub_raw_ids}
+    gt_co_map = _cooccurrence_map(gt_class_cooccurrence)
+    weak_co_map = _cooccurrence_map(weak_class_cooccurrence)
+    risk_threshold = float(risk_threshold)
+    low_alone_threshold = float(low_alone_threshold)
+    current_k = max(1, int(current_k))
+
+    class_ids = sorted({int(x) for x in (_safe_int(r.get("gt_raw_id")) for r in joined) if x is not None})
+
+    def _class_risk_meta(raw_id: int) -> Dict[str, Any]:
+        gt_co = gt_co_map.get(int(raw_id), {})
+        weak_co = weak_co_map.get(int(raw_id), {})
+        gt_person = _safe_float(gt_co.get("P_person_given_class"))
+        weak_person = _safe_float(weak_co.get("P_person_given_class"))
+        gt_max_hub = _safe_float(gt_co.get("max_P_hub_given_class"))
+        weak_max_hub = _safe_float(weak_co.get("max_P_hub_given_class"))
+        gt_alone = _safe_float(gt_co.get("alone_rate"))
+        weak_alone = _safe_float(weak_co.get("alone_rate"))
+        gt_present = _safe_float(gt_co.get("present_rate"))
+        weak_present = _safe_float(weak_co.get("present_rate"))
+        max_person = max([x for x in (gt_person, weak_person) if x is not None] or [0.0])
+        max_hub = max([x for x in (gt_max_hub, weak_max_hub) if x is not None] or [0.0])
+        low_alone = bool(
+            (gt_alone is not None and gt_alone <= low_alone_threshold)
+            or (weak_alone is not None and weak_alone <= low_alone_threshold)
+        )
+        is_high_risk = bool(max_person >= risk_threshold or max_hub >= risk_threshold)
+        risk_sources: List[str] = []
+        if gt_person is not None and gt_person >= risk_threshold:
+            risk_sources.append("gt_person")
+        if weak_person is not None and weak_person >= risk_threshold:
+            risk_sources.append("weak_person")
+        if gt_max_hub is not None and gt_max_hub >= risk_threshold:
+            risk_sources.append("gt_hub")
+        if weak_max_hub is not None and weak_max_hub >= risk_threshold:
+            risk_sources.append("weak_hub")
+        if low_alone:
+            risk_sources.append("low_alone")
+        max_hub_id = _safe_int(gt_co.get("max_cooccurring_hub_raw_id"))
+        max_hub_name = gt_co.get("max_cooccurring_hub_name")
+        if max_hub_id is None:
+            max_hub_id = _safe_int(weak_co.get("max_cooccurring_hub_raw_id"))
+            max_hub_name = weak_co.get("max_cooccurring_hub_name")
+        label = _class_label(int(raw_id), records_by_raw)
+        return {
+            "raw_id": int(raw_id),
+            "name": label.get("name"),
+            "is_high_risk_class": is_high_risk,
+            "risk_sources": ";".join(risk_sources),
+            "risk_threshold": risk_threshold,
+            "low_alone_threshold": low_alone_threshold,
+            "P_person_given_class_gt": gt_person,
+            "P_person_given_class_weak": weak_person,
+            "max_P_hub_given_class_gt": gt_max_hub,
+            "max_P_hub_given_class_weak": weak_max_hub,
+            "max_P_person_given_class": max_person,
+            "max_P_hub_given_class": max_hub,
+            "max_cooccurring_hub_raw_id": max_hub_id,
+            "max_cooccurring_hub_name": max_hub_name,
+            "gt_alone_rate": gt_alone,
+            "weak_alone_rate": weak_alone,
+            "gt_present_rate": gt_present,
+            "weak_present_rate": weak_present,
+            "low_alone_flag": low_alone,
+        }
+
+    risk_meta_by_class = {cid: _class_risk_meta(cid) for cid in class_ids}
+    high_risk_class_ids = {cid for cid, meta in risk_meta_by_class.items() if bool(meta.get("is_high_risk_class"))}
+
+    def _row_flags(row: Mapping[str, Any]) -> Dict[str, Any]:
+        gt = _safe_int(row.get("gt_raw_id"))
+        known_set = {int(x) for x in _unique_ints(row.get("candidate_ids_known"))}
+        active_extra = _active_extra_set(row)
+        extra_set = {int(x) for x in _unique_ints(row.get("candidate_ids_extra"))}
+        final_winner = _safe_int(row.get("final_winner_raw_id"))
+        suppressor = _safe_int(row.get("top_suppressor_raw_id"))
+        candidate_hubs = sorted((known_set | active_extra | extra_set) & hub_set)
+        pressure_types: List[str] = []
+        if known_set & hub_set:
+            pressure_types.append("hub_in_known_Yprime")
+        if active_extra & hub_set:
+            pressure_types.append("hub_in_active_extra")
+        if extra_set & hub_set:
+            pressure_types.append("hub_in_extra_candidates")
+        if final_winner in hub_set:
+            pressure_types.append("final_winner_is_hub")
+        if suppressor in hub_set:
+            pressure_types.append("top_suppressor_is_hub")
+        if final_winner == 773:
+            pressure_types.append("final_winner_is_person")
+        if suppressor == 773:
+            pressure_types.append("top_suppressor_is_person")
+        rank = _safe_int(row.get("gt_mining_rank"))
+        active_rescue = bool(_active_raw_contains(row) is True)
+        rank_rescue = bool(rank is not None and int(rank) <= current_k)
+        r_rescue = bool(row.get("r_final_gt_winner")) if row.get("r_final_gt_winner") is not None else False
+        top1_rescue = bool(row.get("final_top1_is_gt"))
+        pressure = bool(pressure_types)
+        rescue_types: List[str] = []
+        if active_rescue:
+            rescue_types.append("active_rescue")
+        if rank_rescue:
+            rescue_types.append("rank_topK_rescue")
+        if r_rescue:
+            rescue_types.append("responsibility_rescue")
+        if top1_rescue:
+            rescue_types.append("strict_top1_rescue")
+        if pressure and top1_rescue:
+            rescue_types.append("true_hub_rescue")
+        if (not pressure) and top1_rescue:
+            rescue_types.append("no_pressure_success")
+        return {
+            "gt_raw_id": gt,
+            "hub_pressure_present": pressure,
+            "hub_pressure_types": ";".join(sorted(set(pressure_types))),
+            "candidate_hub_raw_ids": candidate_hubs,
+            "candidate_hub_count": int(len(candidate_hubs)),
+            "active_rescue": active_rescue,
+            "rank_topK_rescue": rank_rescue,
+            "R_GT_winner_rescue": r_rescue,
+            "strict_top1_rescue": top1_rescue,
+            "any_rescue": bool(active_rescue or rank_rescue or r_rescue or top1_rescue),
+            "rescue_types": ";".join(rescue_types),
+            "gt_mining_rank": rank,
+            "final_winner_raw_id": final_winner,
+            "top_suppressor_raw_id": suppressor,
+        }
+
+    high_risk_rows: List[Dict[str, Any]] = []
+    examples: List[Dict[str, Any]] = []
+    grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for row in joined:
+        gt = _safe_int(row.get("gt_raw_id"))
+        if gt is None or int(gt) not in high_risk_class_ids:
+            continue
+        flags = _row_flags(row)
+        meta = risk_meta_by_class.get(int(gt), {})
+        label = _class_label(int(gt), records_by_raw)
+        enriched = dict(row)
+        enriched.update({
+            "gt_raw_id": int(gt),
+            "gt_name": label.get("name"),
+            **{k: v for k, v in meta.items() if k not in {"raw_id", "name"}},
+            **flags,
+            "final_winner_name": _class_label(int(flags.get("final_winner_raw_id")), records_by_raw).get("name") if flags.get("final_winner_raw_id") is not None else None,
+            "top_suppressor_name": _class_label(int(flags.get("top_suppressor_raw_id")), records_by_raw).get("name") if flags.get("top_suppressor_raw_id") is not None else None,
+        })
+        high_risk_rows.append(enriched)
+        grouped[int(gt)].append(enriched)
+        if bool(enriched.get("hub_pressure_present")) and bool(enriched.get("any_rescue")):
+            examples.append(enriched)
+        elif bool(enriched.get("strict_top1_rescue")):
+            examples.append(enriched)
+
+    def _rate(seq: Sequence[Mapping[str, Any]], key: str) -> Optional[float]:
+        return _rate_bools([bool(r.get(key)) for r in seq])
+
+    def _summarize_seq(seq: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        ranks = [float(r.get("gt_mining_rank")) for r in seq if _safe_int(r.get("gt_mining_rank")) is not None]
+        return {
+            "count": int(len(seq)),
+            "active_rescue_rate": _rate(seq, "active_rescue"),
+            "rank_topK_rescue_rate": _rate(seq, "rank_topK_rescue"),
+            "R_GT_winner_rescue_rate": _rate(seq, "R_GT_winner_rescue"),
+            "strict_top1_rescue_rate": _rate(seq, "strict_top1_rescue"),
+            "hub_pressure_rate": _rate(seq, "hub_pressure_present"),
+            "mean_gt_mining_rank": _mean(ranks),
+            "median_gt_mining_rank": _median(ranks),
+            "rank_missing_rate": _rate_bools([_safe_int(r.get("gt_mining_rank")) is None for r in seq]),
+        }
+
+    pressure_rows = [r for r in high_risk_rows if bool(r.get("hub_pressure_present"))]
+    no_pressure_rows = [r for r in high_risk_rows if not bool(r.get("hub_pressure_present"))]
+    true_hub_rescue_rows = [r for r in pressure_rows if bool(r.get("strict_top1_rescue"))]
+    responsibility_rescue_rows = [r for r in pressure_rows if bool(r.get("R_GT_winner_rescue"))]
+    slot_rescue_rows = [r for r in pressure_rows if bool(r.get("active_rescue"))]
+    rank_rescue_rows = [r for r in pressure_rows if bool(r.get("rank_topK_rescue"))]
+    collapse_failure_rows = [r for r in pressure_rows if not bool(r.get("strict_top1_rescue"))]
+    no_pressure_success_rows = [r for r in no_pressure_rows if bool(r.get("strict_top1_rescue"))]
+
+    class_report: List[Dict[str, Any]] = []
+    for gt in sorted(grouped):
+        seq = grouped[int(gt)]
+        meta = risk_meta_by_class.get(int(gt), {})
+        pressure_seq = [r for r in seq if bool(r.get("hub_pressure_present"))]
+        success_seq = [r for r in pressure_seq if bool(r.get("strict_top1_rescue"))]
+        failure_seq = [r for r in pressure_seq if not bool(r.get("strict_top1_rescue"))]
+        suppressors = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in failure_seq if _safe_int(r.get("top_suppressor_raw_id")) is not None)
+        winners = Counter(_safe_int(r.get("final_winner_raw_id")) for r in success_seq if _safe_int(r.get("final_winner_raw_id")) is not None)
+        top_supp_id = suppressors.most_common(1)[0][0] if suppressors else None
+        top_win_id = winners.most_common(1)[0][0] if winners else None
+        ranks_success = [float(r.get("gt_mining_rank")) for r in success_seq if _safe_int(r.get("gt_mining_rank")) is not None]
+        ranks_failure = [float(r.get("gt_mining_rank")) for r in failure_seq if _safe_int(r.get("gt_mining_rank")) is not None]
+        item = {
+            "raw_id": int(gt),
+            "name": meta.get("name") or _class_label(int(gt), records_by_raw).get("name"),
+            "gt_trajectory_count": int(len(seq)),
+            "risk_sources": meta.get("risk_sources"),
+            "P_person_given_class_gt": meta.get("P_person_given_class_gt"),
+            "P_person_given_class_weak": meta.get("P_person_given_class_weak"),
+            "max_P_hub_given_class_gt": meta.get("max_P_hub_given_class_gt"),
+            "max_P_hub_given_class_weak": meta.get("max_P_hub_given_class_weak"),
+            "gt_alone_rate": meta.get("gt_alone_rate"),
+            "weak_alone_rate": meta.get("weak_alone_rate"),
+            "max_cooccurring_hub_raw_id": meta.get("max_cooccurring_hub_raw_id"),
+            "max_cooccurring_hub_name": meta.get("max_cooccurring_hub_name"),
+            "hub_pressure_row_count": int(len(pressure_seq)),
+            "hub_pressure_row_rate": float(len(pressure_seq) / max(len(seq), 1)),
+            "active_rescue_count": int(sum(1 for r in pressure_seq if bool(r.get("active_rescue")))),
+            "active_rescue_rate_among_pressure": _rate(pressure_seq, "active_rescue"),
+            "rank_topK_rescue_count": int(sum(1 for r in pressure_seq if bool(r.get("rank_topK_rescue")))),
+            "rank_topK_rescue_rate_among_pressure": _rate(pressure_seq, "rank_topK_rescue"),
+            "R_GT_winner_rescue_count": int(sum(1 for r in pressure_seq if bool(r.get("R_GT_winner_rescue")))),
+            "R_GT_winner_rescue_rate_among_pressure": _rate(pressure_seq, "R_GT_winner_rescue"),
+            "strict_top1_rescue_count": int(len(success_seq)),
+            "strict_top1_rescue_rate_among_pressure": float(len(success_seq) / max(len(pressure_seq), 1)) if pressure_seq else None,
+            "collapse_failure_count": int(len(failure_seq)),
+            "collapse_failure_rate_among_pressure": float(len(failure_seq) / max(len(pressure_seq), 1)) if pressure_seq else None,
+            "no_pressure_success_count": int(sum(1 for r in seq if (not bool(r.get("hub_pressure_present"))) and bool(r.get("strict_top1_rescue")))),
+            "mean_gt_rank_success_pressure_top1": _mean(ranks_success),
+            "mean_gt_rank_failure_pressure_non_top1": _mean(ranks_failure),
+            "top_success_winner_raw_id": int(top_win_id) if top_win_id is not None else None,
+            "top_success_winner_name": _class_label(int(top_win_id), records_by_raw).get("name") if top_win_id is not None else None,
+            "top_failure_suppressor_raw_id": int(top_supp_id) if top_supp_id is not None else None,
+            "top_failure_suppressor_name": _class_label(int(top_supp_id), records_by_raw).get("name") if top_supp_id is not None else None,
+        }
+        class_report.append(item)
+    class_report.sort(key=lambda r: (-(int(r.get("strict_top1_rescue_count") or 0)), -(int(r.get("R_GT_winner_rescue_count") or 0)), -(int(r.get("gt_trajectory_count") or 0))))
+
+    def _compact_example(row: Mapping[str, Any]) -> Dict[str, Any]:
+        keys = [
+            "clip_id", "video_id", "trajectory_id", "tid", "gt_raw_id", "gt_name",
+            "risk_sources", "P_person_given_class_gt", "max_P_hub_given_class_gt", "gt_alone_rate", "weak_alone_rate",
+            "hub_pressure_present", "hub_pressure_types", "candidate_hub_raw_ids", "active_raw_contains",
+            "active_rescue", "rank_topK_rescue", "R_GT_winner_rescue", "strict_top1_rescue", "rescue_types",
+            "gt_mining_rank", "final_winner_raw_id", "final_winner_name", "top_suppressor_raw_id", "top_suppressor_name",
+            "candidate_ids_known", "candidate_ids_extra",
+        ]
+        out = {k: row.get(k) for k in keys if k in row}
+        # Keep optional score/mass fields if the upstream diagnostics already exposed them.
+        for k in ["score_gt", "score_person", "score_top_hub", "margin_gt_minus_person", "margin_gt_minus_top_hub", "r_mass_gt", "r_mass_person", "r_mass_top_hub"]:
+            if k in row:
+                out[k] = row.get(k)
+        return out
+
+    example_rows = [_compact_example(r) for r in sorted(
+        examples,
+        key=lambda r: (
+            0 if bool(r.get("strict_top1_rescue")) and bool(r.get("hub_pressure_present")) else 1,
+            0 if bool(r.get("R_GT_winner_rescue")) else 1,
+            999999 if _safe_int(r.get("gt_mining_rank")) is None else int(r.get("gt_mining_rank")),
+            str(r.get("gt_name")),
+        ),
+    )[:max(1, int(top_examples))]]
+
+    contrast_rows = [
+        {"group": "high_risk_all", **_summarize_seq(high_risk_rows)},
+        {"group": "hub_pressure_rows", **_summarize_seq(pressure_rows)},
+        {"group": "no_pressure_rows", **_summarize_seq(no_pressure_rows)},
+        {"group": "true_hub_rescue_top1", **_summarize_seq(true_hub_rescue_rows)},
+        {"group": "responsibility_rescue", **_summarize_seq(responsibility_rescue_rows)},
+        {"group": "slot_active_rescue", **_summarize_seq(slot_rescue_rows)},
+        {"group": "rank_topK_rescue", **_summarize_seq(rank_rescue_rows)},
+        {"group": "collapse_failure_pressure_non_top1", **_summarize_seq(collapse_failure_rows)},
+        {"group": "no_pressure_success_top1", **_summarize_seq(no_pressure_success_rows)},
+    ]
+
+    summary = {
+        "status": "PASS",
+        "definition": "High co-occurrence-risk classes are classes with max P(hub|class) or P(person|class) >= hub_collapse_risk_threshold in GT/weak co-occurrence. Rescues are counted on formal-aligned rows without rescoring.",
+        "current_k": int(current_k),
+        "risk_threshold": float(risk_threshold),
+        "low_alone_threshold": float(low_alone_threshold),
+        "row_count": int(len(joined)),
+        "high_risk_class_count": int(len(high_risk_class_ids)),
+        "high_risk_row_count": int(len(high_risk_rows)),
+        "hub_pressure_row_count": int(len(pressure_rows)),
+        "hub_pressure_rate_among_high_risk_rows": float(len(pressure_rows) / max(len(high_risk_rows), 1)),
+        "active_rescue_count": int(len(slot_rescue_rows)),
+        "active_rescue_rate_among_pressure_rows": float(len(slot_rescue_rows) / max(len(pressure_rows), 1)),
+        "rank_topK_rescue_count": int(len(rank_rescue_rows)),
+        "rank_topK_rescue_rate_among_pressure_rows": float(len(rank_rescue_rows) / max(len(pressure_rows), 1)),
+        "R_GT_winner_rescue_count": int(len(responsibility_rescue_rows)),
+        "R_GT_winner_rescue_rate_among_pressure_rows": float(len(responsibility_rescue_rows) / max(len(pressure_rows), 1)),
+        "strict_top1_rescue_count": int(len(true_hub_rescue_rows)),
+        "strict_top1_rescue_rate_among_pressure_rows": float(len(true_hub_rescue_rows) / max(len(pressure_rows), 1)),
+        "collapse_failure_count": int(len(collapse_failure_rows)),
+        "collapse_failure_rate_among_pressure_rows": float(len(collapse_failure_rows) / max(len(pressure_rows), 1)),
+        "no_pressure_success_count": int(len(no_pressure_success_rows)),
+        "no_pressure_success_rate_among_high_risk_rows": float(len(no_pressure_success_rows) / max(len(high_risk_rows), 1)),
+        "success_mode_interpretation": {
+            "active_rescue": "GT enters active extra under hub pressure.",
+            "rank_topK_rescue": "GT mining rank is within current TopK under hub pressure.",
+            "responsibility_rescue": "R_final/E-step winner is GT under hub pressure.",
+            "strict_top1_rescue": "final top1 is GT under hub pressure; this is the strongest rescue evidence.",
+            "no_pressure_success": "Class is globally high-risk but this row did not expose hub pressure; not counted as overcoming collapse.",
+        },
+    }
+    return {
+        "summary": summary,
+        "class_rows": class_report,
+        "example_rows": example_rows,
+        "contrast_rows": contrast_rows,
+    }
+
 def _text_semantic_confusion_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int, neighbor_topk: int, sim_threshold: float) -> Dict[str, Any]:
     joined = _rows_joined(rows)
     failure_rows = [r for r in joined if not bool(r.get("final_top1_is_gt")) and _safe_int(r.get("final_winner_raw_id")) is not None]
@@ -2680,6 +3008,41 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     fully_missed_class_report_payload = _fully_missed_class_report_payload(fully_missed_class_report_rows)
     fully_missed_trajectory_weighted_payload = _fully_missed_trajectory_weighted_payload(fully_missed_class_report_rows)
 
+    all_taxonomy_gt_ids = sorted({
+        int(x)
+        for x in (_safe_int(r.get("gt_raw_id")) for r in taxonomy_rows)
+        if x is not None
+    })
+    hub_collapse_all_class_gt_cooccurrence_payload = _class_cooccurrence_payload_from_units(
+        units=annotation_units if annotation_units else _units_from_rows(row_diagnostics, unit_key="clip_id", class_key="gt_raw_id"),
+        target_raw_ids=all_taxonomy_gt_ids,
+        hub_raw_ids=config.hub_raw_ids,
+        records_by_raw=records_by_raw,
+        top_n=config.top_classes,
+        source=(f"lvvis_annotation:{annotation_meta.get('path', 'missing')}" if annotation_units else "trajectory_gt_sidecar_from_effective_examples"),
+        unit_level=str(annotation_meta.get("unit_level", "video_id")) if annotation_units else "clip_id",
+    )
+    hub_collapse_all_class_weak_cooccurrence_payload = _class_cooccurrence_payload_from_units(
+        units=_weak_units_from_examples(effective_examples, unit_key="clip_id"),
+        target_raw_ids=all_taxonomy_gt_ids,
+        hub_raw_ids=config.hub_raw_ids,
+        records_by_raw=records_by_raw,
+        top_n=config.top_classes,
+        source="stage_effective_examples_observed_or_candidate_known",
+        unit_level="clip_id",
+    )
+    hub_collapse_rescue_payload = _hub_collapse_rescue_audit_payload(
+        rows=taxonomy_rows,
+        gt_class_cooccurrence=hub_collapse_all_class_gt_cooccurrence_payload,
+        weak_class_cooccurrence=hub_collapse_all_class_weak_cooccurrence_payload,
+        hub_raw_ids=config.hub_raw_ids,
+        records_by_raw=records_by_raw,
+        risk_threshold=float(config.hub_collapse_risk_threshold),
+        low_alone_threshold=float(config.hub_collapse_low_alone_threshold),
+        current_k=int(current_k),
+        top_examples=int(config.hub_collapse_top_examples),
+    )
+
     model_hub_current_payload = _model_hub_current_payload(
         taxonomy_rows,
         hub_raw_ids=config.hub_raw_ids,
@@ -2721,6 +3084,7 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "full_class_weak_label_cooccurrence": full_class_weak_cooccurrence_payload,
         "fully_missed_blind_spot_class_report": fully_missed_class_report_payload,
         "fully_missed_blind_spot_trajectory_weighted_summary": fully_missed_trajectory_weighted_payload,
+        "hub_collapse_rescue_audit": hub_collapse_rescue_payload.get("summary", {}),
         "blind_spot_type_histogram": dict(Counter(str(r.get("blind_spot_type")) for r in blind_spot_toplist_rows)),
     }
 
@@ -2857,6 +3221,12 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "formal_aligned_fully_missed_blind_spot_class_report_csv": output_dir / "formal_aligned_fully_missed_blind_spot_class_report.csv",
         "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary": output_dir / "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary.json",
         "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary_csv": output_dir / "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary.csv",
+        "formal_aligned_hub_collapse_rescue_summary": output_dir / "formal_aligned_hub_collapse_rescue_summary.json",
+        "formal_aligned_hub_collapse_rescue_class_report": output_dir / "formal_aligned_hub_collapse_rescue_class_report.json",
+        "formal_aligned_hub_collapse_rescue_class_report_csv": output_dir / "formal_aligned_hub_collapse_rescue_class_report.csv",
+        "formal_aligned_hub_collapse_rescue_row_examples": output_dir / "formal_aligned_hub_collapse_rescue_row_examples.jsonl",
+        "formal_aligned_hub_collapse_rescue_success_failure_contrast": output_dir / "formal_aligned_hub_collapse_rescue_success_failure_contrast.json",
+        "formal_aligned_hub_collapse_rescue_success_failure_contrast_csv": output_dir / "formal_aligned_hub_collapse_rescue_success_failure_contrast.csv",
     }
     _write_json(files["summary"], summary)
     _write_json(files["recall_at_k_curve"], recall_curve)
@@ -2906,6 +3276,13 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     if bool(config.emit_fully_missed_trajectory_weighted_report) or bool(config.emit_fully_missed_class_report) or bool(config.emit_failure_taxonomy):
         _write_json(files["formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary"], fully_missed_trajectory_weighted_payload)
         _write_csv(files["formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary_csv"], fully_missed_trajectory_weighted_payload.get("all_rows_for_csv", []))
+    if bool(config.emit_hub_collapse_rescue_audit) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_hub_collapse_rescue_summary"], hub_collapse_rescue_payload.get("summary", {}))
+        _write_json(files["formal_aligned_hub_collapse_rescue_class_report"], {"status": "PASS", "rows": hub_collapse_rescue_payload.get("class_rows", [])})
+        _write_csv(files["formal_aligned_hub_collapse_rescue_class_report_csv"], hub_collapse_rescue_payload.get("class_rows", []))
+        _write_jsonl(files["formal_aligned_hub_collapse_rescue_row_examples"], hub_collapse_rescue_payload.get("example_rows", []))
+        _write_json(files["formal_aligned_hub_collapse_rescue_success_failure_contrast"], {"status": "PASS", "rows": hub_collapse_rescue_payload.get("contrast_rows", [])})
+        _write_csv(files["formal_aligned_hub_collapse_rescue_success_failure_contrast_csv"], hub_collapse_rescue_payload.get("contrast_rows", []))
     if bool(config.emit_failure_taxonomy):
         _write_json(files["formal_aligned_failure_taxonomy_summary"], failure_taxonomy_summary)
         _write_csv(files["formal_aligned_rank_bucket_by_class"], rank_bucket_by_class_rows)
@@ -2947,7 +3324,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--emit_weak_label_cooccurrence", type=_parse_bool, default=False)
     p.add_argument("--emit_fully_missed_class_report", type=_parse_bool, default=False)
     p.add_argument("--emit_fully_missed_trajectory_weighted_report", type=_parse_bool, default=False)
+    p.add_argument("--emit_hub_collapse_rescue_audit", type=_parse_bool, default=False)
     p.add_argument("--emit_full_class_cooccurrence", type=_parse_bool, default=False)
+    p.add_argument("--hub_collapse_risk_threshold", type=float, default=0.5)
+    p.add_argument("--hub_collapse_low_alone_threshold", type=float, default=0.1)
+    p.add_argument("--hub_collapse_top_examples", type=int, default=200)
     p.add_argument("--strong_hub_cooccurrence_threshold", type=float, default=0.5)
     p.add_argument("--weak_unobservable_present_threshold", type=float, default=0.05)
     p.add_argument("--weak_unobservable_alone_threshold", type=float, default=0.05)
@@ -2989,7 +3370,11 @@ def main() -> int:
         emit_weak_label_cooccurrence=bool(args.emit_weak_label_cooccurrence),
         emit_fully_missed_class_report=bool(args.emit_fully_missed_class_report),
         emit_fully_missed_trajectory_weighted_report=bool(args.emit_fully_missed_trajectory_weighted_report),
+        emit_hub_collapse_rescue_audit=bool(args.emit_hub_collapse_rescue_audit),
         emit_full_class_cooccurrence=bool(args.emit_full_class_cooccurrence),
+        hub_collapse_risk_threshold=float(args.hub_collapse_risk_threshold),
+        hub_collapse_low_alone_threshold=float(args.hub_collapse_low_alone_threshold),
+        hub_collapse_top_examples=max(1, int(args.hub_collapse_top_examples)),
         strong_hub_cooccurrence_threshold=float(args.strong_hub_cooccurrence_threshold),
         weak_unobservable_present_threshold=float(args.weak_unobservable_present_threshold),
         weak_unobservable_alone_threshold=float(args.weak_unobservable_alone_threshold),
