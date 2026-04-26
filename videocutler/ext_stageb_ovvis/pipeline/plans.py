@@ -10,6 +10,7 @@ _ALLOWED_UNKNOWN_MODES=('prototype','scalar_bias')
 _ALLOWED_EXTRA_SELECTION_MODES=('trajectory_epoch_topk_nonYprime','clip_observed_dissimilar_topk')
 _ALLOWED_EXTRA_ACTIVATION_MODES=('always','margin_over_yprime')
 _ALLOWED_EXTRA_COVERAGE_MODES=('observed_only','unified_with_yprime')
+_ALLOWED_AUG_LOSS_MODES=('soft_ce','hard_candidate_nce')
 _ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug')
 _ALLOWED_METRICS_PROFILES=('default','formal')
 _ALLOWED_BENCHMARKS=('lvvis',)
@@ -61,6 +62,10 @@ class TrainPlan:
     extra_consensus_bonus_lambda:float=0.0
     extra_coverage_mode:str='observed_only'
     extra_coverage_scale:float=0.0
+    aug_loss_mode:str='soft_ce'
+    aug_nce_tau:float=0.07
+    aug_nce_positive_min_resp:float=0.0
+    aug_nce_include_unknown:bool=False
     base_release_margin:float=0.0
     em_subiterations:int=2
     base_em_refresh_policy:str='stage_once'
@@ -125,7 +130,7 @@ def resolve_train_plan(args)->TrainPlan:
         aug_learning_rate=None if args.aug_learning_rate is None else float(args.aug_learning_rate),
         weight_decay=float(args.weight_decay), lambda_frame=None if args.lambda_frame is None else float(args.lambda_frame),
         lambda_cov=float(args.lambda_cov), t_dis_init=float(args.t_dis_init), smoke_max_trajectories=int(args.smoke_max_trajectories),
-        subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction), k_extra=int(getattr(args, 'k_extra', 2)), extra_alpha=float(getattr(args, 'extra_alpha', 0.25)), extra_selection_mode=_require(str(getattr(args, 'extra_selection_mode', 'trajectory_epoch_topk_nonYprime')), _ALLOWED_EXTRA_SELECTION_MODES, 'extra_selection_mode'), clip_extra_obs_sim_max=float(getattr(args, 'clip_extra_obs_sim_max', 0.90)), clip_extra_allow_empty=bool(getattr(args, 'clip_extra_allow_empty', True)), extra_activation_mode=_require(str(getattr(args, 'extra_activation_mode', 'always')), _ALLOWED_EXTRA_ACTIVATION_MODES, 'extra_activation_mode'), extra_activation_margin=float(getattr(args, 'extra_activation_margin', 0.0)), extra_penalty_scale=float(getattr(args, 'extra_penalty_scale', 1.0)), extra_consensus_bonus_lambda=float(getattr(args, 'extra_consensus_bonus_lambda', 0.0)), extra_coverage_mode=_require(str(getattr(args, 'extra_coverage_mode', 'observed_only')), _ALLOWED_EXTRA_COVERAGE_MODES, 'extra_coverage_mode'), extra_coverage_scale=float(getattr(args, 'extra_coverage_scale', 0.0)), base_release_margin=float(args.base_release_margin),
+        subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction), k_extra=int(getattr(args, 'k_extra', 2)), extra_alpha=float(getattr(args, 'extra_alpha', 0.25)), extra_selection_mode=_require(str(getattr(args, 'extra_selection_mode', 'trajectory_epoch_topk_nonYprime')), _ALLOWED_EXTRA_SELECTION_MODES, 'extra_selection_mode'), clip_extra_obs_sim_max=float(getattr(args, 'clip_extra_obs_sim_max', 0.90)), clip_extra_allow_empty=bool(getattr(args, 'clip_extra_allow_empty', True)), extra_activation_mode=_require(str(getattr(args, 'extra_activation_mode', 'always')), _ALLOWED_EXTRA_ACTIVATION_MODES, 'extra_activation_mode'), extra_activation_margin=float(getattr(args, 'extra_activation_margin', 0.0)), extra_penalty_scale=float(getattr(args, 'extra_penalty_scale', 1.0)), extra_consensus_bonus_lambda=float(getattr(args, 'extra_consensus_bonus_lambda', 0.0)), extra_coverage_mode=_require(str(getattr(args, 'extra_coverage_mode', 'observed_only')), _ALLOWED_EXTRA_COVERAGE_MODES, 'extra_coverage_mode'), extra_coverage_scale=float(getattr(args, 'extra_coverage_scale', 0.0)), aug_loss_mode=_require(str(getattr(args, 'aug_loss_mode', 'soft_ce')), _ALLOWED_AUG_LOSS_MODES, 'aug_loss_mode'), aug_nce_tau=float(getattr(args, 'aug_nce_tau', 0.07)), aug_nce_positive_min_resp=float(getattr(args, 'aug_nce_positive_min_resp', 0.0)), aug_nce_include_unknown=bool(getattr(args, 'aug_nce_include_unknown', False)), base_release_margin=float(args.base_release_margin),
         em_subiterations=max(0, int(getattr(args, 'em_subiterations', 2))),
         base_em_refresh_policy=_require(str(getattr(args, 'base_em_refresh_policy', 'stage_once')), _ALLOWED_BASE_EM_REFRESH_POLICIES, 'base_em_refresh_policy'),
         unknown_mode=_require(str(getattr(args, 'unknown_mode', 'prototype')), _ALLOWED_UNKNOWN_MODES, 'unknown_mode'),

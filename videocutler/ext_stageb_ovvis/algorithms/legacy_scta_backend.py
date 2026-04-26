@@ -4,6 +4,7 @@ import json
 import math
 import random
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -515,6 +516,10 @@ class LegacySCTABackendConfig:
     extra_consensus_bonus_lambda: float = 0.0
     extra_coverage_mode: str = 'observed_only'
     extra_coverage_scale: float = 0.0
+    aug_loss_mode: str = 'soft_ce'
+    aug_nce_tau: float = 0.07
+    aug_nce_positive_min_resp: float = 0.0
+    aug_nce_include_unknown: bool = False
     extra_refresh_interval_iters: Optional[int] = None
     runtime_asset_source: str = 'local_canonical_assets'
     runtime_asset_source_local_incomplete: bool = False
@@ -572,6 +577,161 @@ def _unknown_logit(
         return torch.ones((int(z.shape[0]),), device=z.device, dtype=z.dtype) * b_u.to(device=z.device, dtype=z.dtype)
     raise ValueError(f"unsupported unknown_mode: {mode!r}")
 
+
+
+def _project_candidate_tensor_batch(
+    *,
+    projector: Projector,
+    candidate_tensor: torch.Tensor,
+) -> torch.Tensor:
+    """Project a padded [B, C, W] candidate tensor entirely on GPU.
+
+    Invalid padded candidate rows are still projected but later masked out of the
+    loss; masked logits have zero gradient. This keeps the hard-candidate NCE
+    path batched and avoids per-row loss computation.
+    """
+    if candidate_tensor.ndim != 3:
+        raise ValueError(f'candidate_tensor must be rank-3 [B,C,W], got shape={tuple(candidate_tensor.shape)}')
+    bsz, cmax, width = int(candidate_tensor.shape[0]), int(candidate_tensor.shape[1]), int(candidate_tensor.shape[2])
+    flat = candidate_tensor.reshape(bsz * cmax, width)
+    input_dim = int(getattr(getattr(projector, 'config', None), 'input_dim', width))
+    output_dim = int(getattr(getattr(projector, 'config', None), 'output_dim', width))
+    if width == input_dim:
+        flat = projector(flat)
+    elif width == output_dim:
+        flat = F.normalize(flat, p=2.0, dim=-1)
+    else:
+        raise ValueError(
+            f'candidate tensor width {width} does not match projector input/output dims '
+            f'({input_dim}, {output_dim})'
+        )
+    flat = F.normalize(flat, p=2.0, dim=-1)
+    return flat.reshape(bsz, cmax, int(flat.shape[-1]))
+
+
+def _hard_candidate_nce_batch_loss(
+    *,
+    batch_examples: Sequence[Mapping[str, Any]],
+    stage_id: str,
+    cache: ResponsibilityCache,
+    text_projector: Projector,
+    device: torch.device,
+    tau: float,
+    positive_min_resp: float,
+) -> Tuple[torch.Tensor | None, Dict[str, Any]]:
+    """Pure hard-candidate InfoNCE for softem_aug M-step.
+
+    Positive: argmax R_final over text candidates D(v)=Y'(v) U Extra(v).
+    Negatives: all other valid text candidates in the same row.
+    Unknown is intentionally excluded from both positive and negative sets.
+    """
+    if not batch_examples:
+        return None, {'valid_row_count': 0}
+    domain_ids_list: List[List[int]] = []
+    known_sets: List[set[int]] = []
+    extra_sets: List[set[int]] = []
+    candidate_mats: List[np.ndarray] = []
+    carriers: List[np.ndarray] = []
+    r_candidates: List[List[float]] = []
+    r_unknown: List[float] = []
+    widths: List[int] = []
+    cmax = 0
+    for ex in batch_examples:
+        domain_ids, known_ids, extra_ids = build_stage_domain_indices(ex.get('candidate_ids_known', []), ex.get('candidate_ids_extra', []), stage_id=stage_id)
+        if not domain_ids:
+            raise RuntimeError(f'empty candidate domain for stage {stage_id}')
+        mat = np.asarray(ex['candidate_matrix'], dtype=np.float32)[:len(domain_ids)]
+        if mat.ndim != 2:
+            raise ValueError(f'candidate_matrix must be rank-2 for trajectory_id={ex.get("trajectory_id")!r}')
+        target_row = cache.by_trajectory_id[str(ex['trajectory_id'])]
+        domain_ids_list.append([int(x) for x in domain_ids])
+        known_sets.append({int(x) for x in known_ids})
+        extra_sets.append({int(x) for x in extra_ids})
+        candidate_mats.append(mat)
+        carriers.append(_normalize_np(np.asarray(ex['carrier_vec'], dtype=np.float32)))
+        r_candidates.append([float(target_row['r_final'][str(int(raw_id))]) for raw_id in domain_ids])
+        r_unknown.append(float(target_row['r_final'].get('unknown', 0.0)))
+        widths.append(int(mat.shape[1]))
+        cmax = max(cmax, len(domain_ids))
+    if len(set(widths)) != 1:
+        raise ValueError(f'inconsistent candidate matrix widths in microbatch: {sorted(set(widths))}')
+    bsz = len(batch_examples)
+    width = widths[0]
+    candidate_np = np.zeros((bsz, cmax, width), dtype=np.float32)
+    valid_np = np.zeros((bsz, cmax), dtype=bool)
+    r_np = np.zeros((bsz, cmax), dtype=np.float32)
+    observed_mask_np = np.zeros((bsz, cmax), dtype=bool)
+    extra_mask_np = np.zeros((bsz, cmax), dtype=bool)
+    raw_id_np = np.full((bsz, cmax), -1, dtype=np.int64)
+    for i, (domain_ids, mat, r_vals, known, extra) in enumerate(zip(domain_ids_list, candidate_mats, r_candidates, known_sets, extra_sets)):
+        n = len(domain_ids)
+        candidate_np[i, :n, :] = mat
+        valid_np[i, :n] = True
+        r_np[i, :n] = np.asarray(r_vals, dtype=np.float32)
+        raw_id_np[i, :n] = np.asarray(domain_ids, dtype=np.int64)
+        observed_mask_np[i, :n] = np.asarray([int(x) in known for x in domain_ids], dtype=bool)
+        extra_mask_np[i, :n] = np.asarray([int(x) in extra for x in domain_ids], dtype=bool)
+    carriers_t = torch.from_numpy(np.stack(carriers, axis=0).astype(np.float32)).to(device=device, dtype=torch.float32)
+    carriers_t = F.normalize(carriers_t, p=2.0, dim=-1)
+    candidate_t = torch.from_numpy(candidate_np).to(device=device, dtype=torch.float32)
+    candidate_proj = _project_candidate_tensor_batch(projector=text_projector, candidate_tensor=candidate_t)
+    cosine_logits = torch.bmm(candidate_proj, carriers_t.unsqueeze(-1)).squeeze(-1)
+    valid_mask = torch.from_numpy(valid_np).to(device=device, dtype=torch.bool)
+    r_tensor = torch.from_numpy(r_np).to(device=device, dtype=torch.float32)
+    target_scores = r_tensor.masked_fill(~valid_mask, -1.0e4)
+    pos_resp, pos_idx = target_scores.max(dim=-1)
+    valid_rows = (valid_mask.sum(dim=-1) >= 2) & (pos_resp >= float(positive_min_resp))
+    valid_count = int(valid_rows.detach().sum().cpu().item())
+    stats: Dict[str, Any] = {
+        'valid_row_count': valid_count,
+        'input_row_count': int(bsz),
+        'positive_min_resp': float(positive_min_resp),
+    }
+    if valid_count <= 0:
+        return None, stats
+    nce_logits = cosine_logits.masked_fill(~valid_mask, -1.0e4) / float(tau)
+    losses = F.cross_entropy(nce_logits[valid_rows], pos_idx[valid_rows], reduction='none')
+    loss = losses.mean()
+    pos_idx_cpu = pos_idx.detach().cpu().numpy()
+    valid_cpu = valid_rows.detach().cpu().numpy().astype(bool)
+    positive_domain_hist = Counter()
+    positive_class_hist = Counter()
+    for i in range(bsz):
+        if not bool(valid_cpu[i]):
+            continue
+        j = int(pos_idx_cpu[i])
+        raw_id = int(raw_id_np[i, j])
+        positive_class_hist[raw_id] += 1
+        if bool(observed_mask_np[i, j]):
+            positive_domain_hist['Yprime'] += 1
+        elif bool(extra_mask_np[i, j]):
+            positive_domain_hist['extra'] += 1
+        else:
+            positive_domain_hist['other_text_candidate'] += 1
+    stats.update({
+        'loss_values': [float(x) for x in losses.detach().cpu().tolist()],
+        'positive_resp_values': [float(x) for x in pos_resp[valid_rows].detach().cpu().tolist()],
+        'positive_domain_histogram': dict(positive_domain_hist),
+        'positive_class_histogram': {str(k): int(v) for k, v in positive_class_hist.items()},
+    })
+    # Responsibility diagnostics use the same R_final tensor as soft CE, but are
+    # computed vectorized from the padded row tensors.
+    observed_mask = torch.from_numpy(observed_mask_np).to(device=device, dtype=torch.bool)
+    extra_mask = torch.from_numpy(extra_mask_np).to(device=device, dtype=torch.bool)
+    r_unknown_t = torch.from_numpy(np.asarray(r_unknown, dtype=np.float32)).to(device=device, dtype=torch.float32)
+    observed_den = observed_mask.sum(dim=-1).clamp_min(1)
+    extra_den = extra_mask.sum(dim=-1).clamp_min(1)
+    observed_mean = (r_tensor.masked_fill(~observed_mask, 0.0).sum(dim=-1) / observed_den).detach().cpu().tolist()
+    extra_mean = (r_tensor.masked_fill(~extra_mask, 0.0).sum(dim=-1) / extra_den).detach().cpu().tolist()
+    target_full = torch.cat([r_unknown_t[:, None], r_tensor], dim=1)
+    entropy = (-(target_full * torch.log(target_full.clamp_min(1e-12))).sum(dim=-1)).detach().cpu().tolist()
+    stats.update({
+        'unknown_resp_values': [float(x) for x in r_unknown_t.detach().cpu().tolist()],
+        'observed_resp_values': [float(x) for x in observed_mean],
+        'extra_resp_values': [float(x) for x in extra_mean],
+        'entropy_values': [float(x) for x in entropy],
+    })
+    return loss, stats
 
 def _normalize_mass(mass: Mapping[str, float]) -> Dict[str, float]:
     out: Dict[str, float] = {}
@@ -994,6 +1154,14 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         )
     if str(config.extra_activation_mode) not in {'always', 'margin_over_yprime'}:
         raise ValueError(f"extra_activation_mode must be 'always' or 'margin_over_yprime', got {config.extra_activation_mode!r}")
+    if str(getattr(config, 'aug_loss_mode', 'soft_ce')) not in {'soft_ce', 'hard_candidate_nce'}:
+        raise ValueError(f"aug_loss_mode must be 'soft_ce' or 'hard_candidate_nce', got {getattr(config, 'aug_loss_mode', None)!r}")
+    if float(getattr(config, 'aug_nce_tau', 0.07)) <= 0.0:
+        raise ValueError(f"aug_nce_tau must be > 0, got {getattr(config, 'aug_nce_tau', None)!r}")
+    if float(getattr(config, 'aug_nce_positive_min_resp', 0.0)) < 0.0:
+        raise ValueError(f"aug_nce_positive_min_resp must be >= 0, got {getattr(config, 'aug_nce_positive_min_resp', None)!r}")
+    if bool(getattr(config, 'aug_nce_include_unknown', False)) and str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce':
+        raise ValueError('hard_candidate_nce currently requires aug_nce_include_unknown=false; unknown is deliberately excluded from positive/negative candidate contrast.')
     _set_seed(int(config.seed))
     device = torch.device(str(config.device))
     prepared = _prepare_examples(materialized_samples, output_root=output_root, dataset_name=config.dataset_name, trajectory_source_branch=config.trajectory_source_branch)
@@ -1028,6 +1196,12 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         refresh_interval = int(config.extra_refresh_interval_iters) if config.extra_refresh_interval_iters is not None else max(len(examples), 1)
         refresh_interval = max(int(refresh_interval), 1)
         stage_trace_sample: List[Dict[str, Any]] = []
+        aug_nce_valid_row_count_total = 0
+        aug_nce_input_row_count_total = 0
+        aug_nce_loss_values: List[float] = []
+        aug_nce_positive_resp_values: List[float] = []
+        aug_nce_positive_domain_hist: Counter[str] = Counter()
+        aug_nce_positive_class_hist: Counter[int] = Counter()
 
         active_examples_by_tid, cache, runtime_extra_cache, stage_trace_sample = _refresh_stage_runtime_state_unknown(stage_id=stage.stage_id, unknown_init_mode=str(config.unknown_init_mode), base_examples=examples, base_cache=cache, text_projector=text_projector, theta_t=theta_t, unknown_prototype=unknown_prototype, b_u=b_u, unknown_mode=str(config.unknown_mode), output_root=output_root, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), lambda_cov=float(config.lambda_cov), em_subiterations=max(0, int(config.em_subiterations)), device=device, snapshot_id='epoch_000' if str(stage.stage_id) == 'softem_aug' else 'stage_start', extra_selection_mode=str(config.extra_selection_mode), clip_extra_obs_sim_max=float(config.clip_extra_obs_sim_max), clip_extra_allow_empty=bool(config.clip_extra_allow_empty), extra_activation_mode=str(config.extra_activation_mode), extra_activation_margin=float(config.extra_activation_margin), extra_penalty_scale=float(config.extra_penalty_scale), extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda), extra_coverage_mode=str(config.extra_coverage_mode), extra_coverage_scale=float(config.extra_coverage_scale))
         base_em_refresh_policy = str(getattr(config, 'base_em_refresh_policy', 'stage_once'))
@@ -1073,45 +1247,80 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                     sample_observed_responsibilities: List[float] = []
                     sample_extra_responsibilities: List[float] = []
                     sample_entropies: List[float] = []
-                    for batch_index in batch_indices:
-                        ex = stage_examples[int(batch_index)]
-                        tid = str(ex['trajectory_id'])
-                        domain_ids, known_ids, extra_ids = build_stage_domain_indices(ex.get('candidate_ids_known', []), ex.get('candidate_ids_extra', []), stage_id=stage.stage_id)
-                        stage_candidate_count = len(domain_ids)
-                        if stage_candidate_count <= 0:
-                            raise RuntimeError(f'empty candidate domain for stage {stage.stage_id}')
-                        current_t_dis = _compute_t_dis(theta_t)
-                        logits_known_extra = score_carrier_logits_torch(projector=text_projector, carrier_vec=ex['carrier_vec'], candidate_matrix=ex['candidate_matrix'], temperature=current_t_dis)
-                        stage_logits_candidates = logits_known_extra[:stage_candidate_count]
-                        z = torch.from_numpy(_normalize_np(np.asarray(ex['carrier_vec'], dtype=np.float32))).to(device=device, dtype=torch.float32).unsqueeze(0)
-                        unknown_logit = _unknown_logit(z, unknown_mode=str(config.unknown_mode), unknown_prototype=unknown_prototype, b_u=b_u, temperature=current_t_dis).reshape(())
-                        stage_logits = torch.cat([unknown_logit.reshape(1), stage_logits_candidates], dim=0)
-                        target_row = cache.by_trajectory_id[str(tid)]
-                        target = torch.tensor([target_row['r_final']['unknown'], *[target_row['r_final'][str(int(raw_id))] for raw_id in domain_ids]], device=device, dtype=torch.float32)
-                        sample_loss = -(target * torch.log_softmax(stage_logits, dim=0)).sum()
-                        batch_loss_accum = sample_loss if batch_loss_accum is None else (batch_loss_accum + sample_loss)
-                        effective_responsibility_unit_count += 1
-                        sample_losses.append(float(sample_loss.detach().cpu().item()))
-                        unknown_resp_value = float(target[0].detach().cpu().item())
-                        observed_positions = [idx for idx, raw_id in enumerate(domain_ids) if int(raw_id) in {int(x) for x in known_ids}]
-                        observed_resp_value = float(target[[idx + 1 for idx in observed_positions]].mean().detach().cpu().item()) if observed_positions else 0.0
-                        extra_positions = [idx for idx, raw_id in enumerate(domain_ids) if int(raw_id) in {int(x) for x in extra_ids}]
-                        extra_resp_value = float(target[[idx + 1 for idx in extra_positions]].mean().detach().cpu().item()) if extra_positions else 0.0
-                        entropy_value = float((-(target * torch.log(target.clamp_min(1e-12)))).sum().detach().cpu().item())
-                        sample_unknown_responsibilities.append(unknown_resp_value)
-                        sample_observed_responsibilities.append(observed_resp_value)
-                        sample_extra_responsibilities.append(extra_resp_value)
-                        sample_entropies.append(entropy_value)
-                        epoch_unknown_responsibilities.append(unknown_resp_value)
-                        epoch_observed_responsibilities.append(observed_resp_value)
-                        epoch_extra_responsibilities.append(extra_resp_value)
-                        epoch_entropies.append(entropy_value)
+                    stage_loss_mode = str(getattr(config, 'aug_loss_mode', 'soft_ce')) if str(stage.stage_id) == 'softem_aug' else 'soft_ce'
+                    if stage_loss_mode == 'hard_candidate_nce':
+                        batch_examples = [stage_examples[int(batch_index)] for batch_index in batch_indices]
+                        nce_loss, nce_stats = _hard_candidate_nce_batch_loss(
+                            batch_examples=batch_examples,
+                            stage_id=str(stage.stage_id),
+                            cache=cache,
+                            text_projector=text_projector,
+                            device=device,
+                            tau=float(getattr(config, 'aug_nce_tau', 0.07)),
+                            positive_min_resp=float(getattr(config, 'aug_nce_positive_min_resp', 0.0)),
+                        )
+                        if nce_loss is not None:
+                            effective_responsibility_unit_count = int(nce_stats.get('valid_row_count', 0))
+                            batch_loss_accum = nce_loss * float(effective_responsibility_unit_count)
+                            sample_losses.extend([float(x) for x in nce_stats.get('loss_values', [])])
+                            sample_unknown_responsibilities.extend([float(x) for x in nce_stats.get('unknown_resp_values', [])])
+                            sample_observed_responsibilities.extend([float(x) for x in nce_stats.get('observed_resp_values', [])])
+                            sample_extra_responsibilities.extend([float(x) for x in nce_stats.get('extra_resp_values', [])])
+                            sample_entropies.extend([float(x) for x in nce_stats.get('entropy_values', [])])
+                            epoch_unknown_responsibilities.extend([float(x) for x in nce_stats.get('unknown_resp_values', [])])
+                            epoch_observed_responsibilities.extend([float(x) for x in nce_stats.get('observed_resp_values', [])])
+                            epoch_extra_responsibilities.extend([float(x) for x in nce_stats.get('extra_resp_values', [])])
+                            epoch_entropies.extend([float(x) for x in nce_stats.get('entropy_values', [])])
+                            aug_nce_valid_row_count_total += int(nce_stats.get('valid_row_count', 0))
+                            aug_nce_input_row_count_total += int(nce_stats.get('input_row_count', 0))
+                            aug_nce_loss_values.extend([float(x) for x in nce_stats.get('loss_values', [])])
+                            aug_nce_positive_resp_values.extend([float(x) for x in nce_stats.get('positive_resp_values', [])])
+                            aug_nce_positive_domain_hist.update({str(k): int(v) for k, v in dict(nce_stats.get('positive_domain_histogram', {})).items()})
+                            aug_nce_positive_class_hist.update({int(k): int(v) for k, v in dict(nce_stats.get('positive_class_histogram', {})).items()})
+                    else:
+                        for batch_index in batch_indices:
+                            ex = stage_examples[int(batch_index)]
+                            tid = str(ex['trajectory_id'])
+                            domain_ids, known_ids, extra_ids = build_stage_domain_indices(ex.get('candidate_ids_known', []), ex.get('candidate_ids_extra', []), stage_id=stage.stage_id)
+                            stage_candidate_count = len(domain_ids)
+                            if stage_candidate_count <= 0:
+                                raise RuntimeError(f'empty candidate domain for stage {stage.stage_id}')
+                            current_t_dis = _compute_t_dis(theta_t)
+                            logits_known_extra = score_carrier_logits_torch(projector=text_projector, carrier_vec=ex['carrier_vec'], candidate_matrix=ex['candidate_matrix'], temperature=current_t_dis)
+                            stage_logits_candidates = logits_known_extra[:stage_candidate_count]
+                            z = torch.from_numpy(_normalize_np(np.asarray(ex['carrier_vec'], dtype=np.float32))).to(device=device, dtype=torch.float32).unsqueeze(0)
+                            unknown_logit = _unknown_logit(z, unknown_mode=str(config.unknown_mode), unknown_prototype=unknown_prototype, b_u=b_u, temperature=current_t_dis).reshape(())
+                            stage_logits = torch.cat([unknown_logit.reshape(1), stage_logits_candidates], dim=0)
+                            target_row = cache.by_trajectory_id[str(tid)]
+                            target = torch.tensor([target_row['r_final']['unknown'], *[target_row['r_final'][str(int(raw_id))] for raw_id in domain_ids]], device=device, dtype=torch.float32)
+                            sample_loss = -(target * torch.log_softmax(stage_logits, dim=0)).sum()
+                            batch_loss_accum = sample_loss if batch_loss_accum is None else (batch_loss_accum + sample_loss)
+                            effective_responsibility_unit_count += 1
+                            sample_losses.append(float(sample_loss.detach().cpu().item()))
+                            unknown_resp_value = float(target[0].detach().cpu().item())
+                            observed_positions = [idx for idx, raw_id in enumerate(domain_ids) if int(raw_id) in {int(x) for x in known_ids}]
+                            observed_resp_value = float(target[[idx + 1 for idx in observed_positions]].mean().detach().cpu().item()) if observed_positions else 0.0
+                            extra_positions = [idx for idx, raw_id in enumerate(domain_ids) if int(raw_id) in {int(x) for x in extra_ids}]
+                            extra_resp_value = float(target[[idx + 1 for idx in extra_positions]].mean().detach().cpu().item()) if extra_positions else 0.0
+                            entropy_value = float((-(target * torch.log(target.clamp_min(1e-12)))).sum().detach().cpu().item())
+                            sample_unknown_responsibilities.append(unknown_resp_value)
+                            sample_observed_responsibilities.append(observed_resp_value)
+                            sample_extra_responsibilities.append(extra_resp_value)
+                            sample_entropies.append(entropy_value)
+                            epoch_unknown_responsibilities.append(unknown_resp_value)
+                            epoch_observed_responsibilities.append(observed_resp_value)
+                            epoch_extra_responsibilities.append(extra_resp_value)
+                            epoch_entropies.append(entropy_value)
                     if batch_loss_accum is None or effective_responsibility_unit_count <= 0:
                         continue
                     batch_loss = batch_loss_accum / float(effective_responsibility_unit_count)
                     batch_loss.backward()
                     optimizer.step()
                     batch_loss_value = float(batch_loss.detach().cpu().item())
+                    if str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce' and str(stage.stage_id) == 'softem_aug':
+                        loss_record_value = float(np.mean(sample_losses)) if sample_losses else batch_loss_value
+                        losses.append(loss_record_value)
+                        epoch_losses.append(loss_record_value)
                     optimization_losses.append(batch_loss_value)
                     epoch_batch_losses.append(batch_loss_value)
                     epoch_effective_counts.append(int(effective_responsibility_unit_count))
@@ -1128,6 +1337,12 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                         metric_row = {'row_type': 'microbatch', 'timestamp': datetime.now(timezone.utc).isoformat(), 'stage': str(stage.stage_id), 'epoch': int(epoch_index) + 1, 'microbatch_idx': int(microbatch_index), 'microbatch_total': int(epoch_plan.batch_count), 'loss': float(np.mean(sample_losses)), 'optimization_loss': float(batch_loss_value), 'effective_responsibility_unit_count': int(effective_responsibility_unit_count), 'unknown_mean_responsibility': float(np.mean(sample_unknown_responsibilities)), 'observed_mean_responsibility': float(np.mean(sample_observed_responsibilities)), 'responsibility_entropy': float(np.mean(sample_entropies))}
                         if stage.stage_id == 'softem_aug':
                             metric_row['extra_mean_responsibility'] = float(np.mean(sample_extra_responsibilities))
+                            metric_row['aug_loss_mode'] = str(getattr(config, 'aug_loss_mode', 'soft_ce'))
+                            if str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce':
+                                metric_row['aug_nce_tau'] = float(getattr(config, 'aug_nce_tau', 0.07))
+                                metric_row['aug_nce_positive_min_resp'] = float(getattr(config, 'aug_nce_positive_min_resp', 0.0))
+                                metric_row['aug_nce_valid_row_count_cumulative'] = int(aug_nce_valid_row_count_total)
+                                metric_row['aug_nce_input_row_count_cumulative'] = int(aug_nce_input_row_count_total)
                         _append_jsonl(runtime_metrics_path, metric_row)
             epoch_summary = {'stage': str(stage.stage_id), 'epoch': int(epoch_index) + 1, 'microbatch_count': int(len(epoch_batch_losses)), 'loss_mean': float(np.mean(epoch_losses)) if epoch_losses else 0.0, 'loss_last': float(epoch_losses[-1]) if epoch_losses else 0.0, 'optimization_loss_mean': float(np.mean(epoch_batch_losses)) if epoch_batch_losses else 0.0, 'optimization_loss_last': float(epoch_batch_losses[-1]) if epoch_batch_losses else 0.0, 'effective_responsibility_unit_count_total': int(np.sum(epoch_effective_counts)) if epoch_effective_counts else 0, 'effective_responsibility_unit_count_mean': float(np.mean(epoch_effective_counts)) if epoch_effective_counts else 0.0, 'unknown_mean_responsibility_epoch': float(np.mean(epoch_unknown_responsibilities)) if epoch_unknown_responsibilities else 0.0, 'observed_mean_responsibility_epoch': float(np.mean(epoch_observed_responsibilities)) if epoch_observed_responsibilities else 0.0, 'responsibility_entropy_epoch': float(np.mean(epoch_entropies)) if epoch_entropies else 0.0}
             if str(stage.stage_id) == 'softem_aug':
@@ -1142,6 +1357,13 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                 extra_quantiles = _quantile_snapshot(epoch_extra_responsibilities)
                 for key, value in extra_quantiles.items():
                     epoch_summary[f'extra_resp_{key}'] = float(value)
+                epoch_summary['aug_loss_mode'] = str(getattr(config, 'aug_loss_mode', 'soft_ce'))
+                if str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce':
+                    epoch_summary['aug_nce_tau'] = float(getattr(config, 'aug_nce_tau', 0.07))
+                    epoch_summary['aug_nce_positive_min_resp'] = float(getattr(config, 'aug_nce_positive_min_resp', 0.0))
+                    epoch_summary['aug_nce_valid_row_count_cumulative'] = int(aug_nce_valid_row_count_total)
+                    epoch_summary['aug_nce_input_row_count_cumulative'] = int(aug_nce_input_row_count_total)
+                    epoch_summary['aug_nce_valid_row_rate_cumulative'] = float(aug_nce_valid_row_count_total / max(aug_nce_input_row_count_total, 1))
             if bool(config.print_epoch_summary):
                 print(_format_epoch_summary(str(stage.stage_id), epoch_summary), file=sys.stderr, flush=True)
             if bool(config.write_runtime_metrics_jsonl):
@@ -1164,17 +1386,30 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         for tid in active_examples_by_tid.keys():
             ex = active_examples_by_tid[tid]
             target_row = cache.by_trajectory_id[str(tid)]
-            row = {'dataset_name': str(config.dataset_name), 'clip_id': int(ex['clip_id']), 'video_id': int(ex['video_id']), 'trajectory_id': str(ex['trajectory_id']), 'candidate_ids_known': [int(x) for x in ex['candidate_ids_known']], 'candidate_ids_extra': [int(x) for x in ex['candidate_ids_extra']], 'candidate_ids_extra_mined': [int(x) for x in list(ex.get('candidate_ids_extra_mined', ex.get('candidate_ids_extra', [])))], 'extra_active': bool(ex.get('extra_active', bool(list(ex.get('candidate_ids_extra', []))))), 'extra_activation_mode': str(ex.get('extra_activation_mode', getattr(config, 'extra_activation_mode', 'always'))), 'extra_activation_margin': float(ex.get('extra_activation_margin', 0.0)), 'extra_activation_margin_threshold': float(ex.get('extra_activation_margin_threshold', getattr(config, 'extra_activation_margin', 0.0))), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_consensus_bonus_context': dict(target_row.get('extra_consensus_bonus_context', {})), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'extra_coverage_context': dict(target_row.get('extra_coverage_context', {})), 'extra_coverage_bonus_context': dict(target_row.get('extra_coverage_bonus_context', {})), 'unknown_slot': 'unknown', 'r_init': dict(target_row['r_init']), 'r_final': dict(target_row['r_final']), 'coverage_bonus_applied_to': list(target_row.get('coverage_bonus_applied_to', [])), 'refine_trace': dict(target_row.get('refine_trace', {})), 'em_subiterations': int(target_row.get('em_subiterations', max(0, int(config.em_subiterations)))), 'em_subiteration_count': int(target_row.get('em_subiteration_count', 0)), 'join_key': str(ex['trajectory_id'])}
+            row = {'dataset_name': str(config.dataset_name), 'clip_id': int(ex['clip_id']), 'video_id': int(ex['video_id']), 'trajectory_id': str(ex['trajectory_id']), 'candidate_ids_known': [int(x) for x in ex['candidate_ids_known']], 'candidate_ids_extra': [int(x) for x in ex['candidate_ids_extra']], 'candidate_ids_extra_mined': [int(x) for x in list(ex.get('candidate_ids_extra_mined', ex.get('candidate_ids_extra', [])))], 'extra_active': bool(ex.get('extra_active', bool(list(ex.get('candidate_ids_extra', []))))), 'extra_activation_mode': str(ex.get('extra_activation_mode', getattr(config, 'extra_activation_mode', 'always'))), 'extra_activation_margin': float(ex.get('extra_activation_margin', 0.0)), 'extra_activation_margin_threshold': float(ex.get('extra_activation_margin_threshold', getattr(config, 'extra_activation_margin', 0.0))), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_consensus_bonus_context': dict(target_row.get('extra_consensus_bonus_context', {})), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'aug_loss_mode': str(getattr(config, 'aug_loss_mode', 'soft_ce')), 'aug_nce_tau': float(getattr(config, 'aug_nce_tau', 0.07)), 'aug_nce_positive_min_resp': float(getattr(config, 'aug_nce_positive_min_resp', 0.0)), 'aug_nce_include_unknown': bool(getattr(config, 'aug_nce_include_unknown', False)), 'extra_coverage_context': dict(target_row.get('extra_coverage_context', {})), 'extra_coverage_bonus_context': dict(target_row.get('extra_coverage_bonus_context', {})), 'unknown_slot': 'unknown', 'r_init': dict(target_row['r_init']), 'r_final': dict(target_row['r_final']), 'coverage_bonus_applied_to': list(target_row.get('coverage_bonus_applied_to', [])), 'refine_trace': dict(target_row.get('refine_trace', {})), 'em_subiterations': int(target_row.get('em_subiterations', max(0, int(config.em_subiterations)))), 'em_subiteration_count': int(target_row.get('em_subiteration_count', 0)), 'join_key': str(ex['trajectory_id'])}
             if 'subiteration_trace' in target_row:
                 row['subiteration_trace'] = list(target_row['subiteration_trace'])
             rows.append(row)
             unknown_mass = float(target_row['r_final'].get('unknown', 0.0))
             unknown_metrics.update_base(torch.tensor([1.0 - unknown_mass], device=device, dtype=torch.float32))
         _write_jsonl(output_root / stage.responsibility_relpath, rows)
-        torch.save({'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'text_projector_state_dict': text_projector.state_dict(), 'text_projector_config': {'input_dim': int(text_projector.config.input_dim), 'hidden_dim': int(text_projector.config.hidden_dim), 'output_dim': int(text_projector.config.output_dim), 'dropout': float(text_projector.config.dropout), 'use_layernorm': bool(text_projector.config.use_layernorm)}, 'theta_T': float(theta_t.detach().cpu().item()), 'b_u': float(b_u.detach().cpu().item()), 'unknown_mode': str(config.unknown_mode), 'unknown_prototype': F.normalize(unknown_prototype.detach().cpu(), p=2.0, dim=0), 'seed': int(config.seed), 'mode': str(config.mode), 'global_step': int(iteration_index), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale)}, checkpoint_path)
-        train_state = {'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'selected_for_infer': str(stage.selected_for_infer), 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'checkpoint_selected': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'global_step': int(iteration_index), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale)}
+        torch.save({'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'text_projector_state_dict': text_projector.state_dict(), 'text_projector_config': {'input_dim': int(text_projector.config.input_dim), 'hidden_dim': int(text_projector.config.hidden_dim), 'output_dim': int(text_projector.config.output_dim), 'dropout': float(text_projector.config.dropout), 'use_layernorm': bool(text_projector.config.use_layernorm)}, 'theta_T': float(theta_t.detach().cpu().item()), 'b_u': float(b_u.detach().cpu().item()), 'unknown_mode': str(config.unknown_mode), 'unknown_prototype': F.normalize(unknown_prototype.detach().cpu(), p=2.0, dim=0), 'seed': int(config.seed), 'mode': str(config.mode), 'global_step': int(iteration_index), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'aug_loss_mode': str(getattr(config, 'aug_loss_mode', 'soft_ce')), 'aug_nce_tau': float(getattr(config, 'aug_nce_tau', 0.07)), 'aug_nce_positive_min_resp': float(getattr(config, 'aug_nce_positive_min_resp', 0.0)), 'aug_nce_include_unknown': bool(getattr(config, 'aug_nce_include_unknown', False))}, checkpoint_path)
+        train_state = {'stage_id': str(stage.stage_id), 'epoch': int(stage.epochs), 'selected_for_infer': str(stage.selected_for_infer), 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'checkpoint_selected': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'global_step': int(iteration_index), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'aug_loss_mode': str(getattr(config, 'aug_loss_mode', 'soft_ce')), 'aug_nce_tau': float(getattr(config, 'aug_nce_tau', 0.07)), 'aug_nce_positive_min_resp': float(getattr(config, 'aug_nce_positive_min_resp', 0.0)), 'aug_nce_include_unknown': bool(getattr(config, 'aug_nce_include_unknown', False))}
         _write_json(output_root / stage.train_state_relpath, train_state)
-        stage_summary = {'stage_id': str(stage.stage_id), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'b_u': float(b_u.detach().cpu().item()), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'unknown_metrics': unknown_metrics.finalize(distributed=False)}
+        stage_summary = {'stage_id': str(stage.stage_id), 'pipeline': 'reservoir_v1', 'training_semantics': 'legacy_scta', 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'extra_selection_mode': str(config.extra_selection_mode), 'clip_extra_obs_sim_max': float(config.clip_extra_obs_sim_max), 'clip_extra_allow_empty': bool(config.clip_extra_allow_empty), 'extra_activation_mode': str(config.extra_activation_mode), 'extra_activation_margin': float(config.extra_activation_margin), 'extra_penalty_scale': float(config.extra_penalty_scale), 'extra_consensus_bonus_lambda': float(config.extra_consensus_bonus_lambda), 'extra_coverage_mode': str(config.extra_coverage_mode), 'extra_coverage_scale': float(config.extra_coverage_scale), 'aug_loss_mode': str(getattr(config, 'aug_loss_mode', 'soft_ce')), 'aug_nce_tau': float(getattr(config, 'aug_nce_tau', 0.07)), 'aug_nce_positive_min_resp': float(getattr(config, 'aug_nce_positive_min_resp', 0.0)), 'aug_nce_include_unknown': bool(getattr(config, 'aug_nce_include_unknown', False)), 'b_u': float(b_u.detach().cpu().item()), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'unknown_metrics': unknown_metrics.finalize(distributed=False)}
+        stage_summary['aug_loss_mode'] = str(getattr(config, 'aug_loss_mode', 'soft_ce')) if str(stage.stage_id) == 'softem_aug' else 'soft_ce'
+        stage_summary['aug_nce_tau'] = float(getattr(config, 'aug_nce_tau', 0.07))
+        stage_summary['aug_nce_positive_min_resp'] = float(getattr(config, 'aug_nce_positive_min_resp', 0.0))
+        stage_summary['aug_nce_include_unknown'] = bool(getattr(config, 'aug_nce_include_unknown', False))
+        if str(stage.stage_id) == 'softem_aug' and str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce':
+            stage_summary['aug_nce_valid_row_count'] = int(aug_nce_valid_row_count_total)
+            stage_summary['aug_nce_input_row_count'] = int(aug_nce_input_row_count_total)
+            stage_summary['aug_nce_valid_row_rate'] = float(aug_nce_valid_row_count_total / max(aug_nce_input_row_count_total, 1))
+            stage_summary['aug_nce_loss_mean'] = float(np.mean(aug_nce_loss_values)) if aug_nce_loss_values else 0.0
+            stage_summary['aug_nce_positive_resp_mean'] = float(np.mean(aug_nce_positive_resp_values)) if aug_nce_positive_resp_values else 0.0
+            stage_summary['aug_nce_positive_domain_histogram'] = {str(k): int(v) for k, v in aug_nce_positive_domain_hist.items()}
+            stage_summary['aug_nce_positive_class_top20'] = [{'raw_id': int(k), 'count': int(v)} for k, v in aug_nce_positive_class_hist.most_common(20)]
+            stage_summary['soft_ce_loss_mean'] = None
         if str(stage.stage_id) == 'softem_aug':
             stage_summary['runtime_extra_cache_metrics'] = _runtime_extra_cache_metrics(active_examples_by_tid, runtime_extra_cache, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha))
             stage_summary['runtime_extra_cache_metrics'].update(_extra_consensus_metrics_from_cache(cache, extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda)))
