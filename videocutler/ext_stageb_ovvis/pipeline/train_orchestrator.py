@@ -9,7 +9,7 @@ from videocutler.ext_stageb_ovvis.pipeline.plans import TrainPlan
 from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import Phase1MaterializationConfig, materialize_phase1_training_samples
 from videocutler.ext_stageb_ovvis.algorithms.prealign import PrealignConfig, train_prealign
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import SoftEMConfig, run_soft_em
-from videocutler.ext_stageb_ovvis.algorithms.reservoir_v1 import ReservoirPrealignConfig, ReservoirSoftEMConfig, train_reservoir_prealign, run_reservoir_soft_em
+from videocutler.ext_stageb_ovvis.algorithms.reservoir_v1 import ReservoirPrealignConfig, ReservoirSoftEMConfig, ReservoirSinkhornNoUnknownConfig, train_reservoir_prealign, run_reservoir_soft_em, run_reservoir_sinkhorn_no_unknown
 from videocutler.ext_stageb_ovvis.algorithms.legacy_scta_backend import LegacySCTABackendConfig, run_legacy_scta_soft_em_via_reservoir
 from videocutler.ext_stageb_ovvis.audit.g8_minimal_split_audit import MinimalSplitAuditConfig, run_minimal_split_audit
 from videocutler.ext_stageb_ovvis.audit.gt_attribution_rank_audit import TRAIN_DATASETS
@@ -190,6 +190,11 @@ def _run_post_train_minimal_split_audit(plan: TrainPlan) -> Dict[str, Any]:
 
 
 def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
+    sinkhorn_scopes = {'sinkhorn_prealign_only', 'sinkhorn_preaug_no_unknown'}
+    if str(plan.pipeline) == 'reservoir_v1_sinkhorn_no_unknown' and str(plan.stage_scope) not in sinkhorn_scopes:
+        raise ValueError('reservoir_v1_sinkhorn_no_unknown requires stage_scope sinkhorn_prealign_only or sinkhorn_preaug_no_unknown')
+    if str(plan.pipeline) != 'reservoir_v1_sinkhorn_no_unknown' and str(plan.stage_scope) in sinkhorn_scopes:
+        raise ValueError('sinkhorn stage_scope is only valid with pipeline reservoir_v1_sinkhorn_no_unknown')
     materialized = _materialize(plan)
     summary = {
         'exp_name': plan.exp_name,
@@ -247,6 +252,34 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                 ),
             )
             summary['stages']['softem'] = soft
+    elif plan.pipeline == 'reservoir_v1_sinkhorn_no_unknown':
+        reservoir_samples = _resolve_materialized_samples(materialized, prefer_valid=True)
+        sink = run_reservoir_sinkhorn_no_unknown(
+            output_root=plan.output_root,
+            materialized_samples=reservoir_samples,
+            stage_scope=str(plan.stage_scope),
+            config=ReservoirSinkhornNoUnknownConfig(
+                dataset_name=plan.dataset_name, trajectory_source_branch=plan.trajectory_source_branch, device=plan.device,
+                seed=plan.seed, smoke=plan.smoke, prealign_epochs=(1 if plan.smoke else 5) if plan.prealign_epochs is None else plan.prealign_epochs,
+                aug_epochs=(1 if plan.smoke else 5) if plan.aug_epochs is None else plan.aug_epochs,
+                prealign_learning_rate=(1e-4 if plan.prealign_learning_rate is None else plan.prealign_learning_rate),
+                aug_learning_rate=(5e-5 if plan.aug_learning_rate is None else plan.aug_learning_rate),
+                weight_decay=plan.weight_decay, t_dis_init=plan.t_dis_init, lambda_frame=(0.25 if plan.lambda_frame is None else plan.lambda_frame),
+                runtime_asset_source=str(materialized['resolution'].get('runtime_asset_source','local_canonical_assets')),
+                runtime_asset_source_local_incomplete=bool(materialized['resolution'].get('local_incomplete',False)),
+                runtime_asset_output_root=str(materialized['resolution'].get('runtime_output_root', str(plan.repo_root))),
+                batch_budget=plan.batch_budget, k_extra=int(getattr(plan, 'k_extra', 2)), extra_alpha=float(getattr(plan, 'extra_alpha', 0.25)),
+                sinkhorn_tau=float(getattr(plan, 'sinkhorn_tau', 0.15)), sinkhorn_iters=int(getattr(plan, 'sinkhorn_iters', 5)),
+                sinkhorn_row_cap_scale=float(getattr(plan, 'sinkhorn_row_cap_scale', 2.0)), sinkhorn_extra_demand=float(getattr(plan, 'sinkhorn_extra_demand', 0.25)),
+                sinkhorn_aug_extra_lambda=float(getattr(plan, 'sinkhorn_aug_extra_lambda', 0.2)), sinkhorn_assignment_stopgrad=bool(getattr(plan, 'sinkhorn_assignment_stopgrad', True)),
+                show_progress=plan.show_progress, log_every=plan.log_every,
+                write_runtime_metrics_jsonl=plan.write_runtime_metrics_jsonl, print_epoch_summary=plan.print_epoch_summary,
+            ),
+        )
+        summary['stages']['sinkhorn_no_unknown'] = sink
+        summary['selected_checkpoint_path'] = sink.get('selected_checkpoint_path')
+        summary['unknown_disabled'] = True
+        summary['softem_base_skipped'] = True
     else:
         reservoir_samples = _resolve_materialized_samples(materialized, prefer_valid=True)
         pre = train_reservoir_prealign(
@@ -322,6 +355,9 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                     'status': 'SKIPPED',
                     'reason': 'ablate_skip_base',
                 }
-    summary['post_train_audit'] = _run_post_train_minimal_split_audit(plan)
+    if str(plan.pipeline) == 'reservoir_v1_sinkhorn_no_unknown':
+        summary['post_train_audit'] = {'status': 'SKIPPED', 'reason': 'sinkhorn_no_unknown_experimental_branch'}
+    else:
+        summary['post_train_audit'] = _run_post_train_minimal_split_audit(plan)
     out_path = _ensure_train_writeback(plan, summary, pre=summary['stages'].get('prealign'), soft=summary['stages'].get('softem'))
     return {'status':'PASS','summary_path':str(out_path),'summary':summary}

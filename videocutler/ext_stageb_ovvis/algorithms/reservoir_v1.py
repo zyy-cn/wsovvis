@@ -204,3 +204,401 @@ def run_reservoir_soft_em(*, output_root:Path, materialized_samples:Sequence[Rec
             }
         _write_json(stage_dir/'stage_summary.json', stage_summary); stage_reports.append({'stage_id':stage_id,'responsibility_records_path':resp_rel,'train_state_path':train_state_rel,'checkpoint_last_path':str((Path('train')/stage_id/'checkpoints'/ckpt_name).as_posix()),'record_count_output':int(len(rows)),'loss_mean':_mean_or_zero(losses),'loss_last':float(losses[-1]) if losses else 0.0,'optimization_loss_mean':_mean_or_zero(batch_losses),'optimization_loss_last':float(batch_losses[-1]) if batch_losses else 0.0,'batch_budget':int(batch_budget),'loss_normalization':'effective_trajectory_count'})
     return {'stage_reports':stage_reports,'record_count_input':int(len(materialized_samples)),'record_count_trainable':int(len(examples)),'record_count_output':int(len(final_examples)),'coverage_ratio_trainable':float(len(examples)/max(len(materialized_samples),1)),'skipped_reason_histogram':skipped,'selected_checkpoint_path':stage_reports[-1]['checkpoint_last_path'] if stage_reports else '','unknown_metrics':current_unknown_metrics}
+
+# ---------------------------------------------------------------------------
+# Optional Sinkhorn/no-unknown experimental branch.
+# This branch is intentionally additive and is not called by the legacy or
+# reservoir_v1 default paths. It does not alter the semantics of the existing
+# prealign/softem functions above.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ReservoirSinkhornNoUnknownConfig:
+    dataset_name: str
+    trajectory_source_branch: str = 'mainline'
+    device: str = 'cpu'
+    seed: int = 0
+    smoke: bool = False
+    t_dis_init: float = 0.07
+    weight_decay: float = 1e-2
+    projector: ProjectorConfig = ProjectorConfig()
+    prealign_epochs: int = 1
+    aug_epochs: int = 1
+    prealign_learning_rate: float = 1e-4
+    aug_learning_rate: float = 5e-5
+    runtime_asset_source: str = 'local_canonical_assets'
+    runtime_asset_source_local_incomplete: bool = False
+    runtime_asset_output_root: str = ''
+    batch_budget: int | None = None
+    k_extra: int = 2
+    extra_alpha: float = 0.25
+    lambda_frame: float = 0.25
+    sinkhorn_tau: float = 0.15
+    sinkhorn_iters: int = 5
+    sinkhorn_row_cap_scale: float = 2.0
+    sinkhorn_extra_demand: float = 0.25
+    sinkhorn_aug_extra_lambda: float = 0.2
+    sinkhorn_assignment_stopgrad: bool = True
+    show_progress: bool = True
+    log_every: int = 10
+    write_runtime_metrics_jsonl: bool = True
+    print_epoch_summary: bool = True
+
+
+def _sinkhorn_observed_ids(group: Sequence[Mapping[str, Any]]) -> List[int]:
+    return sorted({int(x) for ex in group for x in list(ex.get('observed_raw_ids', []))})
+
+
+def _sinkhorn_known_extra_ids(group: Sequence[Mapping[str, Any]]) -> Tuple[List[int], List[int]]:
+    known = sorted({int(x) for ex in group for x in list(ex.get('candidate_ids_known', []))})
+    extra = sorted({int(x) for ex in group for x in list(ex.get('candidate_ids_extra', [])) if int(x) not in set(known)})
+    return known, extra
+
+
+def _sinkhorn_group_cost_pre(group: Sequence[Mapping[str, Any]]) -> int:
+    return max(1, len(group) * max(1, len(_sinkhorn_observed_ids(group))))
+
+
+def _sinkhorn_group_cost_aug(group: Sequence[Mapping[str, Any]]) -> int:
+    known, extra = _sinkhorn_known_extra_ids(group)
+    return max(1, len(group) * max(1, len(known) + len(extra)))
+
+
+def _sinkhorn_pack_groups(
+    groups: Sequence[Sequence[Mapping[str, Any]]],
+    *,
+    raw_to_vocab_idx: Mapping[int, int],
+    device: torch.device,
+    mode: str,
+    extra_demand: float,
+) -> Dict[str, Any]:
+    packed_groups: List[Sequence[Mapping[str, Any]]] = []
+    label_raws_by_group: List[List[int]] = []
+    label_kind_by_group: List[List[int]] = []  # 1=Y'/known, 2=extra
+    for group in groups:
+        if str(mode) == 'prealign':
+            known = [raw_id for raw_id in _sinkhorn_observed_ids(group) if int(raw_id) in raw_to_vocab_idx]
+            extra: List[int] = []
+        else:
+            known_raw, extra_raw = _sinkhorn_known_extra_ids(group)
+            known = [raw_id for raw_id in known_raw if int(raw_id) in raw_to_vocab_idx]
+            extra = [raw_id for raw_id in extra_raw if int(raw_id) in raw_to_vocab_idx and int(raw_id) not in set(known)]
+        labels = list(known) + list(extra)
+        if not labels:
+            continue
+        packed_groups.append(group)
+        label_raws_by_group.append(labels)
+        label_kind_by_group.append([1] * len(known) + [2] * len(extra))
+    if not packed_groups:
+        return {}
+    B = len(packed_groups)
+    Qmax = max(len(group) for group in packed_groups)
+    Mmax = max(len(labels) for labels in label_raws_by_group)
+    D = int(np.asarray(packed_groups[0][0]['carrier_vec'], dtype=np.float32).reshape(-1).shape[0])
+    Z = torch.zeros((B, Qmax, D), device=device, dtype=torch.float32)
+    q_mask = torch.zeros((B, Qmax), device=device, dtype=torch.bool)
+    yidx = torch.zeros((B, Mmax), device=device, dtype=torch.long)
+    c_mask = torch.zeros((B, Mmax), device=device, dtype=torch.bool)
+    demand = torch.zeros((B, Mmax), device=device, dtype=torch.float32)
+    kind = torch.zeros((B, Mmax), device=device, dtype=torch.long)
+    raw_ids_tensor = torch.zeros((B, Mmax), device=device, dtype=torch.long)
+    for b, group in enumerate(packed_groups):
+        for q, ex in enumerate(group):
+            vec = _normalize_np(np.asarray(ex['carrier_vec'], dtype=np.float32))
+            Z[b, q] = torch.from_numpy(vec).to(device=device, dtype=torch.float32)
+            q_mask[b, q] = True
+        for m, raw_id in enumerate(label_raws_by_group[b]):
+            yidx[b, m] = int(raw_to_vocab_idx[int(raw_id)])
+            c_mask[b, m] = True
+            raw_ids_tensor[b, m] = int(raw_id)
+            label_kind = int(label_kind_by_group[b][m])
+            kind[b, m] = label_kind
+            demand[b, m] = 1.0 if label_kind == 1 else max(0.0, float(extra_demand))
+    return {
+        'groups': packed_groups,
+        'Z': Z,
+        'q_mask': q_mask,
+        'yidx': yidx,
+        'c_mask': c_mask,
+        'demand': demand,
+        'kind': kind,
+        'raw_ids': raw_ids_tensor,
+    }
+
+
+def _sinkhorn_scores_from_pack(projector: Projector, text_vocab_tensor: torch.Tensor, pack: Mapping[str, Any], temperature: torch.Tensor) -> torch.Tensor:
+    text_proj_all = F.normalize(projector(text_vocab_tensor), p=2.0, dim=-1)
+    anchors = text_proj_all[pack['yidx']]
+    Z = F.normalize(pack['Z'], p=2.0, dim=-1)
+    return torch.bmm(Z, anchors.transpose(1, 2)) / temperature
+
+
+def _sinkhorn_train_stage(
+    *,
+    stage_id: str,
+    groups: Sequence[Sequence[Mapping[str, Any]]],
+    output_root: Path,
+    projector: Projector,
+    theta_t: torch.nn.Parameter,
+    text_vocab_tensor: torch.Tensor,
+    raw_to_vocab_idx: Mapping[int, int],
+    optimizer: torch.optim.Optimizer,
+    epochs: int,
+    learning_rate: float,
+    batch_budget: int,
+    seed: int,
+    mode: str,
+    sinkhorn_tau: float,
+    sinkhorn_iters: int,
+    sinkhorn_row_cap_scale: float,
+    extra_demand: float,
+    extra_lambda: float,
+    assignment_stopgrad: bool,
+    show_progress: bool,
+    write_runtime_metrics_jsonl: bool,
+) -> Dict[str, Any]:
+    from videocutler.ext_stageb_ovvis.algorithms.sinkhorn_assignment import (
+        SinkhornAssignmentConfig,
+        assignment_metrics,
+        capped_sinkhorn_assignment,
+        sinkhorn_loss_from_assignment,
+    )
+
+    for group in optimizer.param_groups:
+        group['lr'] = float(learning_rate)
+    runtime_metrics_path = output_root / 'train' / stage_id / 'runtime_metrics.jsonl'
+    losses: List[float] = []
+    batch_losses: List[float] = []
+    global_step = 0
+    cost_fn = _sinkhorn_group_cost_pre if str(mode) == 'prealign' else _sinkhorn_group_cost_aug
+    bucket_fn = lambda grp: (len(grp), max(1, len(_sinkhorn_observed_ids(grp)) if str(mode) == 'prealign' else sum(len(x) for x in _sinkhorn_known_extra_ids(grp))))
+    cfg = SinkhornAssignmentConfig(tau=float(sinkhorn_tau), iters=int(sinkhorn_iters), row_cap_scale=float(sinkhorn_row_cap_scale))
+    for epoch_index in _maybe_tqdm(range(int(epochs)), enabled=bool(show_progress), desc=f'{stage_id} epochs', leave=True):
+        shuffled_groups = list(groups)
+        random.Random(int(seed) + int(epoch_index)).shuffle(shuffled_groups)
+        epoch_plan = build_dynamic_microbatches(shuffled_groups, batch_budget=int(batch_budget), cost_fn=cost_fn, bucket_key_fn=bucket_fn)
+        epoch_losses: List[float] = []
+        epoch_batch_losses: List[float] = []
+        epoch_metric_rows: List[Dict[str, Any]] = []
+        for micro_idx, batch_indices in enumerate(_maybe_tqdm(epoch_plan.batches, enabled=bool(show_progress), desc=f'{stage_id} epoch {int(epoch_index)+1}', total=len(epoch_plan.batches), leave=False), start=1):
+            selected_groups = [shuffled_groups[int(i)] for i in batch_indices]
+            pack = _sinkhorn_pack_groups(selected_groups, raw_to_vocab_idx=raw_to_vocab_idx, device=text_vocab_tensor.device, mode=str(mode), extra_demand=float(extra_demand))
+            if not pack:
+                continue
+            optimizer.zero_grad(set_to_none=True)
+            temperature = _compute_t_dis(theta_t)
+            scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, temperature)
+            P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)
+            weights = torch.ones_like(pack['demand'])
+            if str(mode) == 'aug':
+                weights = torch.where(pack['kind'] == 2, torch.as_tensor(float(extra_lambda), device=weights.device, dtype=weights.dtype), weights)
+            weighted_P = P * weights[:, None, :]
+            denom = (pack['demand'] * weights).sum(dim=1).clamp_min(1.0)
+            loss = sinkhorn_loss_from_assignment(scores, weighted_P, stopgrad_assignment=bool(assignment_stopgrad), normalize_by_demand=denom)
+            loss.backward()
+            optimizer.step()
+            global_step += 1
+            batch_val = float(loss.detach().cpu().item())
+            losses.append(batch_val)
+            epoch_losses.append(batch_val)
+            batch_losses.append(batch_val)
+            epoch_batch_losses.append(batch_val)
+            metric_row = assignment_metrics(P, pack['q_mask'], pack['c_mask'], pack['demand'])
+            epoch_metric_rows.append(metric_row)
+            if bool(write_runtime_metrics_jsonl):
+                _append_jsonl(runtime_metrics_path, {
+                    'row_type': 'microbatch',
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'stage': str(stage_id),
+                    'training_semantics': 'sinkhorn_no_unknown',
+                    'epoch': int(epoch_index) + 1,
+                    'microbatch_idx': int(micro_idx),
+                    'microbatch_total': int(epoch_plan.batch_count),
+                    'loss': batch_val,
+                    'optimization_loss': batch_val,
+                    'effective_trajectory_count': int(pack['q_mask'].sum().detach().cpu().item()),
+                    'candidate_column_count': int(pack['c_mask'].sum().detach().cpu().item()),
+                    **metric_row,
+                })
+        if bool(write_runtime_metrics_jsonl):
+            merged: Dict[str, float] = {}
+            if epoch_metric_rows:
+                for key in epoch_metric_rows[0].keys():
+                    vals = [float(row.get(key, 0.0)) for row in epoch_metric_rows]
+                    merged[f'{key}_epoch'] = _mean_or_zero(vals)
+            _append_jsonl(runtime_metrics_path, {
+                'row_type': 'epoch_summary',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'stage': str(stage_id),
+                'training_semantics': 'sinkhorn_no_unknown',
+                'epoch': int(epoch_index) + 1,
+                'microbatch_count': int(len(epoch_batch_losses)),
+                'loss_mean': _mean_or_zero(epoch_losses),
+                'loss_last': float(epoch_losses[-1]) if epoch_losses else 0.0,
+                'optimization_loss_mean': _mean_or_zero(epoch_batch_losses),
+                'optimization_loss_last': float(epoch_batch_losses[-1]) if epoch_batch_losses else 0.0,
+                **merged,
+            })
+    return {
+        'stage_id': str(stage_id),
+        'loss_mean': _mean_or_zero(losses),
+        'loss_last': float(losses[-1]) if losses else 0.0,
+        'optimization_loss_mean': _mean_or_zero(batch_losses),
+        'optimization_loss_last': float(batch_losses[-1]) if batch_losses else 0.0,
+        'global_step': int(global_step),
+        'loss_normalization': 'sum_candidate_demand',
+        'training_semantics': 'sinkhorn_no_unknown',
+    }
+
+
+def _sinkhorn_collect_responsibility_rows(
+    *,
+    stage_id: str,
+    dataset_name: str,
+    groups: Sequence[Sequence[Mapping[str, Any]]],
+    output_root: Path,
+    projector: Projector,
+    theta_t: torch.nn.Parameter,
+    text_vocab_tensor: torch.Tensor,
+    raw_to_vocab_idx: Mapping[int, int],
+    mode: str,
+    sinkhorn_tau: float,
+    sinkhorn_iters: int,
+    sinkhorn_row_cap_scale: float,
+    extra_demand: float,
+) -> List[Record]:
+    from videocutler.ext_stageb_ovvis.algorithms.sinkhorn_assignment import SinkhornAssignmentConfig, capped_sinkhorn_assignment
+    rows: List[Record] = []
+    cfg = SinkhornAssignmentConfig(tau=float(sinkhorn_tau), iters=int(sinkhorn_iters), row_cap_scale=float(sinkhorn_row_cap_scale))
+    projector.eval()
+    with torch.no_grad():
+        for group in groups:
+            pack = _sinkhorn_pack_groups([group], raw_to_vocab_idx=raw_to_vocab_idx, device=text_vocab_tensor.device, mode=str(mode), extra_demand=float(extra_demand))
+            if not pack:
+                continue
+            scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, _compute_t_dis(theta_t))
+            P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)[0]
+            raw_ids = [int(x) for x in pack['raw_ids'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.int64).tolist()]
+            kind = [int(x) for x in pack['kind'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.int64).tolist()]
+            known_ids = [raw for raw, k in zip(raw_ids, kind) if int(k) == 1]
+            extra_ids = [raw for raw, k in zip(raw_ids, kind) if int(k) == 2]
+            for q, ex in enumerate(pack['groups'][0]):
+                row_mass = P[q, :len(raw_ids)].detach().cpu().numpy().astype(np.float64)
+                total = float(np.sum(row_mass))
+                if total <= 1e-12:
+                    # Fallback to local softmax when column coverage leaves a row with no mass.
+                    local_scores = scores[0, q, :len(raw_ids)]
+                    row_mass = torch.softmax(local_scores, dim=0).detach().cpu().numpy().astype(np.float64)
+                    total = float(np.sum(row_mass))
+                probs = (row_mass / max(total, 1e-12)).astype(np.float64).tolist()
+                rows.append({
+                    'dataset_name': str(dataset_name),
+                    'clip_id': int(ex['clip_id']),
+                    'video_id': int(ex['video_id']),
+                    'trajectory_id': str(ex['trajectory_id']),
+                    'candidate_ids_known': list(known_ids),
+                    'candidate_ids_extra': list(extra_ids),
+                    'unknown_disabled': True,
+                    'training_semantics': 'sinkhorn_no_unknown',
+                    'stage_id': str(stage_id),
+                    'r_init': {},
+                    'r_final': {str(int(raw_id)): float(prob) for raw_id, prob in zip(raw_ids, probs)},
+                    'join_key': str(ex['trajectory_id']),
+                })
+    projector.train()
+    return rows
+
+
+def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples: Sequence[Record], config: ReservoirSinkhornNoUnknownConfig, stage_scope: str = 'sinkhorn_preaug_no_unknown') -> Dict[str, Any]:
+    _set_seed(int(config.seed))
+    device = torch.device(str(config.device))
+    text_vocab_ids, _text_records, text_vocab_matrix = load_text_vocab(output_root)
+    raw_to_vocab_idx = {int(raw_id): idx for idx, raw_id in enumerate(text_vocab_ids)}
+    text_vocab_tensor = torch.from_numpy(np.asarray(text_vocab_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
+    projector = Projector(config.projector).to(device)
+    projector.train()
+    theta_t = torch.nn.Parameter(torch.tensor(_inverse_softplus(max(float(config.t_dis_init)-1e-4,1e-6)), device=device, dtype=torch.float32))
+    optimizer = torch.optim.AdamW([*projector.parameters(), theta_t], lr=float(config.prealign_learning_rate), weight_decay=float(config.weight_decay))
+    batch_budget = resolve_default_batch_budget(smoke=bool(config.smoke), explicit=config.batch_budget)
+
+    prepared_pre = _prepare_prealign_examples(materialized_samples, output_root=output_root, dataset_name=config.dataset_name, trajectory_source_branch=config.trajectory_source_branch)
+    pre_examples = list(prepared_pre['examples'])
+    if not pre_examples:
+        raise RuntimeError('no trainable examples for sinkhorn prealign')
+    pre_groups = _clip_groups(pre_examples)
+    pre_stage = _sinkhorn_train_stage(
+        stage_id='prealign', groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t,
+        text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, optimizer=optimizer,
+        epochs=int(config.prealign_epochs), learning_rate=float(config.prealign_learning_rate), batch_budget=int(batch_budget), seed=int(config.seed), mode='prealign',
+        sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale),
+        extra_demand=0.0, extra_lambda=0.0, assignment_stopgrad=bool(config.sinkhorn_assignment_stopgrad), show_progress=bool(config.show_progress), write_runtime_metrics_jsonl=bool(config.write_runtime_metrics_jsonl),
+    )
+    train_dir = output_root / 'train' / 'prealign'
+    ckpt_dir = train_dir / 'checkpoints'
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_last_path = ckpt_dir / 'prealign_last.pth'
+    torch.save({
+        'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'text_projector_state_dict': projector.state_dict(),
+        'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
+        'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
+        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown'
+    }, ckpt_last_path)
+    pre_proxy_rows = _sinkhorn_collect_responsibility_rows(stage_id='prealign', dataset_name=str(config.dataset_name), groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='prealign', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=0.0)
+    _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
+    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown', 'unknown_disabled': True}
+    _write_json(train_dir / 'train_state.json', pre_train_state)
+    pre_summary = {**pre_stage, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth'}
+    _write_json(train_dir / 'stage_summary.json', pre_summary)
+
+    stage_reports = [{'stage_id': 'prealign', 'responsibility_records_path': 'train/prealign/proxy_records.jsonl', 'train_state_path': 'train/prealign/train_state.json', 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'record_count_output': int(len(pre_proxy_rows)), **pre_stage}]
+    selected_checkpoint_path = 'train/prealign/checkpoints/prealign_last.pth'
+    final_count = len(pre_proxy_rows)
+
+    if str(stage_scope) != 'sinkhorn_prealign_only':
+        prepared_aug = _prepare_softem_examples(materialized_samples, output_root=output_root, dataset_name=config.dataset_name, trajectory_source_branch=config.trajectory_source_branch)
+        aug_examples0 = list(prepared_aug['examples'])
+        runtime_extra_cache = _build_runtime_extra_cache(examples=aug_examples0, text_projector=projector, theta_t=theta_t, output_root=output_root, k_extra=int(config.k_extra), alpha=float(config.extra_alpha), lambda_frame=float(config.lambda_frame), device=device)
+        aug_examples = _apply_runtime_extra_cache(aug_examples0, runtime_extra_cache=runtime_extra_cache, output_root=output_root) if runtime_extra_cache else aug_examples0
+        aug_groups = _clip_groups(aug_examples)
+        aug_stage = _sinkhorn_train_stage(
+            stage_id='softem_aug', groups=aug_groups, output_root=output_root, projector=projector, theta_t=theta_t,
+            text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, optimizer=optimizer,
+            epochs=int(config.aug_epochs), learning_rate=float(config.aug_learning_rate), batch_budget=int(batch_budget), seed=int(config.seed) + 1000, mode='aug',
+            sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale),
+            extra_demand=float(config.sinkhorn_extra_demand), extra_lambda=float(config.sinkhorn_aug_extra_lambda), assignment_stopgrad=bool(config.sinkhorn_assignment_stopgrad), show_progress=bool(config.show_progress), write_runtime_metrics_jsonl=bool(config.write_runtime_metrics_jsonl),
+        )
+        aug_dir = output_root / 'train' / 'softem_aug'
+        aug_ckpt_dir = aug_dir / 'checkpoints'
+        aug_ckpt_dir.mkdir(parents=True, exist_ok=True)
+        aug_ckpt_path = aug_ckpt_dir / 'softem_aug_last.pth'
+        torch.save({
+            'stage_id': 'softem_aug', 'epoch': int(config.aug_epochs), 'text_projector_state_dict': projector.state_dict(),
+            'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
+            'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
+            'seed': int(config.seed), 'global_step': int(aug_stage.get('global_step', 0)), 'mode': 'sinkhorn_aug_no_unknown', 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown',
+            'sinkhorn_extra_demand': float(config.sinkhorn_extra_demand), 'sinkhorn_aug_extra_lambda': float(config.sinkhorn_aug_extra_lambda),
+        }, aug_ckpt_path)
+        aug_rows = _sinkhorn_collect_responsibility_rows(stage_id='softem_aug', dataset_name=str(config.dataset_name), groups=aug_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='aug', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=float(config.sinkhorn_extra_demand))
+        _write_jsonl(aug_dir / 'responsibility_records.jsonl', aug_rows)
+        aug_state = {'stage_id': 'softem_aug', 'epoch': int(config.aug_epochs), 'selected_for_infer': 'augmented', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'checkpoint_selected': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'global_step': int(aug_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown', 'unknown_disabled': True, 'softem_base_skipped': True}
+        _write_json(aug_dir / 'train_state.json', aug_state)
+        runtime_extra_metrics = {'clip_cache_count': int(len(runtime_extra_cache)), 'example_count': int(len(aug_examples)), 'example_with_nonempty_extra_count': int(sum(1 for row in aug_examples if len(list(row.get('candidate_ids_extra', []))) > 0)), 'k_extra': int(config.k_extra), 'extra_alpha': float(config.extra_alpha), 'sinkhorn_extra_demand': float(config.sinkhorn_extra_demand), 'sinkhorn_aug_extra_lambda': float(config.sinkhorn_aug_extra_lambda)}
+        aug_summary = {**aug_stage, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'softem_base_skipped': True, 'record_count_output': int(len(aug_rows)), 'runtime_extra_cache_metrics': runtime_extra_metrics, 'checkpoint_last_path': 'train/softem_aug/checkpoints/softem_aug_last.pth'}
+        _write_json(aug_dir / 'stage_summary.json', aug_summary)
+        stage_reports.append({'stage_id': 'softem_aug', 'responsibility_records_path': 'train/softem_aug/responsibility_records.jsonl', 'train_state_path': 'train/softem_aug/train_state.json', 'checkpoint_last_path': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'record_count_output': int(len(aug_rows)), **aug_stage})
+        selected_checkpoint_path = 'train/softem_aug/checkpoints/softem_aug_last.pth'
+        final_count = len(aug_rows)
+
+    return {
+        'stage_reports': stage_reports,
+        'record_count_input': int(len(materialized_samples)),
+        'record_count_trainable': int(len(pre_examples)),
+        'record_count_output': int(final_count),
+        'coverage_ratio_trainable': float(len(pre_examples) / max(len(materialized_samples), 1)),
+        'skipped_reason_histogram': dict(prepared_pre.get('skipped_reason_histogram', {})),
+        'selected_checkpoint_path': selected_checkpoint_path,
+        'unknown_disabled': True,
+        'softem_base_skipped': True,
+        'pipeline': 'reservoir_v1_sinkhorn_no_unknown',
+        'training_semantics': 'sinkhorn_no_unknown',
+    }

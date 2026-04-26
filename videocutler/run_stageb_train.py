@@ -22,7 +22,7 @@ def _parse_bool(value):
 def parse_args() -> argparse.Namespace:
     p=argparse.ArgumentParser(description='Unified Stage-B training entrypoint.')
     p.add_argument('--exp_name', required=True); p.add_argument('--output_root', required=True); p.add_argument('--device', required=True); p.add_argument('--seed', type=int, required=True); p.add_argument('--smoke', action='store_true')
-    p.add_argument('--dataset_name', default='lvvis_train_base', choices=('lvvis_train_base','lvvis_val')); p.add_argument('--trajectory_source_branch', default='mainline', choices=('mainline','gt_upper_bound')); p.add_argument('--pipeline', default='legacy', choices=('legacy','reservoir_v1')); p.add_argument('--training_semantics', default='legacy_scta', choices=('legacy_scta','reservoir_release')); p.add_argument('--stage_scope', default='prealign_base_aug', choices=('prealign_only','prealign_base','prealign_base_aug')); p.add_argument('--smoke_max_trajectories', type=int, default=128)
+    p.add_argument('--dataset_name', default='lvvis_train_base', choices=('lvvis_train_base','lvvis_val')); p.add_argument('--trajectory_source_branch', default='mainline', choices=('mainline','gt_upper_bound')); p.add_argument('--pipeline', default='legacy', choices=('legacy','reservoir_v1','reservoir_v1_sinkhorn_no_unknown')); p.add_argument('--training_semantics', default='legacy_scta', choices=('legacy_scta','reservoir_release')); p.add_argument('--stage_scope', default='prealign_base_aug', choices=('prealign_only','prealign_base','prealign_base_aug','sinkhorn_prealign_only','sinkhorn_preaug_no_unknown')); p.add_argument('--smoke_max_trajectories', type=int, default=128)
     p.add_argument('--repo_root', default=None); p.add_argument('--asset_root', default=None)
     p.add_argument('--prealign_epochs', type=int, default=None); p.add_argument('--base_epochs', type=int, default=None); p.add_argument('--aug_epochs', type=int, default=None)
     p.add_argument('--prealign_learning_rate', type=float, default=None); p.add_argument('--base_learning_rate', type=float, default=None); p.add_argument('--aug_learning_rate', type=float, default=None)
@@ -33,6 +33,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--aug_nce_include_unknown', type=_parse_bool, default=False)
     p.add_argument('--aug_soft_ce_impl', default='legacy_loop', choices=('legacy_loop','batched'))
     p.add_argument('--aug_soft_ce_equivalence_check_batches', type=int, default=0)
+    p.add_argument('--sinkhorn_tau', type=float, default=0.15)
+    p.add_argument('--sinkhorn_iters', type=int, default=5)
+    p.add_argument('--sinkhorn_row_cap_scale', type=float, default=2.0)
+    p.add_argument('--sinkhorn_extra_demand', type=float, default=0.25)
+    p.add_argument('--sinkhorn_aug_extra_lambda', type=float, default=0.2)
+    p.add_argument('--sinkhorn_assignment_stopgrad', type=_parse_bool, default=True)
     return p.parse_args()
 def main() -> int:
     result=run_train_pipeline(resolve_train_plan(parse_args())); print(result['summary_path']); return 0

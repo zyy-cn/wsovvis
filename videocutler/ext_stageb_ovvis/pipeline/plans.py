@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-_ALLOWED_PIPELINES=('legacy','reservoir_v1')
+_ALLOWED_PIPELINES=('legacy','reservoir_v1','reservoir_v1_sinkhorn_no_unknown')
 _ALLOWED_TRAINING_SEMANTICS=('legacy_scta','reservoir_release')
 _ALLOWED_BASE_EM_REFRESH_POLICIES=('stage_once','epoch_start')
 _ALLOWED_UNKNOWN_MODES=('prototype','scalar_bias')
@@ -11,7 +11,7 @@ _ALLOWED_EXTRA_SELECTION_MODES=('trajectory_epoch_topk_nonYprime','clip_observed
 _ALLOWED_EXTRA_ACTIVATION_MODES=('always','margin_over_yprime')
 _ALLOWED_EXTRA_COVERAGE_MODES=('observed_only','unified_with_yprime')
 _ALLOWED_AUG_LOSS_MODES=('soft_ce','hard_candidate_nce')
-_ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug')
+_ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug','sinkhorn_prealign_only','sinkhorn_preaug_no_unknown')
 _ALLOWED_METRICS_PROFILES=('default','formal')
 _ALLOWED_BENCHMARKS=('lvvis',)
 
@@ -78,6 +78,12 @@ class TrainPlan:
     log_every:int=10
     write_runtime_metrics_jsonl:bool=True
     print_epoch_summary:bool=True
+    sinkhorn_tau:float=0.15
+    sinkhorn_iters:int=5
+    sinkhorn_row_cap_scale:float=2.0
+    sinkhorn_extra_demand:float=0.25
+    sinkhorn_aug_extra_lambda:float=0.2
+    sinkhorn_assignment_stopgrad:bool=True
 
 
     def __post_init__(self):
@@ -140,6 +146,12 @@ def resolve_train_plan(args)->TrainPlan:
         ablate_no_yprime_reward=bool(getattr(args, 'ablate_no_yprime_reward', False)), show_progress=bool(args.show_progress),
         log_every=int(args.log_every), write_runtime_metrics_jsonl=bool(args.write_runtime_metrics_jsonl),
         print_epoch_summary=bool(args.print_epoch_summary),
+        sinkhorn_tau=float(getattr(args, 'sinkhorn_tau', 0.15)),
+        sinkhorn_iters=max(1, int(getattr(args, 'sinkhorn_iters', 5))),
+        sinkhorn_row_cap_scale=float(getattr(args, 'sinkhorn_row_cap_scale', 2.0)),
+        sinkhorn_extra_demand=float(getattr(args, 'sinkhorn_extra_demand', 0.25)),
+        sinkhorn_aug_extra_lambda=float(getattr(args, 'sinkhorn_aug_extra_lambda', 0.2)),
+        sinkhorn_assignment_stopgrad=bool(getattr(args, 'sinkhorn_assignment_stopgrad', True)),
     )
 
 
