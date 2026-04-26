@@ -52,6 +52,14 @@ def _write_jsonl(path: Path, rows: Sequence[Record]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + '\n')
 
 
+def _loss_reporting_semantics(*, stage_id: str, aug_loss_mode: str) -> str:
+    if str(stage_id) == 'softem_aug' and str(aug_loss_mode) == 'hard_candidate_nce':
+        return 'loss_mean/loss_last report hard_candidate_nce row loss; optimization_loss_* report optimizer-applied microbatch loss.'
+    if str(stage_id) == 'softem_aug':
+        return 'loss_mean/loss_last report soft_ce row loss; optimization_loss_* report optimizer-applied microbatch loss.'
+    return 'loss_mean/loss_last report stage soft_ce row loss; optimization_loss_* report optimizer-applied microbatch loss.'
+
+
 def _project_text_vocab_for_epoch_extra(*, projector: Projector, vocab_matrix: np.ndarray, device: torch.device) -> torch.Tensor:
     vocab_np = np.asarray(vocab_matrix, dtype=np.float32)
     if vocab_np.ndim != 2:
@@ -692,32 +700,33 @@ def _hard_candidate_nce_batch_loss(
     nce_logits = cosine_logits.masked_fill(~valid_mask, -1.0e4) / float(tau)
     losses = F.cross_entropy(nce_logits[valid_rows], pos_idx[valid_rows], reduction='none')
     loss = losses.mean()
-    pos_idx_cpu = pos_idx.detach().cpu().numpy()
-    valid_cpu = valid_rows.detach().cpu().numpy().astype(bool)
-    positive_domain_hist = Counter()
-    positive_class_hist = Counter()
-    for i in range(bsz):
-        if not bool(valid_cpu[i]):
-            continue
-        j = int(pos_idx_cpu[i])
-        raw_id = int(raw_id_np[i, j])
-        positive_class_hist[raw_id] += 1
-        if bool(observed_mask_np[i, j]):
-            positive_domain_hist['Yprime'] += 1
-        elif bool(extra_mask_np[i, j]):
-            positive_domain_hist['extra'] += 1
-        else:
-            positive_domain_hist['other_text_candidate'] += 1
+    observed_mask = torch.from_numpy(observed_mask_np).to(device=device, dtype=torch.bool)
+    extra_mask = torch.from_numpy(extra_mask_np).to(device=device, dtype=torch.bool)
+    raw_id_tensor = torch.from_numpy(raw_id_np).to(device=device, dtype=torch.long)
+    pos_idx_valid = pos_idx[valid_rows]
+    pos_observed = observed_mask[valid_rows, pos_idx_valid]
+    pos_extra = extra_mask[valid_rows, pos_idx_valid]
+    pos_raw_ids = raw_id_tensor[valid_rows, pos_idx_valid]
+    positive_domain_hist = {
+        'Yprime': int(pos_observed.sum().detach().cpu().item()),
+        'extra': int((~pos_observed & pos_extra).sum().detach().cpu().item()),
+        'other_text_candidate': int((~pos_observed & ~pos_extra).sum().detach().cpu().item()),
+    }
+    positive_domain_hist = {str(k): int(v) for k, v in positive_domain_hist.items() if int(v) > 0}
+    pos_raw_ids_cpu = pos_raw_ids.detach().cpu()
+    positive_class_hist: Dict[str, int] = {}
+    if pos_raw_ids_cpu.numel() > 0:
+        bincount = torch.bincount(pos_raw_ids_cpu.clamp_min(0))
+        nonzero = torch.nonzero(bincount > 0, as_tuple=False).reshape(-1).tolist()
+        positive_class_hist = {str(int(raw_id)): int(bincount[int(raw_id)].item()) for raw_id in nonzero}
     stats.update({
         'loss_values': [float(x) for x in losses.detach().cpu().tolist()],
         'positive_resp_values': [float(x) for x in pos_resp[valid_rows].detach().cpu().tolist()],
-        'positive_domain_histogram': dict(positive_domain_hist),
-        'positive_class_histogram': {str(k): int(v) for k, v in positive_class_hist.items()},
+        'positive_domain_histogram': positive_domain_hist,
+        'positive_class_histogram': positive_class_hist,
     })
     # Responsibility diagnostics use the same R_final tensor as soft CE, but are
     # computed vectorized from the padded row tensors.
-    observed_mask = torch.from_numpy(observed_mask_np).to(device=device, dtype=torch.bool)
-    extra_mask = torch.from_numpy(extra_mask_np).to(device=device, dtype=torch.bool)
     r_unknown_t = torch.from_numpy(np.asarray(r_unknown, dtype=np.float32)).to(device=device, dtype=torch.float32)
     observed_den = observed_mask.sum(dim=-1).clamp_min(1)
     extra_den = extra_mask.sum(dim=-1).clamp_min(1)
@@ -1317,10 +1326,9 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                     batch_loss.backward()
                     optimizer.step()
                     batch_loss_value = float(batch_loss.detach().cpu().item())
-                    if str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce' and str(stage.stage_id) == 'softem_aug':
-                        loss_record_value = float(np.mean(sample_losses)) if sample_losses else batch_loss_value
-                        losses.append(loss_record_value)
-                        epoch_losses.append(loss_record_value)
+                    loss_record_value = float(np.mean(sample_losses)) if sample_losses else batch_loss_value
+                    losses.append(loss_record_value)
+                    epoch_losses.append(loss_record_value)
                     optimization_losses.append(batch_loss_value)
                     epoch_batch_losses.append(batch_loss_value)
                     epoch_effective_counts.append(int(effective_responsibility_unit_count))
@@ -1347,9 +1355,9 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
             epoch_summary = {'stage': str(stage.stage_id), 'epoch': int(epoch_index) + 1, 'microbatch_count': int(len(epoch_batch_losses)), 'loss_mean': float(np.mean(epoch_losses)) if epoch_losses else 0.0, 'loss_last': float(epoch_losses[-1]) if epoch_losses else 0.0, 'optimization_loss_mean': float(np.mean(epoch_batch_losses)) if epoch_batch_losses else 0.0, 'optimization_loss_last': float(epoch_batch_losses[-1]) if epoch_batch_losses else 0.0, 'effective_responsibility_unit_count_total': int(np.sum(epoch_effective_counts)) if epoch_effective_counts else 0, 'effective_responsibility_unit_count_mean': float(np.mean(epoch_effective_counts)) if epoch_effective_counts else 0.0, 'unknown_mean_responsibility_epoch': float(np.mean(epoch_unknown_responsibilities)) if epoch_unknown_responsibilities else 0.0, 'observed_mean_responsibility_epoch': float(np.mean(epoch_observed_responsibilities)) if epoch_observed_responsibilities else 0.0, 'responsibility_entropy_epoch': float(np.mean(epoch_entropies)) if epoch_entropies else 0.0}
             if str(stage.stage_id) == 'softem_aug':
                 epoch_summary['extra_mean_responsibility_epoch'] = float(np.mean(epoch_extra_responsibilities)) if epoch_extra_responsibilities else 0.0
-            unknown_quantiles = _quantile_snapshot(epoch_unknown_responsibilities)
-            observed_quantiles = _quantile_snapshot(epoch_observed_responsibilities)
-            entropy_quantiles = _quantile_snapshot(epoch_entropies)
+                unknown_quantiles = _quantile_snapshot(epoch_unknown_responsibilities)
+                observed_quantiles = _quantile_snapshot(epoch_observed_responsibilities)
+                entropy_quantiles = _quantile_snapshot(epoch_entropies)
             for prefix, values in (('unknown_resp', unknown_quantiles), ('observed_resp', observed_quantiles), ('responsibility_entropy', entropy_quantiles)):
                 for key, value in values.items():
                     epoch_summary[f'{prefix}_{key}'] = float(value)
@@ -1358,12 +1366,23 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
                 for key, value in extra_quantiles.items():
                     epoch_summary[f'extra_resp_{key}'] = float(value)
                 epoch_summary['aug_loss_mode'] = str(getattr(config, 'aug_loss_mode', 'soft_ce'))
+                epoch_summary['loss_reporting_semantics'] = _loss_reporting_semantics(stage_id=str(stage.stage_id), aug_loss_mode=str(getattr(config, 'aug_loss_mode', 'soft_ce')))
                 if str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce':
                     epoch_summary['aug_nce_tau'] = float(getattr(config, 'aug_nce_tau', 0.07))
                     epoch_summary['aug_nce_positive_min_resp'] = float(getattr(config, 'aug_nce_positive_min_resp', 0.0))
+                    epoch_summary['aug_nce_include_unknown'] = bool(getattr(config, 'aug_nce_include_unknown', False))
                     epoch_summary['aug_nce_valid_row_count_cumulative'] = int(aug_nce_valid_row_count_total)
-                    epoch_summary['aug_nce_input_row_count_cumulative'] = int(aug_nce_input_row_count_total)
+                    epoch_summary['aug_nce_total_row_count_cumulative'] = int(aug_nce_input_row_count_total)
                     epoch_summary['aug_nce_valid_row_rate_cumulative'] = float(aug_nce_valid_row_count_total / max(aug_nce_input_row_count_total, 1))
+                    epoch_summary['aug_nce_loss_mean'] = float(np.mean(aug_nce_loss_values)) if aug_nce_loss_values else 0.0
+                    epoch_summary['aug_nce_loss_last'] = float(aug_nce_loss_values[-1]) if aug_nce_loss_values else 0.0
+                    epoch_summary['aug_nce_positive_domain_histogram'] = {str(k): int(v) for k, v in aug_nce_positive_domain_hist.items()}
+                    epoch_summary['aug_nce_positive_class_top20'] = [{'raw_id': int(k), 'count': int(v)} for k, v in aug_nce_positive_class_hist.most_common(20)]
+                    epoch_summary['soft_ce_loss_mean'] = None
+                    epoch_summary['soft_ce_loss_last'] = None
+                else:
+                    epoch_summary['soft_ce_loss_mean'] = float(np.mean(epoch_losses)) if epoch_losses else 0.0
+                    epoch_summary['soft_ce_loss_last'] = float(epoch_losses[-1]) if epoch_losses else 0.0
             if bool(config.print_epoch_summary):
                 print(_format_epoch_summary(str(stage.stage_id), epoch_summary), file=sys.stderr, flush=True)
             if bool(config.write_runtime_metrics_jsonl):
@@ -1401,21 +1420,27 @@ def run_legacy_scta_soft_em_via_reservoir(*, output_root: Path, materialized_sam
         stage_summary['aug_nce_tau'] = float(getattr(config, 'aug_nce_tau', 0.07))
         stage_summary['aug_nce_positive_min_resp'] = float(getattr(config, 'aug_nce_positive_min_resp', 0.0))
         stage_summary['aug_nce_include_unknown'] = bool(getattr(config, 'aug_nce_include_unknown', False))
+        stage_summary['loss_reporting_semantics'] = _loss_reporting_semantics(stage_id=str(stage.stage_id), aug_loss_mode=str(stage_summary['aug_loss_mode']))
         if str(stage.stage_id) == 'softem_aug' and str(getattr(config, 'aug_loss_mode', 'soft_ce')) == 'hard_candidate_nce':
             stage_summary['aug_nce_valid_row_count'] = int(aug_nce_valid_row_count_total)
-            stage_summary['aug_nce_input_row_count'] = int(aug_nce_input_row_count_total)
+            stage_summary['aug_nce_total_row_count'] = int(aug_nce_input_row_count_total)
             stage_summary['aug_nce_valid_row_rate'] = float(aug_nce_valid_row_count_total / max(aug_nce_input_row_count_total, 1))
             stage_summary['aug_nce_loss_mean'] = float(np.mean(aug_nce_loss_values)) if aug_nce_loss_values else 0.0
+            stage_summary['aug_nce_loss_last'] = float(aug_nce_loss_values[-1]) if aug_nce_loss_values else 0.0
             stage_summary['aug_nce_positive_resp_mean'] = float(np.mean(aug_nce_positive_resp_values)) if aug_nce_positive_resp_values else 0.0
             stage_summary['aug_nce_positive_domain_histogram'] = {str(k): int(v) for k, v in aug_nce_positive_domain_hist.items()}
             stage_summary['aug_nce_positive_class_top20'] = [{'raw_id': int(k), 'count': int(v)} for k, v in aug_nce_positive_class_hist.most_common(20)]
             stage_summary['soft_ce_loss_mean'] = None
+            stage_summary['soft_ce_loss_last'] = None
+        elif str(stage.stage_id) == 'softem_aug':
+            stage_summary['soft_ce_loss_mean'] = _mean_or_zero(losses)
+            stage_summary['soft_ce_loss_last'] = float(losses[-1]) if losses else 0.0
         if str(stage.stage_id) == 'softem_aug':
             stage_summary['runtime_extra_cache_metrics'] = _runtime_extra_cache_metrics(active_examples_by_tid, runtime_extra_cache, k_extra=int(config.k_extra), extra_alpha=float(config.extra_alpha))
             stage_summary['runtime_extra_cache_metrics'].update(_extra_consensus_metrics_from_cache(cache, extra_consensus_bonus_lambda=float(config.extra_consensus_bonus_lambda)))
             stage_summary['runtime_extra_cache_metrics'].update(_extra_coverage_metrics_from_cache(cache, extra_coverage_mode=str(config.extra_coverage_mode), extra_coverage_scale=float(config.extra_coverage_scale)))
         _write_json(stage_dir / 'stage_summary.json', stage_summary)
-        stage_reports.append({'stage_id': str(stage.stage_id), 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'responsibility_records_path': str(stage.responsibility_relpath), 'train_state_path': str(stage.train_state_relpath), 'checkpoint_last_path': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'record_count_output': int(len(rows)), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'batch_budget': int(batch_budget), 'loss_normalization': 'effective_responsibility_unit_count'})
+        stage_reports.append({'stage_id': str(stage.stage_id), 'em_subiterations': max(0, int(config.em_subiterations)), 'base_em_refresh_policy': str(getattr(config, 'base_em_refresh_policy', 'stage_once')), 'unknown_mode': str(config.unknown_mode), 'responsibility_records_path': str(stage.responsibility_relpath), 'train_state_path': str(stage.train_state_relpath), 'checkpoint_last_path': str((Path('train') / stage.stage_id / 'checkpoints' / stage.checkpoint_name).as_posix()), 'record_count_output': int(len(rows)), 'loss_mean': _mean_or_zero(losses), 'loss_last': float(losses[-1]) if losses else 0.0, 'optimization_loss_mean': _mean_or_zero(optimization_losses), 'optimization_loss_last': float(optimization_losses[-1]) if optimization_losses else 0.0, 'batch_budget': int(batch_budget), 'loss_normalization': 'effective_responsibility_unit_count', 'loss_reporting_semantics': stage_summary.get('loss_reporting_semantics'), 'aug_loss_mode': stage_summary.get('aug_loss_mode'), 'aug_nce_tau': stage_summary.get('aug_nce_tau'), 'aug_nce_positive_min_resp': stage_summary.get('aug_nce_positive_min_resp'), 'aug_nce_include_unknown': stage_summary.get('aug_nce_include_unknown'), 'aug_nce_valid_row_count': stage_summary.get('aug_nce_valid_row_count'), 'aug_nce_total_row_count': stage_summary.get('aug_nce_total_row_count'), 'aug_nce_valid_row_rate': stage_summary.get('aug_nce_valid_row_rate'), 'aug_nce_positive_domain_histogram': stage_summary.get('aug_nce_positive_domain_histogram'), 'aug_nce_positive_class_top20': stage_summary.get('aug_nce_positive_class_top20'), 'aug_nce_loss_mean': stage_summary.get('aug_nce_loss_mean'), 'aug_nce_loss_last': stage_summary.get('aug_nce_loss_last'), 'soft_ce_loss_mean': stage_summary.get('soft_ce_loss_mean'), 'soft_ce_loss_last': stage_summary.get('soft_ce_loss_last'), 'stage_summary_relpath': str((Path('train') / stage.stage_id / 'stage_summary.json').as_posix()), 'stage_summary_payload': dict(stage_summary)})
         current_checkpoint = checkpoint_path
         current_unknown_metrics = dict(stage_summary.get('unknown_metrics', {}))
         final_examples = [active_examples_by_tid[tid] for tid in active_examples_by_tid.keys()]

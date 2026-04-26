@@ -1,10 +1,11 @@
 {
   "task_id": "G8_inference_and_eval-task",
-  "task_truth_stamp": "962ae1a2138c44a47621c240e9e21948fce349ed57f37590c5c323391cf16e4e",
+  "task_truth_stamp": "2db10eeabb1bef18d516281de496795baa63eebab6e3415faaab3b3d77f8a39f",
   "active_gate": "G8_inference_and_eval",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/analysis/extra_mining_simulator.py",
     "videocutler/ext_stageb_ovvis/analysis/extra_mining_score_registry.py",
+    "videocutler/ext_stageb_ovvis/algorithms/legacy_scta_backend.py",
     "videocutler/ext_stageb_ovvis/algorithms/_g7_semantics.py",
     "videocutler/ext_stageb_ovvis/algorithms/reservoir_v1.py",
     "videocutler/ext_stageb_ovvis/algorithms/soft_em.py",
