@@ -89,6 +89,11 @@ class DiagnosisConfig:
     emit_hub_formation_timeline: bool
     emit_gt_cooccurrence: bool
     emit_weak_label_cooccurrence: bool
+    emit_fully_missed_class_report: bool
+    emit_full_class_cooccurrence: bool
+    strong_hub_cooccurrence_threshold: float
+    weak_unobservable_present_threshold: float
+    weak_unobservable_alone_threshold: float
 
 
 def _parse_bool(value: Any) -> bool:
@@ -1261,6 +1266,290 @@ def _rank_bucket_payload_by_class(rows: Sequence[Mapping[str, Any]], *, records_
 
 
 
+
+def _class_cooccurrence_payload_from_units(
+    *,
+    units: Sequence[Mapping[str, Any]],
+    target_raw_ids: Sequence[int],
+    hub_raw_ids: Sequence[int],
+    records_by_raw: Mapping[int, Mapping[str, Any]],
+    top_n: int,
+    source: str,
+    unit_level: str,
+) -> Dict[str, Any]:
+    target_set = {int(x) for x in target_raw_ids}
+    hub_set = {int(x) for x in hub_raw_ids}
+    class_sets: List[set[int]] = []
+    for unit in units:
+        vals = {int(x) for x in _unique_ints(unit.get("class_ids"))}
+        if vals:
+            class_sets.append(vals)
+    total = len(class_sets)
+    per_class: List[Dict[str, Any]] = []
+    for cid in sorted(target_set):
+        present_units = [cs for cs in class_sets if int(cid) in cs]
+        present = len(present_units)
+        alone_count = 0
+        with_other_count = 0
+        with_any_hub_count = 0
+        num_classes_values: List[float] = []
+        hub_counter: Counter = Counter()
+        co_counter: Counter = Counter()
+        for cs in present_units:
+            num_classes_values.append(float(len(cs)))
+            others = set(cs) - {int(cid)}
+            if not others:
+                alone_count += 1
+            else:
+                with_other_count += 1
+            hub_hits = others & hub_set
+            if hub_hits:
+                with_any_hub_count += 1
+            for h in sorted(hub_hits):
+                hub_counter[int(h)] += 1
+            for other in sorted(others):
+                co_counter[int(other)] += 1
+        top_hubs: List[Dict[str, Any]] = []
+        for hid, cnt in hub_counter.most_common(max(1, int(top_n))):
+            hitem = _class_label(int(hid), records_by_raw)
+            hitem["count"] = int(cnt)
+            hitem["P_hub_given_class"] = float(cnt / max(present, 1)) if present else None
+            hitem["P_class_given_hub"] = None
+            hub_present = sum(1 for cs in class_sets if int(hid) in cs)
+            if hub_present:
+                hitem["P_class_given_hub"] = float(cnt / max(hub_present, 1))
+            top_hubs.append(hitem)
+        top_co: List[Dict[str, Any]] = []
+        for oid, cnt in co_counter.most_common(max(1, int(top_n))):
+            oitem = _class_label(int(oid), records_by_raw)
+            oitem["count"] = int(cnt)
+            oitem["P_other_given_class"] = float(cnt / max(present, 1)) if present else None
+            other_present = sum(1 for cs in class_sets if int(oid) in cs)
+            oitem["P_class_given_other"] = float(cnt / max(other_present, 1)) if other_present else None
+            top_co.append(oitem)
+        max_hub_raw_id = None
+        max_hub_name = None
+        max_p_hub_given_class = None
+        if top_hubs:
+            max_hub_raw_id = _safe_int(top_hubs[0].get("raw_id"))
+            max_hub_name = top_hubs[0].get("name")
+            max_p_hub_given_class = _safe_float(top_hubs[0].get("P_hub_given_class"))
+        person_count = int(hub_counter.get(773, 0))
+        item = _class_label(int(cid), records_by_raw)
+        item.update({
+            "present_count": int(present),
+            "present_rate": float(present / max(total, 1)),
+            "alone_count": int(alone_count),
+            "alone_rate": float(alone_count / max(present, 1)) if present else None,
+            "with_other_classes_count": int(with_other_count),
+            "with_other_classes_rate": float(with_other_count / max(present, 1)) if present else None,
+            "with_any_hub_count": int(with_any_hub_count),
+            "with_any_hub_rate": float(with_any_hub_count / max(present, 1)) if present else None,
+            "mean_num_classes_when_present": _mean(num_classes_values),
+            "P_person_given_class": float(person_count / max(present, 1)) if present else None,
+            "person_cooccurrence_count": int(person_count),
+            "max_P_hub_given_class": max_p_hub_given_class,
+            "max_cooccurring_hub_raw_id": max_hub_raw_id,
+            "max_cooccurring_hub_name": max_hub_name,
+            "top_cooccurring_hubs": top_hubs,
+            "top_cooccurring_classes": top_co,
+        })
+        per_class.append(item)
+    return {
+        "status": "PASS" if total else "NO_UNITS",
+        "source": str(source),
+        "unit_level": str(unit_level),
+        "definition": "Each unit contributes a set of raw class ids; target-class co-occurrence is measured against hub_raw_ids and all other classes within the same unit.",
+        "target_raw_ids": [int(x) for x in sorted(target_set)],
+        "hub_raw_ids": [int(x) for x in sorted(hub_set)],
+        "unit_count": int(total),
+        "per_class": per_class,
+    }
+
+
+def _cooccurrence_map(payload: Mapping[str, Any]) -> Dict[int, Mapping[str, Any]]:
+    out: Dict[int, Mapping[str, Any]] = {}
+    if not isinstance(payload, Mapping):
+        return out
+    for item in payload.get("per_class", []) or []:
+        if not isinstance(item, Mapping):
+            continue
+        rid = _safe_int(item.get("raw_id"))
+        if rid is not None:
+            out[int(rid)] = item
+    return out
+
+
+def _fully_missed_class_report_rows(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    blind_spot_rows: Sequence[Mapping[str, Any]],
+    gt_class_cooccurrence: Mapping[str, Any],
+    weak_class_cooccurrence: Mapping[str, Any],
+    hub_raw_ids: Sequence[int],
+    records_by_raw: Mapping[int, Mapping[str, Any]],
+    strong_hub_cooccurrence_threshold: float,
+    weak_unobservable_present_threshold: float,
+    weak_unobservable_alone_threshold: float,
+) -> List[Dict[str, Any]]:
+    joined = _rows_joined(rows)
+    fully_ids = {
+        int(r["raw_id"])
+        for r in blind_spot_rows
+        if str(r.get("blind_spot_type")) == "fully_missed_blind_spot" and _safe_int(r.get("raw_id")) is not None
+    }
+    grouped: Dict[int, List[Mapping[str, Any]]] = defaultdict(list)
+    for row in joined:
+        gt = _safe_int(row.get("gt_raw_id"))
+        if gt is not None and int(gt) in fully_ids:
+            grouped[int(gt)].append(row)
+
+    gt_co_map = _cooccurrence_map(gt_class_cooccurrence)
+    weak_co_map = _cooccurrence_map(weak_class_cooccurrence)
+    hub_set = {int(x) for x in hub_raw_ids}
+    out: List[Dict[str, Any]] = []
+    for gt in sorted(fully_ids):
+        seq = grouped.get(int(gt), [])
+        label = _class_label(int(gt), records_by_raw)
+        gt_co = gt_co_map.get(int(gt), {})
+        weak_co = weak_co_map.get(int(gt), {})
+        ranks = [_safe_int(r.get("gt_mining_rank")) for r in seq]
+        ranks_float = [float(r) for r in ranks if r is not None]
+        buckets = Counter(_margin_bucket(r, 3) for r in ranks)
+        suppressors = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in seq if _safe_int(r.get("top_suppressor_raw_id")) is not None)
+        final_winners = Counter(_safe_int(r.get("final_winner_raw_id")) for r in seq if _safe_int(r.get("final_winner_raw_id")) is not None)
+        top_suppressor_raw_id = None
+        top_suppressor_name = None
+        top_suppressor_count = 0
+        if suppressors:
+            top_suppressor_raw_id, top_suppressor_count = suppressors.most_common(1)[0]
+            top_suppressor_name = _class_label(int(top_suppressor_raw_id), records_by_raw).get("name")
+        top_winner_raw_id = None
+        top_winner_name = None
+        top_winner_count = 0
+        if final_winners:
+            top_winner_raw_id, top_winner_count = final_winners.most_common(1)[0]
+            top_winner_name = _class_label(int(top_winner_raw_id), records_by_raw).get("name")
+
+        gt_person = _safe_float(gt_co.get("P_person_given_class"))
+        weak_person = _safe_float(weak_co.get("P_person_given_class"))
+        gt_max_hub = _safe_float(gt_co.get("max_P_hub_given_class"))
+        weak_max_hub = _safe_float(weak_co.get("max_P_hub_given_class"))
+        gt_max_hub_id = _safe_int(gt_co.get("max_cooccurring_hub_raw_id"))
+        weak_max_hub_id = _safe_int(weak_co.get("max_cooccurring_hub_raw_id"))
+        max_hub = max([x for x in [gt_max_hub, weak_max_hub] if x is not None] or [0.0])
+        max_person = max([x for x in [gt_person, weak_person] if x is not None] or [0.0])
+        strong_level = "weak"
+        if max_hub >= 0.75:
+            strong_level = "very_strong"
+        elif max_hub >= float(strong_hub_cooccurrence_threshold):
+            strong_level = "strong"
+        elif max_hub >= 0.25:
+            strong_level = "moderate"
+
+        rank_top3_rate = float(buckets.get("in_topK", 0) / max(len(seq), 1)) if seq else None
+        rank_4_5_rate = float(buckets.get("near_miss_Kplus1_Kplus2", 0) / max(len(seq), 1)) if seq else None
+        rank_6_20_rate = float(buckets.get("medium_miss_6_20", 0) / max(len(seq), 1)) if seq else None
+        rank_gt20_rate = float(buckets.get("far_miss_gt20", 0) / max(len(seq), 1)) if seq else None
+        rank_missing_rate = float(buckets.get("missing_or_not_ranked", 0) / max(len(seq), 1)) if seq else None
+        weak_present_rate = _safe_float(weak_co.get("present_rate"))
+        weak_alone_rate = _safe_float(weak_co.get("alone_rate"))
+
+        subtype = "rank_far_representation_blind_spot"
+        if max_person >= float(strong_hub_cooccurrence_threshold):
+            subtype = "person_cooccurrence_blind_spot"
+        elif max_hub >= float(strong_hub_cooccurrence_threshold):
+            subtype = "nonperson_hub_cooccurrence_blind_spot"
+        elif (weak_present_rate is not None and weak_present_rate <= float(weak_unobservable_present_threshold)) and (
+            weak_alone_rate is None or weak_alone_rate <= float(weak_unobservable_alone_threshold)
+        ):
+            subtype = "weak_label_unobservable"
+        elif ((rank_4_5_rate or 0.0) + (rank_6_20_rate or 0.0)) >= 0.50:
+            subtype = "near_or_medium_miss_rescuable"
+        elif ((rank_gt20_rate or 0.0) + (rank_missing_rate or 0.0)) >= 0.50:
+            subtype = "rank_far_representation_blind_spot"
+        else:
+            subtype = "mixed_fully_missed"
+
+        item: Dict[str, Any] = {
+            "raw_id": int(gt),
+            "name": label.get("name"),
+            "gt_trajectory_count": int(len(seq)),
+            "active_raw_count": int(sum(1 for r in seq if _active_raw_contains(r) is True)),
+            "active_raw_rate": _rate_bools([_active_raw_contains(r) is True for r in seq if _active_raw_contains(r) is not None]),
+            "top1_count": int(sum(1 for r in seq if bool(r.get("final_top1_is_gt")))),
+            "top1_rate": _rate_bools([bool(r.get("final_top1_is_gt")) for r in seq]),
+            "R_GT_winner_rate": _rate_bools([bool(r.get("r_final_gt_winner")) for r in seq if r.get("r_final_gt_winner") is not None]),
+            "mean_gt_mining_rank": _mean(ranks_float),
+            "median_gt_mining_rank": _median(ranks_float),
+            "rank_p90": _quantile(ranks_float, 0.9),
+            "rank_top3_count": int(buckets.get("in_topK", 0)),
+            "rank_top3_rate": rank_top3_rate,
+            "rank_4_5_count": int(buckets.get("near_miss_Kplus1_Kplus2", 0)),
+            "rank_4_5_rate": rank_4_5_rate,
+            "rank_6_20_count": int(buckets.get("medium_miss_6_20", 0)),
+            "rank_6_20_rate": rank_6_20_rate,
+            "rank_gt20_count": int(buckets.get("far_miss_gt20", 0)),
+            "rank_gt20_rate": rank_gt20_rate,
+            "rank_missing_count": int(buckets.get("missing_or_not_ranked", 0)),
+            "rank_missing_rate": rank_missing_rate,
+            "top_suppressor_raw_id": int(top_suppressor_raw_id) if top_suppressor_raw_id is not None else None,
+            "top_suppressor_name": top_suppressor_name,
+            "top_suppressor_count": int(top_suppressor_count),
+            "top_suppressor_rate": float(top_suppressor_count / max(len(seq), 1)) if seq else None,
+            "top_final_winner_raw_id": int(top_winner_raw_id) if top_winner_raw_id is not None else None,
+            "top_final_winner_name": top_winner_name,
+            "top_final_winner_count": int(top_winner_count),
+            "top_final_winner_rate": float(top_winner_count / max(len(seq), 1)) if seq else None,
+            "gt_present_count": int(gt_co.get("present_count", 0) or 0),
+            "gt_present_rate": gt_co.get("present_rate"),
+            "gt_alone_count": int(gt_co.get("alone_count", 0) or 0),
+            "gt_alone_rate": gt_co.get("alone_rate"),
+            "gt_with_any_hub_rate": gt_co.get("with_any_hub_rate"),
+            "weak_present_count": int(weak_co.get("present_count", 0) or 0),
+            "weak_present_rate": weak_co.get("present_rate"),
+            "weak_alone_count": int(weak_co.get("alone_count", 0) or 0),
+            "weak_alone_rate": weak_co.get("alone_rate"),
+            "weak_with_any_hub_rate": weak_co.get("with_any_hub_rate"),
+            "P_person_given_class_gt": gt_person,
+            "P_person_given_class_weak": weak_person,
+            "max_P_hub_given_class_gt": gt_max_hub,
+            "max_gt_cooccurring_hub_raw_id": gt_max_hub_id,
+            "max_gt_cooccurring_hub_name": gt_co.get("max_cooccurring_hub_name"),
+            "max_P_hub_given_class_weak": weak_max_hub,
+            "max_weak_cooccurring_hub_raw_id": weak_max_hub_id,
+            "max_weak_cooccurring_hub_name": weak_co.get("max_cooccurring_hub_name"),
+            "strong_hub_cooccurrence_level": strong_level,
+            "failure_subtype": subtype,
+            "is_person_cooccurrence": bool(max_person >= float(strong_hub_cooccurrence_threshold)),
+            "is_nonperson_hub_cooccurrence": bool(max_hub >= float(strong_hub_cooccurrence_threshold) and max_person < float(strong_hub_cooccurrence_threshold)),
+            "top_suppressor_is_hub": bool(top_suppressor_raw_id in hub_set) if top_suppressor_raw_id is not None else False,
+            "top_suppressor_is_person": bool(top_suppressor_raw_id == 773) if top_suppressor_raw_id is not None else False,
+        }
+        out.append(item)
+    out.sort(key=lambda r: (str(r.get("failure_subtype")), -(int(r.get("gt_trajectory_count", 0))), -(float(r.get("rank_gt20_rate") or 0.0))))
+    return out
+
+
+def _fully_missed_class_report_payload(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    subtype_counter = Counter(str(r.get("failure_subtype")) for r in rows)
+    co_level_counter = Counter(str(r.get("strong_hub_cooccurrence_level")) for r in rows)
+    trajectory_count_by_subtype: Counter = Counter()
+    for r in rows:
+        trajectory_count_by_subtype[str(r.get("failure_subtype"))] += int(r.get("gt_trajectory_count", 0) or 0)
+    return {
+        "status": "PASS",
+        "definition": "Class-level report for classes whose blind_spot_type is fully_missed_blind_spot in formal_aligned_failure_taxonomy_by_class.csv.",
+        "class_count": int(len(rows)),
+        "trajectory_count": int(sum(int(r.get("gt_trajectory_count", 0) or 0) for r in rows)),
+        "failure_subtype_histogram": dict(subtype_counter),
+        "trajectory_count_by_failure_subtype": dict(trajectory_count_by_subtype),
+        "strong_hub_cooccurrence_level_histogram": dict(co_level_counter),
+        "person_cooccurrence_class_count": int(sum(1 for r in rows if bool(r.get("is_person_cooccurrence")))),
+        "nonperson_hub_cooccurrence_class_count": int(sum(1 for r in rows if bool(r.get("is_nonperson_hub_cooccurrence")))),
+        "rows": rows,
+    }
+
 def _text_semantic_confusion_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int, neighbor_topk: int, sim_threshold: float) -> Dict[str, Any]:
     joined = _rows_joined(rows)
     failure_rows = [r for r in joined if not bool(r.get("final_top1_is_gt")) and _safe_int(r.get("final_winner_raw_id")) is not None]
@@ -2222,6 +2511,42 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         source="stage_effective_examples_observed_or_candidate_known",
         unit_level="clip_id",
     )
+    fully_missed_candidate_ids = [
+        int(r["raw_id"])
+        for r in blind_spot_toplist_rows
+        if str(r.get("blind_spot_type")) == "fully_missed_blind_spot" and _safe_int(r.get("raw_id")) is not None
+    ]
+    full_class_gt_cooccurrence_payload = _class_cooccurrence_payload_from_units(
+        units=annotation_units if annotation_units else _units_from_rows(row_diagnostics, unit_key="clip_id", class_key="gt_raw_id"),
+        target_raw_ids=fully_missed_candidate_ids,
+        hub_raw_ids=config.hub_raw_ids,
+        records_by_raw=records_by_raw,
+        top_n=config.top_classes,
+        source=(f"lvvis_annotation:{annotation_meta.get('path', 'missing')}" if annotation_units else "trajectory_gt_sidecar_from_effective_examples"),
+        unit_level=str(annotation_meta.get("unit_level", "video_id")) if annotation_units else "clip_id",
+    )
+    full_class_weak_cooccurrence_payload = _class_cooccurrence_payload_from_units(
+        units=_weak_units_from_examples(effective_examples, unit_key="clip_id"),
+        target_raw_ids=fully_missed_candidate_ids,
+        hub_raw_ids=config.hub_raw_ids,
+        records_by_raw=records_by_raw,
+        top_n=config.top_classes,
+        source="stage_effective_examples_observed_or_candidate_known",
+        unit_level="clip_id",
+    )
+    fully_missed_class_report_rows = _fully_missed_class_report_rows(
+        rows=taxonomy_rows,
+        blind_spot_rows=blind_spot_toplist_rows,
+        gt_class_cooccurrence=full_class_gt_cooccurrence_payload,
+        weak_class_cooccurrence=full_class_weak_cooccurrence_payload,
+        hub_raw_ids=config.hub_raw_ids,
+        records_by_raw=records_by_raw,
+        strong_hub_cooccurrence_threshold=float(config.strong_hub_cooccurrence_threshold),
+        weak_unobservable_present_threshold=float(config.weak_unobservable_present_threshold),
+        weak_unobservable_alone_threshold=float(config.weak_unobservable_alone_threshold),
+    )
+    fully_missed_class_report_payload = _fully_missed_class_report_payload(fully_missed_class_report_rows)
+
     model_hub_current_payload = _model_hub_current_payload(
         taxonomy_rows,
         hub_raw_ids=config.hub_raw_ids,
@@ -2259,6 +2584,9 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "model_hub_current_stage": model_hub_current_payload,
         "hub_formation_timeline": hub_timeline_payload,
         "hub_origin_classification": hub_origin_payload,
+        "full_class_gt_cooccurrence": full_class_gt_cooccurrence_payload,
+        "full_class_weak_label_cooccurrence": full_class_weak_cooccurrence_payload,
+        "fully_missed_blind_spot_class_report": fully_missed_class_report_payload,
         "blind_spot_type_histogram": dict(Counter(str(r.get("blind_spot_type")) for r in blind_spot_toplist_rows)),
     }
 
@@ -2389,6 +2717,10 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "formal_aligned_model_hub_current_stage": output_dir / "formal_aligned_model_hub_current_stage.json",
         "formal_aligned_hub_formation_timeline": output_dir / "formal_aligned_hub_formation_timeline.json",
         "formal_aligned_hub_origin_classification": output_dir / "formal_aligned_hub_origin_classification.json",
+        "formal_aligned_full_class_gt_cooccurrence": output_dir / "formal_aligned_full_class_gt_cooccurrence.json",
+        "formal_aligned_full_class_weak_label_cooccurrence": output_dir / "formal_aligned_full_class_weak_label_cooccurrence.json",
+        "formal_aligned_fully_missed_blind_spot_class_report": output_dir / "formal_aligned_fully_missed_blind_spot_class_report.json",
+        "formal_aligned_fully_missed_blind_spot_class_report_csv": output_dir / "formal_aligned_fully_missed_blind_spot_class_report.csv",
     }
     _write_json(files["summary"], summary)
     _write_json(files["recall_at_k_curve"], recall_curve)
@@ -2429,6 +2761,12 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         _write_json(files["formal_aligned_model_hub_current_stage"], model_hub_current_payload)
         _write_json(files["formal_aligned_hub_formation_timeline"], hub_timeline_payload)
         _write_json(files["formal_aligned_hub_origin_classification"], hub_origin_payload)
+    if bool(config.emit_full_class_cooccurrence) or bool(config.emit_fully_missed_class_report) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_full_class_gt_cooccurrence"], full_class_gt_cooccurrence_payload)
+        _write_json(files["formal_aligned_full_class_weak_label_cooccurrence"], full_class_weak_cooccurrence_payload)
+    if bool(config.emit_fully_missed_class_report) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_fully_missed_blind_spot_class_report"], fully_missed_class_report_payload)
+        _write_csv(files["formal_aligned_fully_missed_blind_spot_class_report_csv"], fully_missed_class_report_rows)
     if bool(config.emit_failure_taxonomy):
         _write_json(files["formal_aligned_failure_taxonomy_summary"], failure_taxonomy_summary)
         _write_csv(files["formal_aligned_rank_bucket_by_class"], rank_bucket_by_class_rows)
@@ -2468,6 +2806,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--emit_hub_formation_timeline", type=_parse_bool, default=False)
     p.add_argument("--emit_gt_cooccurrence", type=_parse_bool, default=False)
     p.add_argument("--emit_weak_label_cooccurrence", type=_parse_bool, default=False)
+    p.add_argument("--emit_fully_missed_class_report", type=_parse_bool, default=False)
+    p.add_argument("--emit_full_class_cooccurrence", type=_parse_bool, default=False)
+    p.add_argument("--strong_hub_cooccurrence_threshold", type=float, default=0.5)
+    p.add_argument("--weak_unobservable_present_threshold", type=float, default=0.05)
+    p.add_argument("--weak_unobservable_alone_threshold", type=float, default=0.05)
     return p.parse_args()
 
 
@@ -2504,6 +2847,11 @@ def main() -> int:
         emit_hub_formation_timeline=bool(args.emit_hub_formation_timeline),
         emit_gt_cooccurrence=bool(args.emit_gt_cooccurrence),
         emit_weak_label_cooccurrence=bool(args.emit_weak_label_cooccurrence),
+        emit_fully_missed_class_report=bool(args.emit_fully_missed_class_report),
+        emit_full_class_cooccurrence=bool(args.emit_full_class_cooccurrence),
+        strong_hub_cooccurrence_threshold=float(args.strong_hub_cooccurrence_threshold),
+        weak_unobservable_present_threshold=float(args.weak_unobservable_present_threshold),
+        weak_unobservable_alone_threshold=float(args.weak_unobservable_alone_threshold),
     )
     result = run_diagnosis(config)
     print(result["summary_path"])
