@@ -96,6 +96,57 @@ def sinkhorn_loss_from_assignment(
     return (per_clip / denom).mean()
 
 
+
+def yprime_only_nce_loss_from_assignment(
+    scores: torch.Tensor,
+    assignment: torch.Tensor,
+    kind: torch.Tensor,
+    c_mask: torch.Tensor,
+    *,
+    stopgrad_assignment: bool = True,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Soft-label InfoNCE/CE over Y' columns only.
+
+    This loss uses the Sinkhorn assignment as soft positive labels, but the
+    contrastive denominator is restricted to confirmed observed/known columns
+    (kind == 1, i.e. Y'). Extra columns are intentionally excluded from the
+    denominator and from positive labels so hidden/unobserved full-vocabulary
+    classes are not treated as negatives.
+
+    Args:
+        scores: [B,Q,M] candidate scores for Y' plus optional extra columns.
+        assignment: [B,Q,M] Sinkhorn assignment mass.
+        kind: [B,M], 1 for Y'/known columns and 2 for extra columns.
+        c_mask: [B,M] valid candidate mask.
+
+    Returns:
+        Scalar loss averaged over clips with non-zero Y' assignment mass.
+    """
+    if scores.ndim != 3 or assignment.ndim != 3:
+        raise ValueError('scores and assignment must be [B,Q,M] tensors')
+    if tuple(scores.shape) != tuple(assignment.shape):
+        raise ValueError('scores and assignment must have the same shape')
+    B, Q, M = scores.shape
+    if tuple(kind.shape) != (B, M) or tuple(c_mask.shape) != (B, M):
+        raise ValueError('kind and c_mask shapes must match [B,M]')
+
+    yprime_mask = c_mask.bool() & (kind == 1)
+    # Invalid columns must not participate in the denominator.
+    masked_scores = scores.float().masked_fill(~yprime_mask[:, None, :], -1.0e4)
+    log_probs = masked_scores - torch.logsumexp(masked_scores, dim=2, keepdim=True)
+
+    P = assignment.detach() if bool(stopgrad_assignment) else assignment
+    P_y = P.float().masked_fill(~yprime_mask[:, None, :], 0.0)
+    mass = P_y.sum(dim=(1, 2))
+    per_clip = -(P_y * log_probs).sum(dim=(1, 2)) / mass.clamp_min(float(eps))
+    valid_clip = mass > float(eps)
+    if bool(valid_clip.any()):
+        return per_clip[valid_clip].mean()
+    # Preserve gradient connectivity for pathological empty microbatches.
+    return scores.float().sum() * 0.0
+
+
 def assignment_metrics(
     assignment: torch.Tensor,
     q_mask: torch.Tensor,

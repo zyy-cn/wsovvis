@@ -362,6 +362,7 @@ def _sinkhorn_train_stage(
         assignment_metrics,
         capped_sinkhorn_assignment,
         sinkhorn_loss_from_assignment,
+        yprime_only_nce_loss_from_assignment,
     )
 
     for group in optimizer.param_groups:
@@ -389,12 +390,18 @@ def _sinkhorn_train_stage(
             temperature = _compute_t_dis(theta_t)
             scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, temperature)
             P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)
-            weights = torch.ones_like(pack['demand'])
-            if str(mode) == 'aug':
-                weights = torch.where(pack['kind'] == 2, torch.as_tensor(float(extra_lambda), device=weights.device, dtype=weights.dtype), weights)
-            weighted_P = P * weights[:, None, :]
-            denom = (pack['demand'] * weights).sum(dim=1).clamp_min(1.0)
-            loss = sinkhorn_loss_from_assignment(scores, weighted_P, stopgrad_assignment=bool(assignment_stopgrad), normalize_by_demand=denom)
+            # V2 loss: Sinkhorn gives soft trajectory<->class pairs, but
+            # training uses Y'-restricted soft-label InfoNCE. The denominator is
+            # only the observed/known label set Y' for each clip, never the full
+            # vocabulary and never extra columns. This avoids treating hidden GT
+            # classes as negatives while adding explicit competition inside Y'.
+            loss = yprime_only_nce_loss_from_assignment(
+                scores,
+                P,
+                pack['kind'],
+                pack['c_mask'],
+                stopgrad_assignment=bool(assignment_stopgrad),
+            )
             loss.backward()
             optimizer.step()
             global_step += 1
@@ -410,7 +417,7 @@ def _sinkhorn_train_stage(
                     'row_type': 'microbatch',
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'stage': str(stage_id),
-                    'training_semantics': 'sinkhorn_no_unknown',
+                    'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
                     'epoch': int(epoch_index) + 1,
                     'microbatch_idx': int(micro_idx),
                     'microbatch_total': int(epoch_plan.batch_count),
@@ -430,7 +437,7 @@ def _sinkhorn_train_stage(
                 'row_type': 'epoch_summary',
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'stage': str(stage_id),
-                'training_semantics': 'sinkhorn_no_unknown',
+                'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
                 'epoch': int(epoch_index) + 1,
                 'microbatch_count': int(len(epoch_batch_losses)),
                 'loss_mean': _mean_or_zero(epoch_losses),
@@ -447,7 +454,7 @@ def _sinkhorn_train_stage(
         'optimization_loss_last': float(batch_losses[-1]) if batch_losses else 0.0,
         'global_step': int(global_step),
         'loss_normalization': 'sum_candidate_demand',
-        'training_semantics': 'sinkhorn_no_unknown',
+        'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
     }
 
 
@@ -499,7 +506,7 @@ def _sinkhorn_collect_responsibility_rows(
                     'candidate_ids_known': list(known_ids),
                     'candidate_ids_extra': list(extra_ids),
                     'unknown_disabled': True,
-                    'training_semantics': 'sinkhorn_no_unknown',
+                    'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
                     'stage_id': str(stage_id),
                     'r_init': {},
                     'r_final': {str(int(raw_id)): float(prob) for raw_id, prob in zip(raw_ids, probs)},
@@ -541,11 +548,11 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'text_projector_state_dict': projector.state_dict(),
         'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
         'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
-        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown'
+        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_yprime_nce_no_unknown'
     }, ckpt_last_path)
     pre_proxy_rows = _sinkhorn_collect_responsibility_rows(stage_id='prealign', dataset_name=str(config.dataset_name), groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='prealign', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=0.0)
     _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
-    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown', 'unknown_disabled': True}
+    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True}
     _write_json(train_dir / 'train_state.json', pre_train_state)
     pre_summary = {**pre_stage, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth'}
     _write_json(train_dir / 'stage_summary.json', pre_summary)
@@ -575,12 +582,12 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
             'stage_id': 'softem_aug', 'epoch': int(config.aug_epochs), 'text_projector_state_dict': projector.state_dict(),
             'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
             'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
-            'seed': int(config.seed), 'global_step': int(aug_stage.get('global_step', 0)), 'mode': 'sinkhorn_aug_no_unknown', 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown',
+            'seed': int(config.seed), 'global_step': int(aug_stage.get('global_step', 0)), 'mode': 'sinkhorn_aug_no_unknown', 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
             'sinkhorn_extra_demand': float(config.sinkhorn_extra_demand), 'sinkhorn_aug_extra_lambda': float(config.sinkhorn_aug_extra_lambda),
         }, aug_ckpt_path)
         aug_rows = _sinkhorn_collect_responsibility_rows(stage_id='softem_aug', dataset_name=str(config.dataset_name), groups=aug_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='aug', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=float(config.sinkhorn_extra_demand))
         _write_jsonl(aug_dir / 'responsibility_records.jsonl', aug_rows)
-        aug_state = {'stage_id': 'softem_aug', 'epoch': int(config.aug_epochs), 'selected_for_infer': 'augmented', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'checkpoint_selected': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'global_step': int(aug_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_no_unknown', 'unknown_disabled': True, 'softem_base_skipped': True}
+        aug_state = {'stage_id': 'softem_aug', 'epoch': int(config.aug_epochs), 'selected_for_infer': 'augmented', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'checkpoint_selected': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'global_step': int(aug_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'softem_base_skipped': True}
         _write_json(aug_dir / 'train_state.json', aug_state)
         runtime_extra_metrics = {'clip_cache_count': int(len(runtime_extra_cache)), 'example_count': int(len(aug_examples)), 'example_with_nonempty_extra_count': int(sum(1 for row in aug_examples if len(list(row.get('candidate_ids_extra', []))) > 0)), 'k_extra': int(config.k_extra), 'extra_alpha': float(config.extra_alpha), 'sinkhorn_extra_demand': float(config.sinkhorn_extra_demand), 'sinkhorn_aug_extra_lambda': float(config.sinkhorn_aug_extra_lambda)}
         aug_summary = {**aug_stage, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'softem_base_skipped': True, 'record_count_output': int(len(aug_rows)), 'runtime_extra_cache_metrics': runtime_extra_metrics, 'checkpoint_last_path': 'train/softem_aug/checkpoints/softem_aug_last.pth'}
@@ -600,5 +607,5 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         'unknown_disabled': True,
         'softem_base_skipped': True,
         'pipeline': 'reservoir_v1_sinkhorn_no_unknown',
-        'training_semantics': 'sinkhorn_no_unknown',
+        'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
     }
