@@ -86,9 +86,6 @@ class DiagnosisConfig:
     hub_beta_values: Tuple[float, ...]
     text_neighbor_topk: int
     text_neighbor_sim_threshold: float
-    emit_hub_formation_timeline: bool
-    emit_gt_cooccurrence: bool
-    emit_weak_label_cooccurrence: bool
 
 
 def _parse_bool(value: Any) -> bool:
@@ -1079,69 +1076,19 @@ def _rows_joined(rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
     return [r for r in rows if not bool(r.get("missing_diagnosis_record"))]
 
 
-
 def _active_raw_conversion_payload(rows: Sequence[Mapping[str, Any]], *, hub_raw_ids: Sequence[int]) -> Dict[str, Any]:
     joined = _rows_joined(rows)
     active_rows = [r for r in joined if _active_raw_contains(r) is True]
     inactive_rows = [r for r in joined if _active_raw_contains(r) is False]
     hub_set = {int(x) for x in hub_raw_ids}
-
     def _domain_rate(domain: str, seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
         return _rate_bools([str(r.get("final_winner_domain")) == str(domain) for r in seq])
-
-    def _hub_selected_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
-        if not hub_set:
-            return None
-        return _rate_bools([bool(_active_extra_set(r) & hub_set) for r in seq])
-
-    def _hub_top1_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
-        if not hub_set:
-            return None
-        return _rate_bools([_safe_int(r.get("final_winner_raw_id")) in hub_set for r in seq])
-
-    def _hub_wrong_winner_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
-        if not hub_set:
-            return None
-        return _rate_bools([
-            (_safe_int(r.get("final_winner_raw_id")) in hub_set) and (not bool(r.get("final_top1_is_gt")))
-            for r in seq
-        ])
-
-    def _hub_suppressor_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
-        if not hub_set:
-            return None
-        return _rate_bools([_safe_int(r.get("top_suppressor_raw_id")) in hub_set for r in seq])
-
-    def _payload(seq: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-        return {
-            "count": int(len(seq)),
-            "P_top1": _rate_bools([bool(r.get("final_top1_is_gt")) for r in seq]),
-            "P_R_final_GT_winner": _rate_bools([bool(r.get("r_final_gt_winner")) for r in seq if r.get("r_final_gt_winner") is not None]),
-            "P_Yprime_wins": _domain_rate("Yprime", seq),
-            "P_wrong_extra_wins": _rate_bools([str(r.get("final_winner_domain")) == "extra" and not bool(r.get("final_top1_is_gt")) for r in seq]),
-            "P_other_nonYprime_wins": _domain_rate("other_nonYprime", seq),
-            "P_unknown_wins": _domain_rate("unknown", seq),
-            "P_hub_selected": _hub_selected_rate(seq),
-            "P_hub_top1": _hub_top1_rate(seq),
-            "P_hub_wrong_winner": _hub_wrong_winner_rate(seq),
-            "P_hub_suppressor": _hub_suppressor_rate(seq),
-            "failure_bucket_histogram": dict(Counter(str(r.get("failure_bucket", "")) for r in seq)),
-        }
-
-    active_payload = _payload(active_rows)
-    inactive_payload = _payload(inactive_rows)
+    def _hub_winner_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
+        return _rate_bools([_safe_int(r.get("final_winner_raw_id")) in hub_set for r in seq]) if hub_set else None
     return {
         "status": "PASS",
         "definition": "active_raw_contains := gt_raw_id in (candidate_ids_extra - candidate_ids_known)",
-        "hub_metric_definition": {
-            "P_hub_selected": "hub raw id appears in active_extra := candidate_ids_extra - candidate_ids_known",
-            "P_hub_top1": "final_winner_raw_id is one of hub_raw_ids",
-            "P_hub_wrong_winner": "final_winner_raw_id is one of hub_raw_ids and final_top1_is_gt is false",
-            "P_hub_suppressor": "top_suppressor_raw_id is one of hub_raw_ids",
-            "deprecated": "P_hub_wins is intentionally not emitted because it conflated multiple meanings.",
-        },
         "count": int(len(rows)),
-        "total": int(len(rows)),
         "diagnosis_joined_count": int(len(joined)),
         "active_raw_contains_count": int(len(active_rows)),
         "active_raw_missing_count": int(len(inactive_rows)),
@@ -1150,18 +1097,23 @@ def _active_raw_conversion_payload(rows: Sequence[Mapping[str, Any]], *, hub_raw
         "old_gt_in_extra_rate": _rate_bools([bool(r.get("gt_in_extra")) for r in joined if r.get("gt_in_extra") is not None]),
         "bool_false_but_raw_contains": int(sum(1 for r in joined if (not bool(r.get("gt_in_extra"))) and _active_raw_contains(r) is True)),
         "bool_true_but_raw_not_contains": int(sum(1 for r in joined if bool(r.get("gt_in_extra")) and _active_raw_contains(r) is False)),
-        "active_raw": active_payload,
-        "active_raw_missing": inactive_payload,
-        "P_top1_given_active_raw": active_payload.get("P_top1"),
-        "P_R_GT_winner_given_active_raw": active_payload.get("P_R_final_GT_winner"),
-        "P_Yprime_wins_given_active_raw": active_payload.get("P_Yprime_wins"),
-        "P_wrong_extra_wins_given_active_raw": active_payload.get("P_wrong_extra_wins"),
-        "P_other_nonYprime_wins_given_active_raw": active_payload.get("P_other_nonYprime_wins"),
-        "P_unknown_wins_given_active_raw": active_payload.get("P_unknown_wins"),
-        "P_hub_selected_given_active_raw": active_payload.get("P_hub_selected"),
-        "P_hub_top1_given_active_raw": active_payload.get("P_hub_top1"),
-        "P_hub_wrong_winner_given_active_raw": active_payload.get("P_hub_wrong_winner"),
-        "P_hub_suppressor_given_active_raw": active_payload.get("P_hub_suppressor"),
+        "active_raw": {
+            "count": int(len(active_rows)),
+            "P_top1": _rate_bools([bool(r.get("final_top1_is_gt")) for r in active_rows]),
+            "P_R_final_GT_winner": _rate_bools([bool(r.get("r_final_gt_winner")) for r in active_rows if r.get("r_final_gt_winner") is not None]),
+            "P_Yprime_wins": _domain_rate("Yprime", active_rows),
+            "P_wrong_extra_wins": _rate_bools([str(r.get("final_winner_domain")) == "extra" and not bool(r.get("final_top1_is_gt")) for r in active_rows]),
+            "P_other_nonYprime_wins": _domain_rate("other_nonYprime", active_rows),
+            "P_unknown_wins": _domain_rate("unknown", active_rows),
+            "P_hub_wins": _hub_winner_rate(active_rows),
+            "failure_bucket_histogram": dict(Counter(str(r.get("failure_bucket", "")) for r in active_rows)),
+        },
+        "active_raw_missing": {
+            "count": int(len(inactive_rows)),
+            "P_top1": _rate_bools([bool(r.get("final_top1_is_gt")) for r in inactive_rows]),
+            "P_hub_wins": _hub_winner_rate(inactive_rows),
+            "failure_bucket_histogram": dict(Counter(str(r.get("failure_bucket", "")) for r in inactive_rows)),
+        },
     }
 
 
@@ -1171,32 +1123,18 @@ def _same_vs_other_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw:
     same = [r for r in failures if bool(r.get("same_trajectory_confusion"))]
     other = [r for r in failures if bool(r.get("other_trajectory_hijack"))]
     mixed = [r for r in failures if bool(r.get("mixed_confusion"))]
-    overlap_count = sum(
-        1 for r in failures
-        if int(bool(r.get("same_trajectory_confusion"))) + int(bool(r.get("other_trajectory_hijack"))) + int(bool(r.get("mixed_confusion"))) > 1
-    )
-    assigned_count = len(same) + len(other) + len(mixed)
-    unassigned_count = max(0, len(failures) - assigned_count)
     suppressor_counter = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in failures if _safe_int(r.get("top_suppressor_raw_id")) is not None)
     same_counter = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in same if _safe_int(r.get("top_suppressor_raw_id")) is not None)
     other_counter = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in other if _safe_int(r.get("top_suppressor_raw_id")) is not None)
-    mixed_counter = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in mixed if _safe_int(r.get("top_suppressor_raw_id")) is not None)
     return {
-        "status": "PASS" if overlap_count == 0 else "SELF_CHECK_FAIL",
+        "status": "PASS",
         "definition": {
             "same_trajectory_confusion": "local_score(q,h) > local_score(q,g) and clip_argmax_traj(v,h) == q",
+            "other_trajectory_hijack": "clip_argmax_traj(v,h) != q; h is a current non-GT winner/suppressor",
             "mixed_confusion": "local_score(q,h) > local_score(q,g) and clip_argmax_traj(v,h) != q",
-            "other_trajectory_hijack": "clip_argmax_traj(v,h) != q and local_score(q,h) <= local_score(q,g)",
-            "note": "same/mixed/other are mutually exclusive after the taxonomy fix.",
         },
         "target_count": int(len(joined)),
         "non_gt_winner_count": int(len(failures)),
-        "exclusive_self_check": {
-            "overlap_count": int(overlap_count),
-            "assigned_count": int(assigned_count),
-            "unassigned_count": int(unassigned_count),
-            "assigned_rate": float(assigned_count / max(len(failures), 1)),
-        },
         "same_trajectory_confusion_count": int(len(same)),
         "same_trajectory_confusion_rate": float(len(same) / max(len(failures), 1)),
         "other_trajectory_hijack_count": int(len(other)),
@@ -1206,8 +1144,8 @@ def _same_vs_other_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw:
         "top_suppressor_classes": _counter_payload_with_rates(suppressor_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=len(failures)),
         "top_same_trajectory_classes": _counter_payload_with_rates(same_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=len(same)),
         "top_other_hijack_classes": _counter_payload_with_rates(other_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=len(other)),
-        "top_mixed_confusion_classes": _counter_payload_with_rates(mixed_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=len(mixed)),
     }
+
 
 def _rank_bucket_payload_by_class(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], min_count: int = 1) -> List[Dict[str, Any]]:
     grouped: Dict[int, List[Mapping[str, Any]]] = defaultdict(list)
@@ -1260,28 +1198,14 @@ def _rank_bucket_payload_by_class(rows: Sequence[Mapping[str, Any]], *, records_
     return out
 
 
-
 def _text_semantic_confusion_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int, neighbor_topk: int, sim_threshold: float) -> Dict[str, Any]:
     joined = _rows_joined(rows)
     failure_rows = [r for r in joined if not bool(r.get("final_top1_is_gt")) and _safe_int(r.get("final_winner_raw_id")) is not None]
-
-    def _rank_is_neighbor(r: Mapping[str, Any]) -> bool:
-        rank = _safe_int(r.get("final_winner_text_neighbor_rank_to_gt"))
-        return bool(rank is not None and int(rank) <= int(neighbor_topk))
-
-    def _sim_above_threshold(r: Mapping[str, Any]) -> bool:
-        sim = _safe_float(r.get("final_winner_text_sim_to_gt"))
-        return bool(sim is not None and float(sim) >= float(sim_threshold))
-
-    semantic_rows = [r for r in failure_rows if _rank_is_neighbor(r)]
-    sim_threshold_rows = [r for r in failure_rows if _sim_above_threshold(r)]
-    sim_threshold_only_rows = [r for r in failure_rows if _sim_above_threshold(r) and not _rank_is_neighbor(r)]
-    sim_rank_inconsistent_rows = [
+    semantic_rows = [
         r for r in failure_rows
-        if (_safe_float(r.get("final_winner_text_sim_to_gt")) is not None and float(r.get("final_winner_text_sim_to_gt")) >= 0.999)
-        and (not _rank_is_neighbor(r))
+        if (r.get("final_winner_text_neighbor_rank_to_gt") is not None and int(r.get("final_winner_text_neighbor_rank_to_gt")) <= int(neighbor_topk))
+        or (r.get("final_winner_text_sim_to_gt") is not None and float(r.get("final_winner_text_sim_to_gt")) >= float(sim_threshold))
     ]
-
     pair_counter: Counter = Counter()
     pair_examples: Dict[Tuple[int, int], Dict[str, Any]] = {}
     for r in semantic_rows:
@@ -1299,64 +1223,34 @@ def _text_semantic_confusion_payload(rows: Sequence[Mapping[str, Any]], *, recor
             "text_sim": r.get("final_winner_text_sim_to_gt"),
             "text_neighbor_rank": r.get("final_winner_text_neighbor_rank_to_gt"),
         })
-
     pairs: List[Dict[str, Any]] = []
     for key, count in pair_counter.most_common(max(1, int(top_n))):
         item = dict(pair_examples.get(key, {}))
         item["count"] = int(count)
         item["rate_among_semantic_failures"] = float(count / max(len(semantic_rows), 1))
         pairs.append(item)
-
-    def _rank_neighbor_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
+    def _sem_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
         if not seq:
             return None
-        return _rate_bools([_rank_is_neighbor(r) for r in seq])
-
-    def _sim_threshold_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
-        if not seq:
-            return None
-        return _rate_bools([_sim_above_threshold(r) for r in seq])
-
+        return _rate_bools([
+            (r.get("final_winner_text_neighbor_rank_to_gt") is not None and int(r.get("final_winner_text_neighbor_rank_to_gt")) <= int(neighbor_topk))
+            or (r.get("final_winner_text_sim_to_gt") is not None and float(r.get("final_winner_text_sim_to_gt")) >= float(sim_threshold))
+            for r in seq
+        ])
     person_failures = [r for r in failure_rows if _safe_int(r.get("final_winner_raw_id")) == 773]
     nonperson_failures = [r for r in failure_rows if _safe_int(r.get("final_winner_raw_id")) not in (None, 773)]
-
-    sanity_examples: List[Dict[str, Any]] = []
-    for r in sim_rank_inconsistent_rows[:max(1, min(int(top_n), 50))]:
-        gt = _safe_int(r.get("gt_raw_id"))
-        wrong = _safe_int(r.get("final_winner_raw_id"))
-        sanity_examples.append({
-            "gt_raw_id": gt,
-            "gt_name": _class_label(int(gt), records_by_raw).get("name") if gt is not None else None,
-            "wrong_raw_id": wrong,
-            "wrong_name": _class_label(int(wrong), records_by_raw).get("name") if wrong is not None else None,
-            "text_sim": r.get("final_winner_text_sim_to_gt"),
-            "text_neighbor_rank": r.get("final_winner_text_neighbor_rank_to_gt"),
-        })
-
     return {
         "status": "PASS",
-        "definition": {
-            "semantic_neighbor_failure": "final_winner_text_neighbor_rank_to_gt <= text_neighbor_topk",
-            "sim_threshold": "reported only as sanity; it is not used to mark semantic_neighbor_failure",
-        },
         "neighbor_topk": int(neighbor_topk),
         "sim_threshold": float(sim_threshold),
         "failure_count": int(len(failure_rows)),
         "semantic_neighbor_failure_count": int(len(semantic_rows)),
         "semantic_neighbor_failure_rate": float(len(semantic_rows) / max(len(failure_rows), 1)),
-        "sim_threshold_count": int(len(sim_threshold_rows)),
-        "sim_threshold_rate": float(len(sim_threshold_rows) / max(len(failure_rows), 1)),
-        "sim_threshold_only_count": int(len(sim_threshold_only_rows)),
-        "sim_threshold_only_rate": float(len(sim_threshold_only_rows) / max(len(failure_rows), 1)),
-        "sim_rank_inconsistency_count": int(len(sim_rank_inconsistent_rows)),
-        "sim_rank_inconsistency_rate": float(len(sim_rank_inconsistent_rows) / max(len(failure_rows), 1)),
-        "person_error_text_neighbor_rate": _rank_neighbor_rate(person_failures),
-        "nonperson_error_text_neighbor_rate": _rank_neighbor_rate(nonperson_failures),
-        "person_error_sim_threshold_rate": _sim_threshold_rate(person_failures),
-        "nonperson_error_sim_threshold_rate": _sim_threshold_rate(nonperson_failures),
+        "person_error_text_neighbor_rate": _sem_rate(person_failures),
+        "nonperson_error_text_neighbor_rate": _sem_rate(nonperson_failures),
         "top_confused_pairs": pairs,
-        "sim_rank_inconsistency_examples": sanity_examples,
     }
+
 
 def _hub_prior_beta_sweep_payload(*, rows: Sequence[Mapping[str, Any]], clip_mining: Mapping[int, Mapping[str, Any]], vocab_ids: Sequence[int], selected_extra_counter: Counter, beta_values: Sequence[float], hub_raw_ids: Sequence[int], current_k: int) -> Dict[str, Any]:
     joined = _rows_joined(rows)
@@ -1416,279 +1310,6 @@ def _hub_prior_beta_sweep_payload(*, rows: Sequence[Mapping[str, Any]], clip_min
         "beta_values": [float(x) for x in beta_values],
         "by_beta": by_beta,
     }
-
-
-def _cooccurrence_payload_from_units(
-    *,
-    units: Sequence[Mapping[str, Any]],
-    hub_raw_ids: Sequence[int],
-    records_by_raw: Mapping[int, Mapping[str, Any]],
-    top_n: int,
-    source: str,
-    unit_level: str,
-) -> Dict[str, Any]:
-    hub_set = {int(x) for x in hub_raw_ids}
-    class_sets: List[set[int]] = []
-    for unit in units:
-        vals = {int(x) for x in _unique_ints(unit.get("class_ids"))}
-        if vals:
-            class_sets.append(vals)
-    total = len(class_sets)
-    any_hub_units = [cs for cs in class_sets if cs & hub_set]
-    all_hubs_count = sum(1 for cs in class_sets if hub_set and hub_set.issubset(cs))
-    per_hub: List[Dict[str, Any]] = []
-    for hub in sorted(hub_set):
-        present_units = [cs for cs in class_sets if hub in cs]
-        present = len(present_units)
-        co_counter: Counter = Counter()
-        other_hub_count = 0
-        alone_count = 0
-        num_classes_values: List[float] = []
-        for cs in present_units:
-            num_classes_values.append(float(len(cs)))
-            if len(cs) == 1:
-                alone_count += 1
-            if (cs - {hub}) & hub_set:
-                other_hub_count += 1
-            for c in sorted(cs - {hub}):
-                co_counter[int(c)] += 1
-        top_co = []
-        for cid, cnt in co_counter.most_common(max(1, int(top_n))):
-            item = _class_label(int(cid), records_by_raw)
-            item["count"] = int(cnt)
-            item["P_other_given_hub"] = float(cnt / max(present, 1))
-            other_present = sum(1 for cs in class_sets if int(cid) in cs)
-            item["P_hub_given_other"] = float(cnt / max(other_present, 1)) if other_present else None
-            top_co.append(item)
-        hitem = _class_label(int(hub), records_by_raw)
-        hitem.update({
-            "present_count": int(present),
-            "present_rate": float(present / max(total, 1)),
-            "alone_count": int(alone_count),
-            "alone_rate_among_hub_units": float(alone_count / max(present, 1)) if present else None,
-            "with_other_classes_count": int(present - alone_count),
-            "with_other_classes_rate_among_hub_units": float((present - alone_count) / max(present, 1)) if present else None,
-            "with_other_hub_classes_count": int(other_hub_count),
-            "with_other_hub_classes_rate_among_hub_units": float(other_hub_count / max(present, 1)) if present else None,
-            "mean_num_classes_when_present": _mean(num_classes_values),
-            "top_cooccurring_classes": top_co,
-        })
-        per_hub.append(hitem)
-    return {
-        "status": "PASS" if total else "NO_UNITS",
-        "source": str(source),
-        "unit_level": str(unit_level),
-        "definition": "Each unit contributes a set of raw class ids; hub co-occurrence is measured within the same unit.",
-        "hub_raw_ids": [int(x) for x in sorted(hub_set)],
-        "unit_count": int(total),
-        "any_hub_count": int(len(any_hub_units)),
-        "any_hub_rate": float(len(any_hub_units) / max(total, 1)),
-        "no_hub_count": int(total - len(any_hub_units)),
-        "no_hub_rate": float((total - len(any_hub_units)) / max(total, 1)),
-        "all_hubs_together_count": int(all_hubs_count),
-        "all_hubs_together_rate": float(all_hubs_count / max(total, 1)),
-        "per_hub": per_hub,
-    }
-
-
-def _units_from_rows(rows: Sequence[Mapping[str, Any]], *, unit_key: str, class_key: str = "gt_raw_id") -> List[Dict[str, Any]]:
-    grouped: Dict[str, set[int]] = defaultdict(set)
-    for r in rows:
-        unit_val = r.get(unit_key)
-        rid = _safe_int(r.get(class_key))
-        if unit_val is None or rid is None:
-            continue
-        grouped[str(unit_val)].add(int(rid))
-    return [{"unit_id": k, "class_ids": sorted(v)} for k, v in grouped.items() if v]
-
-
-def _weak_units_from_examples(examples: Sequence[Mapping[str, Any]], *, unit_key: str) -> List[Dict[str, Any]]:
-    grouped: Dict[str, set[int]] = defaultdict(set)
-    for ex in examples:
-        unit_val = ex.get(unit_key)
-        if unit_val is None:
-            continue
-        vals = _unique_ints(ex.get("observed_raw_ids")) or _unique_ints(ex.get("candidate_ids_known"))
-        for rid in vals:
-            grouped[str(unit_val)].add(int(rid))
-    return [{"unit_id": k, "class_ids": sorted(v)} for k, v in grouped.items() if v]
-
-
-def _annotation_cooccurrence_units(runtime_output_root: Path, dataset_name: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    split = "train" if str(dataset_name) == "lvvis_train_base" else "val"
-    root = Path(runtime_output_root)
-    annotation_roots = [
-        root / "videocutler" / "datasets" / "LV-VIS" / "annotations",
-        root / "datasets" / "LV-VIS" / "annotations",
-        root.parent / "wsovvis_asserts" / "dataset" / "LV-VIS" / "annotations",
-        root.parent / "wsovvis_asserts" / "datasets" / "LV-VIS" / "annotations",
-        Path("/home/zyy/code/wsovvis_asserts/dataset/LV-VIS/annotations"),
-        Path("/mnt/sda/zyy/code/wsovvis_asserts/dataset/LV-VIS/annotations"),
-    ]
-    names = [f"{split}_instances.json", f"instances_{split}.json", "train_instances.json" if split == "train" else "val_instances.json"]
-    candidates: List[Path] = []
-    for ar in annotation_roots:
-        for name in names:
-            candidates.append(ar / name)
-    seen: set[str] = set()
-    for path in candidates:
-        if str(path) in seen or not path.is_file():
-            continue
-        seen.add(str(path))
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        annotations = payload.get("annotations") if isinstance(payload, Mapping) else None
-        if not isinstance(annotations, list):
-            continue
-        grouped: Dict[str, set[int]] = defaultdict(set)
-        used = 0
-        for ann in annotations:
-            if not isinstance(ann, Mapping):
-                continue
-            cid = _safe_int(ann.get("category_id", ann.get("raw_id", ann.get("class_id"))))
-            vid = ann.get("video_id", ann.get("vid", ann.get("video", ann.get("video_idx"))))
-            if cid is None or vid is None:
-                continue
-            grouped[str(vid)].add(int(cid))
-            used += 1
-        units = [{"unit_id": k, "class_ids": sorted(v)} for k, v in grouped.items() if v]
-        if units:
-            return units, {"status": "PASS", "path": str(path), "annotation_count_used": int(used), "unit_level": "video_id"}
-    return [], {"status": "MISSING_OR_UNREADABLE_ANNOTATIONS", "searched": [str(p) for p in candidates], "unit_level": "video_id"}
-
-
-def _model_hub_current_payload(rows: Sequence[Mapping[str, Any]], *, hub_raw_ids: Sequence[int], records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int) -> Dict[str, Any]:
-    joined = _rows_joined(rows)
-    hub_set = {int(x) for x in hub_raw_ids}
-    selected_counter: Counter = Counter()
-    winner_counter: Counter = Counter()
-    wrong_counter: Counter = Counter()
-    suppressor_counter: Counter = Counter()
-    for r in joined:
-        for rid in _active_extra_set(r):
-            if rid in hub_set:
-                selected_counter[int(rid)] += 1
-        fw = _safe_int(r.get("final_winner_raw_id"))
-        if fw in hub_set:
-            winner_counter[int(fw)] += 1
-            if not bool(r.get("final_top1_is_gt")):
-                wrong_counter[int(fw)] += 1
-        sp = _safe_int(r.get("top_suppressor_raw_id"))
-        if sp in hub_set:
-            suppressor_counter[int(sp)] += 1
-    denom = len(joined)
-    per_hub = []
-    for hub in sorted(hub_set):
-        item = _class_label(int(hub), records_by_raw)
-        item.update({
-            "selected_count": int(selected_counter.get(hub, 0)),
-            "selected_rate": float(selected_counter.get(hub, 0) / max(denom, 1)),
-            "winner_count": int(winner_counter.get(hub, 0)),
-            "winner_rate": float(winner_counter.get(hub, 0) / max(denom, 1)),
-            "wrong_winner_count": int(wrong_counter.get(hub, 0)),
-            "wrong_winner_rate": float(wrong_counter.get(hub, 0) / max(denom, 1)),
-            "suppressor_count": int(suppressor_counter.get(hub, 0)),
-            "suppressor_rate": float(suppressor_counter.get(hub, 0) / max(denom, 1)),
-        })
-        per_hub.append(item)
-    return {
-        "status": "PASS",
-        "row_universe": "formal_aligned_rows_or_target_rows",
-        "row_count": int(denom),
-        "per_hub": per_hub,
-        "top_hub_selected": _counter_payload_with_rates(selected_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=denom),
-        "top_hub_wrong_winner": _counter_payload_with_rates(wrong_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=denom),
-        "top_hub_suppressor": _counter_payload_with_rates(suppressor_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=denom),
-    }
-
-
-def _hub_snapshot_timeline_payload(*, run_root: Path, stage: str, target_rows: Sequence[Mapping[str, Any]], hub_raw_ids: Sequence[int], records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int) -> Dict[str, Any]:
-    hub_set = {int(x) for x in hub_raw_ids}
-    snap_dir = run_root / "train" / stage / "extra_snapshots"
-    paths = sorted(snap_dir.glob("epoch_*.jsonl"))
-    target_tids = {str(r.get("trajectory_id")) for r in target_rows if str(r.get("trajectory_id", ""))}
-    target_clips = {_safe_int(r.get("clip_id")) for r in target_rows if _safe_int(r.get("clip_id")) is not None}
-    epochs: List[Dict[str, Any]] = []
-    for path in paths:
-        row_count = 0
-        target_row_count = 0
-        any_hub_rows = 0
-        hub_counter: Counter = Counter()
-        for snap in _iter_jsonl(path):
-            row_count += 1
-            tid = str(snap.get("trajectory_id", "")).strip()
-            clip_id = _safe_int(snap.get("clip_id"))
-            is_target = (tid in target_tids) or (clip_id in target_clips)
-            if not is_target:
-                continue
-            target_row_count += 1
-            extras = {int(x) for x in _snapshot_extra_ids(snap)}
-            hits = extras & hub_set
-            if hits:
-                any_hub_rows += 1
-                for h in hits:
-                    hub_counter[int(h)] += 1
-        epochs.append({
-            "snapshot_path": str(path),
-            "snapshot_id": path.stem,
-            "snapshot_row_count": int(row_count),
-            "target_row_count": int(target_row_count),
-            "any_hub_selected_count": int(any_hub_rows),
-            "any_hub_selected_rate": float(any_hub_rows / max(target_row_count, 1)),
-            "top_hub_selected": _counter_payload_with_rates(hub_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=target_row_count),
-        })
-    return {"status": "PASS" if paths else "NO_EXTRA_SNAPSHOTS", "snapshot_dir": str(snap_dir), "epoch_count": int(len(paths)), "epochs": epochs}
-
-
-def _hub_origin_classification_payload(*, gt_payload: Mapping[str, Any], weak_payload: Mapping[str, Any], model_payload: Mapping[str, Any], timeline_payload: Mapping[str, Any], hub_raw_ids: Sequence[int], records_by_raw: Mapping[int, Mapping[str, Any]]) -> Dict[str, Any]:
-    def _per_map(payload: Mapping[str, Any], key: str) -> Dict[int, Mapping[str, Any]]:
-        out: Dict[int, Mapping[str, Any]] = {}
-        for item in payload.get(key, []) if isinstance(payload, Mapping) else []:
-            rid = _safe_int(item.get("raw_id"))
-            if rid is not None:
-                out[int(rid)] = item
-        return out
-    gt_map = _per_map(gt_payload, "per_hub")
-    weak_map = _per_map(weak_payload, "per_hub")
-    model_map = _per_map(model_payload, "per_hub")
-    rows: List[Dict[str, Any]] = []
-    for hub in sorted({int(x) for x in hub_raw_ids}):
-        gt = gt_map.get(hub, {})
-        wk = weak_map.get(hub, {})
-        md = model_map.get(hub, {})
-        gt_present = _safe_float(gt.get("present_rate")) or 0.0
-        gt_alone = _safe_float(gt.get("alone_rate_among_hub_units"))
-        weak_present = _safe_float(wk.get("present_rate")) or 0.0
-        model_selected = _safe_float(md.get("selected_rate")) or 0.0
-        model_wrong = _safe_float(md.get("wrong_winner_rate")) or 0.0
-        flags: List[str] = []
-        if gt_present >= 0.20 and (gt_alone is None or gt_alone <= 0.25):
-            flags.append("data_cooccurrence_hub")
-        if weak_present >= gt_present + 0.05:
-            flags.append("weak_label_amplified_hub")
-        if model_selected >= max(gt_present, weak_present) + 0.10 or model_wrong >= 0.10:
-            flags.append("model_amplified_hub")
-        if not flags:
-            flags.append("insufficient_evidence_or_low_hub_signal")
-        item = _class_label(hub, records_by_raw)
-        item.update({
-            "gt_present_rate": gt_present,
-            "gt_alone_rate_among_hub_units": gt_alone,
-            "weak_present_rate": weak_present,
-            "model_selected_rate": model_selected,
-            "model_wrong_winner_rate": model_wrong,
-            "evidence_flags": flags,
-        })
-        rows.append(item)
-    return {
-        "status": "PASS",
-        "definition": "Heuristic origin flags comparing GT co-occurrence, weak-label co-occurrence, and current model hub selected/winner/suppressor rates. This is an audit, not a training change.",
-        "timeline_status": timeline_payload.get("status") if isinstance(timeline_payload, Mapping) else None,
-        "rows": rows,
-    }
-
 
 def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     run_root = Path(config.run_root).expanduser().resolve()
@@ -1944,21 +1565,9 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         suppressor_beats_gt_on_current_traj = bool(
             top_suppressor_score is not None and gt_score is not None and float(top_suppressor_score) > float(gt_score)
         )
-        same_trajectory_confusion = bool(
-            top_suppressor_raw_id is not None
-            and suppressor_beats_gt_on_current_traj
-            and top_suppressor_clip_argmax_same_trajectory is True
-        )
-        mixed_confusion = bool(
-            top_suppressor_raw_id is not None
-            and suppressor_beats_gt_on_current_traj
-            and top_suppressor_clip_argmax_same_trajectory is False
-        )
-        other_trajectory_hijack = bool(
-            top_suppressor_raw_id is not None
-            and (not suppressor_beats_gt_on_current_traj)
-            and top_suppressor_clip_argmax_same_trajectory is False
-        )
+        same_trajectory_confusion = bool(top_suppressor_raw_id is not None and suppressor_beats_gt_on_current_traj and top_suppressor_clip_argmax_same_trajectory is True)
+        other_trajectory_hijack = bool(top_suppressor_raw_id is not None and top_suppressor_clip_argmax_same_trajectory is False)
+        mixed_confusion = bool(top_suppressor_raw_id is not None and suppressor_beats_gt_on_current_traj and top_suppressor_clip_argmax_same_trajectory is False)
 
         final_winner_text_sim_to_gt = None
         final_winner_text_neighbor_rank_to_gt = None
@@ -2195,56 +1804,6 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         hub_raw_ids=config.hub_raw_ids,
         current_k=current_k,
     )
-
-    annotation_units, annotation_meta = _annotation_cooccurrence_units(runtime_output_root, str(config.dataset_name))
-    annotation_gt_hub_payload = _cooccurrence_payload_from_units(
-        units=annotation_units,
-        hub_raw_ids=config.hub_raw_ids,
-        records_by_raw=records_by_raw,
-        top_n=config.top_classes,
-        source=f"lvvis_annotation:{annotation_meta.get('path', 'missing')}",
-        unit_level=str(annotation_meta.get("unit_level", "video_id")),
-    )
-    annotation_gt_hub_payload["annotation_meta"] = annotation_meta
-    sidecar_clip_hub_payload = _cooccurrence_payload_from_units(
-        units=_units_from_rows(row_diagnostics, unit_key="clip_id", class_key="gt_raw_id"),
-        hub_raw_ids=config.hub_raw_ids,
-        records_by_raw=records_by_raw,
-        top_n=config.top_classes,
-        source="trajectory_gt_sidecar_from_effective_examples",
-        unit_level="clip_id",
-    )
-    weak_label_hub_payload = _cooccurrence_payload_from_units(
-        units=_weak_units_from_examples(effective_examples, unit_key="clip_id"),
-        hub_raw_ids=config.hub_raw_ids,
-        records_by_raw=records_by_raw,
-        top_n=config.top_classes,
-        source="stage_effective_examples_observed_or_candidate_known",
-        unit_level="clip_id",
-    )
-    model_hub_current_payload = _model_hub_current_payload(
-        taxonomy_rows,
-        hub_raw_ids=config.hub_raw_ids,
-        records_by_raw=records_by_raw,
-        top_n=config.top_classes,
-    )
-    hub_timeline_payload = _hub_snapshot_timeline_payload(
-        run_root=run_root,
-        stage=str(config.stage),
-        target_rows=taxonomy_rows,
-        hub_raw_ids=config.hub_raw_ids,
-        records_by_raw=records_by_raw,
-        top_n=config.top_classes,
-    )
-    hub_origin_payload = _hub_origin_classification_payload(
-        gt_payload=annotation_gt_hub_payload if annotation_gt_hub_payload.get("status") == "PASS" else sidecar_clip_hub_payload,
-        weak_payload=weak_label_hub_payload,
-        model_payload=model_hub_current_payload,
-        timeline_payload=hub_timeline_payload,
-        hub_raw_ids=config.hub_raw_ids,
-        records_by_raw=records_by_raw,
-    )
-
     failure_taxonomy_summary = {
         "status": "PASS",
         "row_universe": "formal_aligned_rows" if formal_aligned_rows else "diagnostic_base_unobserved_rows",
@@ -2253,12 +1812,6 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "same_vs_other_hijack": same_vs_other_payload,
         "text_semantic_confusion": text_semantic_payload,
         "hub_prior_beta_sweep": hub_beta_payload,
-        "gt_hub_cooccurrence": annotation_gt_hub_payload,
-        "trajectory_sidecar_gt_hub_cooccurrence": sidecar_clip_hub_payload,
-        "weak_label_hub_cooccurrence": weak_label_hub_payload,
-        "model_hub_current_stage": model_hub_current_payload,
-        "hub_formation_timeline": hub_timeline_payload,
-        "hub_origin_classification": hub_origin_payload,
         "blind_spot_type_histogram": dict(Counter(str(r.get("blind_spot_type")) for r in blind_spot_toplist_rows)),
     }
 
@@ -2322,9 +1875,6 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
             "emit_same_vs_other_hijack": bool(config.emit_same_vs_other_hijack),
             "emit_text_semantic_confusion": bool(config.emit_text_semantic_confusion),
             "emit_hub_prior_beta_sweep": bool(config.emit_hub_prior_beta_sweep),
-            "emit_hub_formation_timeline": bool(config.emit_hub_formation_timeline),
-            "emit_gt_cooccurrence": bool(config.emit_gt_cooccurrence),
-            "emit_weak_label_cooccurrence": bool(config.emit_weak_label_cooccurrence),
         },
     }
 
@@ -2383,12 +1933,6 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "formal_aligned_rank_bucket_by_class": output_dir / "formal_aligned_rank_bucket_by_class.csv",
         "formal_aligned_failure_taxonomy_by_class": output_dir / "formal_aligned_failure_taxonomy_by_class.csv",
         "formal_aligned_hub_prior_beta_sweep": output_dir / "formal_aligned_hub_prior_beta_sweep.json",
-        "formal_aligned_gt_hub_cooccurrence": output_dir / "formal_aligned_gt_hub_cooccurrence.json",
-        "formal_aligned_trajectory_sidecar_gt_hub_cooccurrence": output_dir / "formal_aligned_trajectory_sidecar_gt_hub_cooccurrence.json",
-        "formal_aligned_weak_label_hub_cooccurrence": output_dir / "formal_aligned_weak_label_hub_cooccurrence.json",
-        "formal_aligned_model_hub_current_stage": output_dir / "formal_aligned_model_hub_current_stage.json",
-        "formal_aligned_hub_formation_timeline": output_dir / "formal_aligned_hub_formation_timeline.json",
-        "formal_aligned_hub_origin_classification": output_dir / "formal_aligned_hub_origin_classification.json",
     }
     _write_json(files["summary"], summary)
     _write_json(files["recall_at_k_curve"], recall_curve)
@@ -2420,15 +1964,6 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         _write_json(files["formal_aligned_text_semantic_confusion"], text_semantic_payload)
     if bool(config.emit_hub_prior_beta_sweep) or bool(config.emit_failure_taxonomy):
         _write_json(files["formal_aligned_hub_prior_beta_sweep"], hub_beta_payload)
-    if bool(config.emit_gt_cooccurrence) or bool(config.emit_hub_formation_timeline) or bool(config.emit_failure_taxonomy):
-        _write_json(files["formal_aligned_gt_hub_cooccurrence"], annotation_gt_hub_payload)
-        _write_json(files["formal_aligned_trajectory_sidecar_gt_hub_cooccurrence"], sidecar_clip_hub_payload)
-    if bool(config.emit_weak_label_cooccurrence) or bool(config.emit_hub_formation_timeline) or bool(config.emit_failure_taxonomy):
-        _write_json(files["formal_aligned_weak_label_hub_cooccurrence"], weak_label_hub_payload)
-    if bool(config.emit_hub_formation_timeline) or bool(config.emit_failure_taxonomy):
-        _write_json(files["formal_aligned_model_hub_current_stage"], model_hub_current_payload)
-        _write_json(files["formal_aligned_hub_formation_timeline"], hub_timeline_payload)
-        _write_json(files["formal_aligned_hub_origin_classification"], hub_origin_payload)
     if bool(config.emit_failure_taxonomy):
         _write_json(files["formal_aligned_failure_taxonomy_summary"], failure_taxonomy_summary)
         _write_csv(files["formal_aligned_rank_bucket_by_class"], rank_bucket_by_class_rows)
@@ -2465,9 +2000,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hub_beta_values", type=_parse_float_tuple, default=(0.0, 0.02, 0.05, 0.10, 0.20, 0.30))
     p.add_argument("--text_neighbor_topk", type=int, default=20)
     p.add_argument("--text_neighbor_sim_threshold", type=float, default=0.65)
-    p.add_argument("--emit_hub_formation_timeline", type=_parse_bool, default=False)
-    p.add_argument("--emit_gt_cooccurrence", type=_parse_bool, default=False)
-    p.add_argument("--emit_weak_label_cooccurrence", type=_parse_bool, default=False)
     return p.parse_args()
 
 
@@ -2501,9 +2033,6 @@ def main() -> int:
         hub_beta_values=tuple(float(x) for x in args.hub_beta_values),
         text_neighbor_topk=max(1, int(args.text_neighbor_topk)),
         text_neighbor_sim_threshold=float(args.text_neighbor_sim_threshold),
-        emit_hub_formation_timeline=bool(args.emit_hub_formation_timeline),
-        emit_gt_cooccurrence=bool(args.emit_gt_cooccurrence),
-        emit_weak_label_cooccurrence=bool(args.emit_weak_label_cooccurrence),
     )
     result = run_diagnosis(config)
     print(result["summary_path"])
