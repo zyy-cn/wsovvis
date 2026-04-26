@@ -90,6 +90,7 @@ class DiagnosisConfig:
     emit_gt_cooccurrence: bool
     emit_weak_label_cooccurrence: bool
     emit_fully_missed_class_report: bool
+    emit_fully_missed_trajectory_weighted_report: bool
     emit_full_class_cooccurrence: bool
     strong_hub_cooccurrence_threshold: float
     weak_unobservable_present_threshold: float
@@ -1550,6 +1551,137 @@ def _fully_missed_class_report_payload(rows: Sequence[Mapping[str, Any]]) -> Dic
         "rows": rows,
     }
 
+
+def _weighted_mean_from_class_rows(rows: Sequence[Mapping[str, Any]], key: str, *, weight_key: str = "gt_trajectory_count") -> Optional[float]:
+    numerator = 0.0
+    denominator = 0.0
+    for row in rows:
+        value = _safe_float(row.get(key))
+        weight = _safe_float(row.get(weight_key))
+        if value is None or weight is None or weight <= 0:
+            continue
+        numerator += float(value) * float(weight)
+        denominator += float(weight)
+    if denominator <= 0:
+        return None
+    return float(numerator / denominator)
+
+
+def _fully_missed_trajectory_weighted_payload(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Summarize fully-missed class rows with trajectory-count weighting.
+
+    This is deliberately a pure aggregation over formal_aligned_fully_missed_blind_spot_class_report rows:
+    it does not rescore examples, does not touch training state, and preserves the existing class-level taxonomy.
+    """
+    rows_list = [dict(r) for r in rows]
+    total_classes = int(len(rows_list))
+    total_traj = int(sum(int(r.get("gt_trajectory_count", 0) or 0) for r in rows_list))
+
+    def _subtype_of(row: Mapping[str, Any]) -> str:
+        return str(row.get("failure_subtype") or "unknown")
+
+    def _level_of(row: Mapping[str, Any]) -> str:
+        return str(row.get("strong_hub_cooccurrence_level") or "unknown")
+
+    def _aggregate_group(name: str, group_rows: Sequence[Mapping[str, Any]], *, group_type: str) -> Dict[str, Any]:
+        cls_count = int(len(group_rows))
+        traj_count = int(sum(int(r.get("gt_trajectory_count", 0) or 0) for r in group_rows))
+        person_classes = int(sum(1 for r in group_rows if bool(r.get("is_person_cooccurrence"))))
+        nonperson_classes = int(sum(1 for r in group_rows if bool(r.get("is_nonperson_hub_cooccurrence"))))
+        suppressor_hub_weight = int(sum(int(r.get("gt_trajectory_count", 0) or 0) for r in group_rows if bool(r.get("top_suppressor_is_hub"))))
+        suppressor_person_weight = int(sum(int(r.get("gt_trajectory_count", 0) or 0) for r in group_rows if bool(r.get("top_suppressor_is_person"))))
+        return {
+            "group_type": str(group_type),
+            "name": str(name),
+            "class_count": cls_count,
+            "class_rate_among_fully_missed_classes": float(cls_count / max(total_classes, 1)),
+            "trajectory_count_weighted": traj_count,
+            "trajectory_weighted_rate_among_fully_missed_report": float(traj_count / max(total_traj, 1)),
+            "weighted_active_raw_rate": _weighted_mean_from_class_rows(group_rows, "active_raw_rate"),
+            "weighted_top1_rate": _weighted_mean_from_class_rows(group_rows, "top1_rate"),
+            "weighted_R_GT_winner_rate": _weighted_mean_from_class_rows(group_rows, "R_GT_winner_rate"),
+            "weighted_rank_top3_rate": _weighted_mean_from_class_rows(group_rows, "rank_top3_rate"),
+            "weighted_rank_4_5_rate": _weighted_mean_from_class_rows(group_rows, "rank_4_5_rate"),
+            "weighted_rank_6_20_rate": _weighted_mean_from_class_rows(group_rows, "rank_6_20_rate"),
+            "weighted_rank_gt20_rate": _weighted_mean_from_class_rows(group_rows, "rank_gt20_rate"),
+            "weighted_rank_missing_rate": _weighted_mean_from_class_rows(group_rows, "rank_missing_rate"),
+            "weighted_gt_alone_rate": _weighted_mean_from_class_rows(group_rows, "gt_alone_rate"),
+            "weighted_weak_alone_rate": _weighted_mean_from_class_rows(group_rows, "weak_alone_rate"),
+            "weighted_P_person_given_class_gt": _weighted_mean_from_class_rows(group_rows, "P_person_given_class_gt"),
+            "weighted_P_person_given_class_weak": _weighted_mean_from_class_rows(group_rows, "P_person_given_class_weak"),
+            "weighted_max_P_hub_given_class_gt": _weighted_mean_from_class_rows(group_rows, "max_P_hub_given_class_gt"),
+            "weighted_max_P_hub_given_class_weak": _weighted_mean_from_class_rows(group_rows, "max_P_hub_given_class_weak"),
+            "person_cooccurrence_class_count": person_classes,
+            "nonperson_hub_cooccurrence_class_count": nonperson_classes,
+            "top_suppressor_is_hub_trajectory_weighted_count": suppressor_hub_weight,
+            "top_suppressor_is_hub_trajectory_weighted_rate": float(suppressor_hub_weight / max(traj_count, 1)),
+            "top_suppressor_is_person_trajectory_weighted_count": suppressor_person_weight,
+            "top_suppressor_is_person_trajectory_weighted_rate": float(suppressor_person_weight / max(traj_count, 1)),
+            "top_classes_by_trajectory_count": [
+                {
+                    "raw_id": r.get("raw_id"),
+                    "name": r.get("name"),
+                    "gt_trajectory_count": r.get("gt_trajectory_count"),
+                    "active_raw_rate": r.get("active_raw_rate"),
+                    "top1_rate": r.get("top1_rate"),
+                    "rank_gt20_rate": r.get("rank_gt20_rate"),
+                    "rank_missing_rate": r.get("rank_missing_rate"),
+                    "top_suppressor_name": r.get("top_suppressor_name"),
+                    "P_person_given_class_gt": r.get("P_person_given_class_gt"),
+                    "max_gt_cooccurring_hub_name": r.get("max_gt_cooccurring_hub_name"),
+                    "failure_subtype": r.get("failure_subtype"),
+                    "strong_hub_cooccurrence_level": r.get("strong_hub_cooccurrence_level"),
+                }
+                for r in sorted(group_rows, key=lambda x: int(x.get("gt_trajectory_count", 0) or 0), reverse=True)[:40]
+            ],
+        }
+
+    by_subtype: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    by_level: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows_list:
+        by_subtype[_subtype_of(row)].append(row)
+        by_level[_level_of(row)].append(row)
+
+    cooccurrence_rows = [
+        r for r in rows_list
+        if str(r.get("failure_subtype")) in {"person_cooccurrence_blind_spot", "nonperson_hub_cooccurrence_blind_spot"}
+    ]
+    strong_or_very_rows = [
+        r for r in rows_list
+        if str(r.get("strong_hub_cooccurrence_level")) in {"strong", "very_strong"}
+    ]
+    moderate_or_above_rows = [
+        r for r in rows_list
+        if str(r.get("strong_hub_cooccurrence_level")) in {"moderate", "strong", "very_strong"}
+    ]
+    non_cooccurrence_rows = [r for r in rows_list if r not in cooccurrence_rows]
+
+    subtype_rows = [
+        _aggregate_group(name, group, group_type="failure_subtype")
+        for name, group in sorted(by_subtype.items(), key=lambda kv: sum(int(r.get("gt_trajectory_count", 0) or 0) for r in kv[1]), reverse=True)
+    ]
+    co_level_rows = [
+        _aggregate_group(name, group, group_type="strong_hub_cooccurrence_level")
+        for name, group in sorted(by_level.items(), key=lambda kv: sum(int(r.get("gt_trajectory_count", 0) or 0) for r in kv[1]), reverse=True)
+    ]
+    big_mode_rows = [
+        _aggregate_group("cooccurrence_hub_blind_spot", cooccurrence_rows, group_type="big_mode"),
+        _aggregate_group("strong_or_very_strong_hub_cooccurrence", strong_or_very_rows, group_type="big_mode"),
+        _aggregate_group("moderate_or_above_hub_cooccurrence", moderate_or_above_rows, group_type="big_mode"),
+        _aggregate_group("non_cooccurrence_residual", non_cooccurrence_rows, group_type="big_mode"),
+    ]
+
+    return {
+        "status": "PASS",
+        "definition": "Trajectory-weighted aggregation of formal_aligned_fully_missed_blind_spot_class_report rows. Weights are gt_trajectory_count; no rescoring or training semantics are changed.",
+        "class_count": total_classes,
+        "trajectory_count_weighted_total": total_traj,
+        "big_mode_rows": big_mode_rows,
+        "by_failure_subtype": subtype_rows,
+        "by_strong_hub_cooccurrence_level": co_level_rows,
+        "all_rows_for_csv": big_mode_rows + subtype_rows + co_level_rows,
+    }
+
 def _text_semantic_confusion_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int, neighbor_topk: int, sim_threshold: float) -> Dict[str, Any]:
     joined = _rows_joined(rows)
     failure_rows = [r for r in joined if not bool(r.get("final_top1_is_gt")) and _safe_int(r.get("final_winner_raw_id")) is not None]
@@ -2546,6 +2678,7 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         weak_unobservable_alone_threshold=float(config.weak_unobservable_alone_threshold),
     )
     fully_missed_class_report_payload = _fully_missed_class_report_payload(fully_missed_class_report_rows)
+    fully_missed_trajectory_weighted_payload = _fully_missed_trajectory_weighted_payload(fully_missed_class_report_rows)
 
     model_hub_current_payload = _model_hub_current_payload(
         taxonomy_rows,
@@ -2587,6 +2720,7 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "full_class_gt_cooccurrence": full_class_gt_cooccurrence_payload,
         "full_class_weak_label_cooccurrence": full_class_weak_cooccurrence_payload,
         "fully_missed_blind_spot_class_report": fully_missed_class_report_payload,
+        "fully_missed_blind_spot_trajectory_weighted_summary": fully_missed_trajectory_weighted_payload,
         "blind_spot_type_histogram": dict(Counter(str(r.get("blind_spot_type")) for r in blind_spot_toplist_rows)),
     }
 
@@ -2721,6 +2855,8 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "formal_aligned_full_class_weak_label_cooccurrence": output_dir / "formal_aligned_full_class_weak_label_cooccurrence.json",
         "formal_aligned_fully_missed_blind_spot_class_report": output_dir / "formal_aligned_fully_missed_blind_spot_class_report.json",
         "formal_aligned_fully_missed_blind_spot_class_report_csv": output_dir / "formal_aligned_fully_missed_blind_spot_class_report.csv",
+        "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary": output_dir / "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary.json",
+        "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary_csv": output_dir / "formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary.csv",
     }
     _write_json(files["summary"], summary)
     _write_json(files["recall_at_k_curve"], recall_curve)
@@ -2767,6 +2903,9 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     if bool(config.emit_fully_missed_class_report) or bool(config.emit_failure_taxonomy):
         _write_json(files["formal_aligned_fully_missed_blind_spot_class_report"], fully_missed_class_report_payload)
         _write_csv(files["formal_aligned_fully_missed_blind_spot_class_report_csv"], fully_missed_class_report_rows)
+    if bool(config.emit_fully_missed_trajectory_weighted_report) or bool(config.emit_fully_missed_class_report) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary"], fully_missed_trajectory_weighted_payload)
+        _write_csv(files["formal_aligned_fully_missed_blind_spot_trajectory_weighted_summary_csv"], fully_missed_trajectory_weighted_payload.get("all_rows_for_csv", []))
     if bool(config.emit_failure_taxonomy):
         _write_json(files["formal_aligned_failure_taxonomy_summary"], failure_taxonomy_summary)
         _write_csv(files["formal_aligned_rank_bucket_by_class"], rank_bucket_by_class_rows)
@@ -2807,6 +2946,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--emit_gt_cooccurrence", type=_parse_bool, default=False)
     p.add_argument("--emit_weak_label_cooccurrence", type=_parse_bool, default=False)
     p.add_argument("--emit_fully_missed_class_report", type=_parse_bool, default=False)
+    p.add_argument("--emit_fully_missed_trajectory_weighted_report", type=_parse_bool, default=False)
     p.add_argument("--emit_full_class_cooccurrence", type=_parse_bool, default=False)
     p.add_argument("--strong_hub_cooccurrence_threshold", type=float, default=0.5)
     p.add_argument("--weak_unobservable_present_threshold", type=float, default=0.05)
@@ -2848,6 +2988,7 @@ def main() -> int:
         emit_gt_cooccurrence=bool(args.emit_gt_cooccurrence),
         emit_weak_label_cooccurrence=bool(args.emit_weak_label_cooccurrence),
         emit_fully_missed_class_report=bool(args.emit_fully_missed_class_report),
+        emit_fully_missed_trajectory_weighted_report=bool(args.emit_fully_missed_trajectory_weighted_report),
         emit_full_class_cooccurrence=bool(args.emit_full_class_cooccurrence),
         strong_hub_cooccurrence_threshold=float(args.strong_hub_cooccurrence_threshold),
         weak_unobservable_present_threshold=float(args.weak_unobservable_present_threshold),
