@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -76,6 +77,15 @@ class DiagnosisConfig:
     smoke_max_trajectories: int
     subset_fraction: Optional[float]
     show_progress: bool
+    emit_failure_taxonomy: bool
+    emit_active_raw_conversion: bool
+    emit_same_vs_other_hijack: bool
+    emit_text_semantic_confusion: bool
+    emit_hub_prior_beta_sweep: bool
+    hub_raw_ids: Tuple[int, ...]
+    hub_beta_values: Tuple[float, ...]
+    text_neighbor_topk: int
+    text_neighbor_sim_threshold: float
 
 
 def _parse_bool(value: Any) -> bool:
@@ -100,6 +110,46 @@ def _parse_rank_ks(value: str) -> Tuple[int, ...]:
             raise argparse.ArgumentTypeError("rank K values must be positive")
         items.append(k)
     return tuple(sorted(set(items))) or DEFAULT_RANK_KS
+
+
+def _parse_int_tuple(value: str) -> Tuple[int, ...]:
+    items: List[int] = []
+    for part in str(value).replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        items.append(int(part))
+    return tuple(sorted(set(items)))
+
+
+def _parse_float_tuple(value: str) -> Tuple[float, ...]:
+    items: List[float] = []
+    for part in str(value).replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        items.append(float(part))
+    return tuple(items)
+
+
+def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows_list = [dict(r) for r in rows]
+    if not rows_list:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames: List[str] = []
+    seen: set[str] = set()
+    for row in rows_list:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(str(key))
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows_list:
+            writer.writerow(row)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -1009,6 +1059,258 @@ def _per_epoch_recall(
     }
 
 
+def _active_extra_set(row: Mapping[str, Any]) -> set[int]:
+    known = {int(x) for x in _unique_ints(row.get("candidate_ids_known"))}
+    extra = {int(x) for x in _unique_ints(row.get("candidate_ids_extra"))}
+    return {int(x) for x in extra if int(x) not in known}
+
+
+def _active_raw_contains(row: Mapping[str, Any]) -> Optional[bool]:
+    gt = _safe_int(row.get("gt_raw_id"))
+    if gt is None:
+        return None
+    return bool(int(gt) in _active_extra_set(row))
+
+
+def _rows_joined(rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    return [r for r in rows if not bool(r.get("missing_diagnosis_record"))]
+
+
+def _active_raw_conversion_payload(rows: Sequence[Mapping[str, Any]], *, hub_raw_ids: Sequence[int]) -> Dict[str, Any]:
+    joined = _rows_joined(rows)
+    active_rows = [r for r in joined if _active_raw_contains(r) is True]
+    inactive_rows = [r for r in joined if _active_raw_contains(r) is False]
+    hub_set = {int(x) for x in hub_raw_ids}
+    def _domain_rate(domain: str, seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
+        return _rate_bools([str(r.get("final_winner_domain")) == str(domain) for r in seq])
+    def _hub_winner_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
+        return _rate_bools([_safe_int(r.get("final_winner_raw_id")) in hub_set for r in seq]) if hub_set else None
+    return {
+        "status": "PASS",
+        "definition": "active_raw_contains := gt_raw_id in (candidate_ids_extra - candidate_ids_known)",
+        "count": int(len(rows)),
+        "diagnosis_joined_count": int(len(joined)),
+        "active_raw_contains_count": int(len(active_rows)),
+        "active_raw_missing_count": int(len(inactive_rows)),
+        "active_raw_membership_rate": float(len(active_rows) / max(len(joined), 1)),
+        "old_gt_in_extra_true_count": int(sum(1 for r in joined if bool(r.get("gt_in_extra")))),
+        "old_gt_in_extra_rate": _rate_bools([bool(r.get("gt_in_extra")) for r in joined if r.get("gt_in_extra") is not None]),
+        "bool_false_but_raw_contains": int(sum(1 for r in joined if (not bool(r.get("gt_in_extra"))) and _active_raw_contains(r) is True)),
+        "bool_true_but_raw_not_contains": int(sum(1 for r in joined if bool(r.get("gt_in_extra")) and _active_raw_contains(r) is False)),
+        "active_raw": {
+            "count": int(len(active_rows)),
+            "P_top1": _rate_bools([bool(r.get("final_top1_is_gt")) for r in active_rows]),
+            "P_R_final_GT_winner": _rate_bools([bool(r.get("r_final_gt_winner")) for r in active_rows if r.get("r_final_gt_winner") is not None]),
+            "P_Yprime_wins": _domain_rate("Yprime", active_rows),
+            "P_wrong_extra_wins": _rate_bools([str(r.get("final_winner_domain")) == "extra" and not bool(r.get("final_top1_is_gt")) for r in active_rows]),
+            "P_other_nonYprime_wins": _domain_rate("other_nonYprime", active_rows),
+            "P_unknown_wins": _domain_rate("unknown", active_rows),
+            "P_hub_wins": _hub_winner_rate(active_rows),
+            "failure_bucket_histogram": dict(Counter(str(r.get("failure_bucket", "")) for r in active_rows)),
+        },
+        "active_raw_missing": {
+            "count": int(len(inactive_rows)),
+            "P_top1": _rate_bools([bool(r.get("final_top1_is_gt")) for r in inactive_rows]),
+            "P_hub_wins": _hub_winner_rate(inactive_rows),
+            "failure_bucket_histogram": dict(Counter(str(r.get("failure_bucket", "")) for r in inactive_rows)),
+        },
+    }
+
+
+def _same_vs_other_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int) -> Dict[str, Any]:
+    joined = _rows_joined(rows)
+    failures = [r for r in joined if not bool(r.get("final_top1_is_gt")) and _safe_int(r.get("top_suppressor_raw_id")) is not None]
+    same = [r for r in failures if bool(r.get("same_trajectory_confusion"))]
+    other = [r for r in failures if bool(r.get("other_trajectory_hijack"))]
+    mixed = [r for r in failures if bool(r.get("mixed_confusion"))]
+    suppressor_counter = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in failures if _safe_int(r.get("top_suppressor_raw_id")) is not None)
+    same_counter = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in same if _safe_int(r.get("top_suppressor_raw_id")) is not None)
+    other_counter = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in other if _safe_int(r.get("top_suppressor_raw_id")) is not None)
+    return {
+        "status": "PASS",
+        "definition": {
+            "same_trajectory_confusion": "local_score(q,h) > local_score(q,g) and clip_argmax_traj(v,h) == q",
+            "other_trajectory_hijack": "clip_argmax_traj(v,h) != q; h is a current non-GT winner/suppressor",
+            "mixed_confusion": "local_score(q,h) > local_score(q,g) and clip_argmax_traj(v,h) != q",
+        },
+        "target_count": int(len(joined)),
+        "non_gt_winner_count": int(len(failures)),
+        "same_trajectory_confusion_count": int(len(same)),
+        "same_trajectory_confusion_rate": float(len(same) / max(len(failures), 1)),
+        "other_trajectory_hijack_count": int(len(other)),
+        "other_trajectory_hijack_rate": float(len(other) / max(len(failures), 1)),
+        "mixed_confusion_count": int(len(mixed)),
+        "mixed_confusion_rate": float(len(mixed) / max(len(failures), 1)),
+        "top_suppressor_classes": _counter_payload_with_rates(suppressor_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=len(failures)),
+        "top_same_trajectory_classes": _counter_payload_with_rates(same_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=len(same)),
+        "top_other_hijack_classes": _counter_payload_with_rates(other_counter, records_by_raw=records_by_raw, top_n=top_n, denominator=len(other)),
+    }
+
+
+def _rank_bucket_payload_by_class(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], min_count: int = 1) -> List[Dict[str, Any]]:
+    grouped: Dict[int, List[Mapping[str, Any]]] = defaultdict(list)
+    for row in _rows_joined(rows):
+        gt = _safe_int(row.get("gt_raw_id"))
+        if gt is not None:
+            grouped[int(gt)].append(row)
+    out: List[Dict[str, Any]] = []
+    for gt, seq in sorted(grouped.items()):
+        if len(seq) < int(min_count):
+            continue
+        buckets = Counter(str(r.get("margin_bucket", _margin_bucket(_safe_int(r.get("gt_mining_rank")), 3))) for r in seq)
+        item = _class_label(gt, records_by_raw)
+        ranks = [float(r["gt_mining_rank"]) for r in seq if r.get("gt_mining_rank") is not None]
+        item.update({
+            "gt_count": int(len(seq)),
+            "in_topK_count": int(buckets.get("in_topK", 0)),
+            "near_miss_Kplus1_Kplus2_count": int(buckets.get("near_miss_Kplus1_Kplus2", 0)),
+            "medium_miss_6_20_count": int(buckets.get("medium_miss_6_20", 0)),
+            "far_miss_gt20_count": int(buckets.get("far_miss_gt20", 0)),
+            "missing_or_not_ranked_count": int(buckets.get("missing_or_not_ranked", 0)),
+            "active_raw_membership_rate": _rate_bools([_active_raw_contains(r) is True for r in seq if _active_raw_contains(r) is not None]),
+            "top1_rate": _rate_bools([bool(r.get("final_top1_is_gt")) for r in seq]),
+            "mean_gt_mining_rank": _mean(ranks),
+            "median_gt_mining_rank": _median(ranks),
+            "rank_p90": _quantile(ranks, 0.9),
+            "mean_R_final_gt": _mean([float(r.get("R_final_gt", 0.0)) for r in seq if r.get("R_final_gt") is not None]),
+            "top_suppressor_raw_id": None,
+            "top_suppressor_name": None,
+            "blind_spot_type": None,
+        })
+        suppressors = Counter(_safe_int(r.get("top_suppressor_raw_id")) for r in seq if _safe_int(r.get("top_suppressor_raw_id")) is not None)
+        if suppressors:
+            sid, _count = suppressors.most_common(1)[0]
+            item["top_suppressor_raw_id"] = int(sid)
+            item["top_suppressor_name"] = _class_label(int(sid), records_by_raw).get("name")
+        active_rate = item.get("active_raw_membership_rate")
+        median_rank = item.get("median_gt_mining_rank")
+        near_rate = float(item["near_miss_Kplus1_Kplus2_count"] / max(len(seq), 1))
+        if active_rate is not None and float(active_rate) < 0.25 and (median_rank is None or float(median_rank) > 20):
+            item["blind_spot_type"] = "fully_missed_blind_spot"
+        elif item.get("top_suppressor_raw_id") == 773 and active_rate is not None and float(active_rate) < 0.50:
+            item["blind_spot_type"] = "hub_suppressed_blind_spot"
+        elif near_rate >= 0.25:
+            item["blind_spot_type"] = "near_miss_capacity_limited"
+        else:
+            item["blind_spot_type"] = "mixed_or_uncategorized"
+        out.append(item)
+    out.sort(key=lambda r: (str(r.get("blind_spot_type")), -(int(r.get("gt_count", 0))), float(r.get("active_raw_membership_rate") or 0.0)))
+    return out
+
+
+def _text_semantic_confusion_payload(rows: Sequence[Mapping[str, Any]], *, records_by_raw: Mapping[int, Mapping[str, Any]], top_n: int, neighbor_topk: int, sim_threshold: float) -> Dict[str, Any]:
+    joined = _rows_joined(rows)
+    failure_rows = [r for r in joined if not bool(r.get("final_top1_is_gt")) and _safe_int(r.get("final_winner_raw_id")) is not None]
+    semantic_rows = [
+        r for r in failure_rows
+        if (r.get("final_winner_text_neighbor_rank_to_gt") is not None and int(r.get("final_winner_text_neighbor_rank_to_gt")) <= int(neighbor_topk))
+        or (r.get("final_winner_text_sim_to_gt") is not None and float(r.get("final_winner_text_sim_to_gt")) >= float(sim_threshold))
+    ]
+    pair_counter: Counter = Counter()
+    pair_examples: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    for r in semantic_rows:
+        gt = _safe_int(r.get("gt_raw_id"))
+        wrong = _safe_int(r.get("final_winner_raw_id"))
+        if gt is None or wrong is None:
+            continue
+        key = (int(gt), int(wrong))
+        pair_counter[key] += 1
+        pair_examples.setdefault(key, {
+            "gt_raw_id": int(gt),
+            "gt_name": _class_label(int(gt), records_by_raw).get("name"),
+            "wrong_raw_id": int(wrong),
+            "wrong_name": _class_label(int(wrong), records_by_raw).get("name"),
+            "text_sim": r.get("final_winner_text_sim_to_gt"),
+            "text_neighbor_rank": r.get("final_winner_text_neighbor_rank_to_gt"),
+        })
+    pairs: List[Dict[str, Any]] = []
+    for key, count in pair_counter.most_common(max(1, int(top_n))):
+        item = dict(pair_examples.get(key, {}))
+        item["count"] = int(count)
+        item["rate_among_semantic_failures"] = float(count / max(len(semantic_rows), 1))
+        pairs.append(item)
+    def _sem_rate(seq: Sequence[Mapping[str, Any]]) -> Optional[float]:
+        if not seq:
+            return None
+        return _rate_bools([
+            (r.get("final_winner_text_neighbor_rank_to_gt") is not None and int(r.get("final_winner_text_neighbor_rank_to_gt")) <= int(neighbor_topk))
+            or (r.get("final_winner_text_sim_to_gt") is not None and float(r.get("final_winner_text_sim_to_gt")) >= float(sim_threshold))
+            for r in seq
+        ])
+    person_failures = [r for r in failure_rows if _safe_int(r.get("final_winner_raw_id")) == 773]
+    nonperson_failures = [r for r in failure_rows if _safe_int(r.get("final_winner_raw_id")) not in (None, 773)]
+    return {
+        "status": "PASS",
+        "neighbor_topk": int(neighbor_topk),
+        "sim_threshold": float(sim_threshold),
+        "failure_count": int(len(failure_rows)),
+        "semantic_neighbor_failure_count": int(len(semantic_rows)),
+        "semantic_neighbor_failure_rate": float(len(semantic_rows) / max(len(failure_rows), 1)),
+        "person_error_text_neighbor_rate": _sem_rate(person_failures),
+        "nonperson_error_text_neighbor_rate": _sem_rate(nonperson_failures),
+        "top_confused_pairs": pairs,
+    }
+
+
+def _hub_prior_beta_sweep_payload(*, rows: Sequence[Mapping[str, Any]], clip_mining: Mapping[int, Mapping[str, Any]], vocab_ids: Sequence[int], selected_extra_counter: Counter, beta_values: Sequence[float], hub_raw_ids: Sequence[int], current_k: int) -> Dict[str, Any]:
+    joined = _rows_joined(rows)
+    vocab_arr = np.asarray([int(x) for x in vocab_ids], dtype=np.int64)
+    hub_set = {int(x) for x in hub_raw_ids}
+    counts = np.asarray([float(selected_extra_counter.get(int(rid), 0)) for rid in vocab_arr.tolist()], dtype=np.float64)
+    mean_count = float(np.mean(counts[counts > 0])) if np.any(counts > 0) else 1.0
+    hub_prior = np.log1p(counts / max(mean_count, 1e-12))
+    by_beta: List[Dict[str, Any]] = []
+    for beta in beta_values:
+        b = float(beta)
+        active_hits = lost_existing = newly_gained = hub_selected = hub_active_gt_missing = 0
+        selected_counter: Counter = Counter()
+        for row in joined:
+            gt = _safe_int(row.get("gt_raw_id"))
+            clip_id = _safe_int(row.get("clip_id"))
+            if gt is None or clip_id is None or int(clip_id) not in clip_mining:
+                continue
+            mining = clip_mining[int(clip_id)]
+            scores = np.asarray(mining.get("scores"), dtype=np.float64).copy()
+            mask = np.asarray(mining.get("candidate_mask"), dtype=bool)
+            if scores.size != len(vocab_arr):
+                continue
+            adjusted = scores - b * hub_prior
+            selected = _top_raw_ids(adjusted, vocab_arr.tolist(), mask, max(1, int(current_k)))
+            selected_set = {int(x) for x in selected}
+            for rid in selected_set:
+                selected_counter[int(rid)] += 1
+            current_hit = _active_raw_contains(row) is True
+            beta_hit = int(gt) in selected_set
+            active_hits += int(beta_hit)
+            lost_existing += int(current_hit and not beta_hit)
+            newly_gained += int((not current_hit) and beta_hit)
+            hub_present = bool(any(int(h) in selected_set for h in hub_set)) if hub_set else False
+            hub_selected += int(hub_present)
+            hub_active_gt_missing += int(hub_present and not beta_hit)
+        denom = max(len(joined), 1)
+        by_beta.append({
+            "beta": b,
+            "target_count": int(len(joined)),
+            "active_raw_membership_rate": float(active_hits / denom),
+            "active_raw_contains_true": int(active_hits),
+            "lost_existing": int(lost_existing),
+            "newly_gained": int(newly_gained),
+            "net_gain": int(newly_gained - lost_existing),
+            "hub_selected_row_count": int(hub_selected),
+            "hub_selected_row_rate": float(hub_selected / denom),
+            "hub_active_and_gt_missing_count": int(hub_active_gt_missing),
+            "hub_active_and_gt_missing_rate": float(hub_active_gt_missing / denom),
+            "top_selected_after_rerank": [{"raw_id": int(rid), "count": int(cnt)} for rid, cnt in selected_counter.most_common(20)],
+        })
+    return {
+        "status": "PASS",
+        "definition": "post-hoc only: score_beta(c)=clip_max_score(c)-beta*log1p(selected_count(c)/mean_nonzero_selected_count)",
+        "current_k": int(current_k),
+        "hub_raw_ids": [int(x) for x in hub_raw_ids],
+        "beta_values": [float(x) for x in beta_values],
+        "by_beta": by_beta,
+    }
+
 def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     run_root = Path(config.run_root).expanduser().resolve()
     runtime_output_root = Path(config.runtime_output_root).expanduser().resolve()
@@ -1056,6 +1358,11 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         if rid is not None:
             records_by_raw[int(rid)] = dict(rec)
     records_by_raw, class_name_meta = _load_class_name_records(runtime_output_root, str(config.dataset_name), records_by_raw)
+    text_features_np = np.asarray(text_vocab_matrix, dtype=np.float64)
+    text_norms = np.linalg.norm(text_features_np, axis=1, keepdims=True)
+    text_norms[text_norms <= 0.0] = 1.0
+    text_features_norm = text_features_np / text_norms
+    text_sim_matrix = np.matmul(text_features_norm, text_features_norm.T)
 
     sidecar_lookup = load_gt_sidecar_lookup(
         _sidecar_root(config),
@@ -1097,6 +1404,11 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     for clip_id, row_indices in indices_by_clip.items():
         clip_logits = np.asarray(logits_vocab[np.asarray(row_indices, dtype=np.int64)], dtype=np.float64)
         max_scores = np.max(clip_logits, axis=0) if clip_logits.size else np.full((vocab_count,), -np.inf, dtype=np.float64)
+        if clip_logits.size:
+            argmax_local = np.argmax(clip_logits, axis=0)
+            argmax_row_indices = np.asarray(row_indices, dtype=np.int64)[argmax_local]
+        else:
+            argmax_row_indices = np.full((vocab_count,), -1, dtype=np.int64)
         mask = np.ones((vocab_count,), dtype=bool)
         for raw_id in yprime_by_clip.get(int(clip_id), set()):
             idx = raw_to_index.get(int(raw_id))
@@ -1105,6 +1417,7 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         clip_mining[int(clip_id)] = {
             "scores": max_scores,
             "candidate_mask": mask,
+            "argmax_row_indices": argmax_row_indices,
             "top100_raw_ids": _top_raw_ids(max_scores, vocab_ids, mask, max(config.rank_ks)),
         }
 
@@ -1234,6 +1547,42 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         r_win = _r_winner(r_final, known, extra, gt_raw_id)
         iou = _extract_gt_iou(sidecar)
 
+        top_suppressor_raw_id = final_winner_raw_id if (not final_top1_is_gt and final_winner_raw_id is not None) else None
+        top_suppressor_idx = raw_to_index.get(int(top_suppressor_raw_id)) if top_suppressor_raw_id is not None else None
+        top_suppressor_score = float(logits[int(top_suppressor_idx)]) if top_suppressor_idx is not None else None
+        top_suppressor_clip_max_score = None
+        top_suppressor_clip_argmax_row_index = None
+        top_suppressor_clip_argmax_trajectory_id = None
+        top_suppressor_clip_argmax_same_trajectory = None
+        if top_suppressor_idx is not None and mining_scores.size:
+            top_suppressor_clip_max_score = float(mining_scores[int(top_suppressor_idx)])
+            argmax_rows = np.asarray(mining.get("argmax_row_indices", np.full((vocab_count,), -1, dtype=np.int64)), dtype=np.int64)
+            if argmax_rows.size > int(top_suppressor_idx):
+                top_suppressor_clip_argmax_row_index = int(argmax_rows[int(top_suppressor_idx)])
+                if 0 <= top_suppressor_clip_argmax_row_index < len(effective_examples):
+                    top_suppressor_clip_argmax_trajectory_id = str(effective_examples[top_suppressor_clip_argmax_row_index].get("trajectory_id", ""))
+                top_suppressor_clip_argmax_same_trajectory = bool(top_suppressor_clip_argmax_row_index == int(row_index))
+        suppressor_beats_gt_on_current_traj = bool(
+            top_suppressor_score is not None and gt_score is not None and float(top_suppressor_score) > float(gt_score)
+        )
+        same_trajectory_confusion = bool(top_suppressor_raw_id is not None and suppressor_beats_gt_on_current_traj and top_suppressor_clip_argmax_same_trajectory is True)
+        other_trajectory_hijack = bool(top_suppressor_raw_id is not None and top_suppressor_clip_argmax_same_trajectory is False)
+        mixed_confusion = bool(top_suppressor_raw_id is not None and suppressor_beats_gt_on_current_traj and top_suppressor_clip_argmax_same_trajectory is False)
+
+        final_winner_text_sim_to_gt = None
+        final_winner_text_neighbor_rank_to_gt = None
+        final_winner_is_text_neighbor_topk = None
+        if gt_idx is not None and final_winner_raw_id is not None and int(final_winner_raw_id) in raw_to_index:
+            fw_idx = int(raw_to_index[int(final_winner_raw_id)])
+            sims = np.asarray(text_sim_matrix[int(gt_idx)], dtype=np.float64).copy()
+            final_winner_text_sim_to_gt = float(sims[fw_idx])
+            sims[int(gt_idx)] = -np.inf
+            order_sim = np.argsort(-sims, kind="stable")
+            pos = np.where(order_sim == fw_idx)[0]
+            if pos.size:
+                final_winner_text_neighbor_rank_to_gt = int(pos[0]) + 1
+                final_winner_is_text_neighbor_topk = bool(final_winner_text_neighbor_rank_to_gt <= int(config.text_neighbor_topk))
+
         gt_available_for_audit = bool(sidecar.get("audit_usable", False)) and gt_raw_id is not None
         formal_eligible = bool(gt_available_for_audit and split in set(_split_order(str(config.dataset_name))) and gt_idx is not None)
 
@@ -1277,6 +1626,19 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
             "margin_to_enter_topK": margin_to_enter_topk,
             "final_winner_raw_id": final_winner_raw_id,
             "final_winner_domain": final_winner_domain,
+            "final_winner_text_sim_to_gt": final_winner_text_sim_to_gt,
+            "final_winner_text_neighbor_rank_to_gt": final_winner_text_neighbor_rank_to_gt,
+            "final_winner_is_text_neighbor_topk": final_winner_is_text_neighbor_topk,
+            "top_suppressor_raw_id": top_suppressor_raw_id,
+            "top_suppressor_score_on_current_traj": top_suppressor_score,
+            "top_suppressor_clip_max_score": top_suppressor_clip_max_score,
+            "top_suppressor_clip_argmax_row_index": top_suppressor_clip_argmax_row_index,
+            "top_suppressor_clip_argmax_trajectory_id": top_suppressor_clip_argmax_trajectory_id,
+            "top_suppressor_clip_argmax_same_trajectory": top_suppressor_clip_argmax_same_trajectory,
+            "suppressor_beats_gt_on_current_traj": suppressor_beats_gt_on_current_traj,
+            "same_trajectory_confusion": same_trajectory_confusion,
+            "other_trajectory_hijack": other_trajectory_hijack,
+            "mixed_confusion": mixed_confusion,
             "final_top1_is_gt": bool(final_top1_is_gt),
             "final_gt_rank": final_gt_rank,
             "final_gt_normalized_rank": final_gt_norm,
@@ -1421,6 +1783,38 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     hub_payload["top_wrong_winners"] = hub_payload["top_wrong_extra_winner_classes"]
     hub_payload["top_suppressors"] = hub_payload["top_suppressor_classes_when_gt_in_extra_fails"]
 
+    taxonomy_rows = formal_aligned_rows if formal_aligned_rows else target_rows
+    active_raw_conversion_payload = _active_raw_conversion_payload(taxonomy_rows, hub_raw_ids=config.hub_raw_ids)
+    same_vs_other_payload = _same_vs_other_payload(taxonomy_rows, records_by_raw=records_by_raw, top_n=config.top_classes)
+    rank_bucket_by_class_rows = _rank_bucket_payload_by_class(taxonomy_rows, records_by_raw=records_by_raw)
+    blind_spot_toplist_rows = list(rank_bucket_by_class_rows)
+    text_semantic_payload = _text_semantic_confusion_payload(
+        taxonomy_rows,
+        records_by_raw=records_by_raw,
+        top_n=config.top_classes,
+        neighbor_topk=config.text_neighbor_topk,
+        sim_threshold=config.text_neighbor_sim_threshold,
+    )
+    hub_beta_payload = _hub_prior_beta_sweep_payload(
+        rows=taxonomy_rows,
+        clip_mining=clip_mining,
+        vocab_ids=vocab_ids,
+        selected_extra_counter=selected_extra_counter,
+        beta_values=config.hub_beta_values,
+        hub_raw_ids=config.hub_raw_ids,
+        current_k=current_k,
+    )
+    failure_taxonomy_summary = {
+        "status": "PASS",
+        "row_universe": "formal_aligned_rows" if formal_aligned_rows else "diagnostic_base_unobserved_rows",
+        "row_count": int(len(taxonomy_rows)),
+        "active_raw_conversion": active_raw_conversion_payload,
+        "same_vs_other_hijack": same_vs_other_payload,
+        "text_semantic_confusion": text_semantic_payload,
+        "hub_prior_beta_sweep": hub_beta_payload,
+        "blind_spot_type_histogram": dict(Counter(str(r.get("blind_spot_type")) for r in blind_spot_toplist_rows)),
+    }
+
     iou_groups: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
     for row in target_rows:
         iou_groups[str(row.get("iou_bucket"))].append(row)
@@ -1475,6 +1869,13 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
                 "existing_probe_base_unobserved": (((existing_probe.get("summary") or {}).get("by_split") or {}).get("base_unobserved") or {}).get("gt_in_extra_candidate_rate") if isinstance(existing_probe, Mapping) else None,
             }
         },
+        "failure_taxonomy_enabled": {
+            "emit_failure_taxonomy": bool(config.emit_failure_taxonomy),
+            "emit_active_raw_conversion": bool(config.emit_active_raw_conversion),
+            "emit_same_vs_other_hijack": bool(config.emit_same_vs_other_hijack),
+            "emit_text_semantic_confusion": bool(config.emit_text_semantic_confusion),
+            "emit_hub_prior_beta_sweep": bool(config.emit_hub_prior_beta_sweep),
+        },
     }
 
     takeaways = []
@@ -1525,6 +1926,13 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "missing_gt_examples": output_dir / "missing_gt_examples.jsonl",
         "row_diagnostics": output_dir / "row_diagnostics.jsonl",
         "diagnosis_takeaways": output_dir / "diagnosis_takeaways.md",
+        "formal_aligned_active_raw_conversion": output_dir / "formal_aligned_active_raw_conversion.json",
+        "formal_aligned_failure_taxonomy_summary": output_dir / "formal_aligned_failure_taxonomy_summary.json",
+        "formal_aligned_same_vs_other_hijack": output_dir / "formal_aligned_same_vs_other_hijack.json",
+        "formal_aligned_text_semantic_confusion": output_dir / "formal_aligned_text_semantic_confusion.json",
+        "formal_aligned_rank_bucket_by_class": output_dir / "formal_aligned_rank_bucket_by_class.csv",
+        "formal_aligned_failure_taxonomy_by_class": output_dir / "formal_aligned_failure_taxonomy_by_class.csv",
+        "formal_aligned_hub_prior_beta_sweep": output_dir / "formal_aligned_hub_prior_beta_sweep.json",
     }
     _write_json(files["summary"], summary)
     _write_json(files["recall_at_k_curve"], recall_curve)
@@ -1548,6 +1956,18 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     _write_jsonl(files["missing_gt_examples"], missing_examples)
     _write_jsonl(files["row_diagnostics"], row_diagnostics)
     _write_text(files["diagnosis_takeaways"], "\n".join(takeaways))
+    if bool(config.emit_active_raw_conversion) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_active_raw_conversion"], active_raw_conversion_payload)
+    if bool(config.emit_same_vs_other_hijack) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_same_vs_other_hijack"], same_vs_other_payload)
+    if bool(config.emit_text_semantic_confusion) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_text_semantic_confusion"], text_semantic_payload)
+    if bool(config.emit_hub_prior_beta_sweep) or bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_hub_prior_beta_sweep"], hub_beta_payload)
+    if bool(config.emit_failure_taxonomy):
+        _write_json(files["formal_aligned_failure_taxonomy_summary"], failure_taxonomy_summary)
+        _write_csv(files["formal_aligned_rank_bucket_by_class"], rank_bucket_by_class_rows)
+        _write_csv(files["formal_aligned_failure_taxonomy_by_class"], blind_spot_toplist_rows)
 
     return {"status": "PASS", "output_dir": str(output_dir), "summary_path": str(files["summary"]), "files": {k: str(v) for k, v in files.items()}}
 
@@ -1571,6 +1991,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sidecar_root", default=None)
     p.add_argument("--repo_root", default=None)
     p.add_argument("--show_progress", type=_parse_bool, default=True)
+    p.add_argument("--emit_failure_taxonomy", type=_parse_bool, default=False)
+    p.add_argument("--emit_active_raw_conversion", type=_parse_bool, default=False)
+    p.add_argument("--emit_same_vs_other_hijack", type=_parse_bool, default=False)
+    p.add_argument("--emit_text_semantic_confusion", type=_parse_bool, default=False)
+    p.add_argument("--emit_hub_prior_beta_sweep", type=_parse_bool, default=False)
+    p.add_argument("--hub_raw_ids", type=_parse_int_tuple, default=(773,))
+    p.add_argument("--hub_beta_values", type=_parse_float_tuple, default=(0.0, 0.02, 0.05, 0.10, 0.20, 0.30))
+    p.add_argument("--text_neighbor_topk", type=int, default=20)
+    p.add_argument("--text_neighbor_sim_threshold", type=float, default=0.65)
     return p.parse_args()
 
 
@@ -1595,6 +2024,15 @@ def main() -> int:
         smoke_max_trajectories=max(1, int(args.smoke_max_trajectories)),
         subset_fraction=None if args.subset_fraction is None else float(args.subset_fraction),
         show_progress=bool(args.show_progress),
+        emit_failure_taxonomy=bool(args.emit_failure_taxonomy),
+        emit_active_raw_conversion=bool(args.emit_active_raw_conversion),
+        emit_same_vs_other_hijack=bool(args.emit_same_vs_other_hijack),
+        emit_text_semantic_confusion=bool(args.emit_text_semantic_confusion),
+        emit_hub_prior_beta_sweep=bool(args.emit_hub_prior_beta_sweep),
+        hub_raw_ids=tuple(int(x) for x in args.hub_raw_ids),
+        hub_beta_values=tuple(float(x) for x in args.hub_beta_values),
+        text_neighbor_topk=max(1, int(args.text_neighbor_topk)),
+        text_neighbor_sim_threshold=float(args.text_neighbor_sim_threshold),
     )
     result = run_diagnosis(config)
     print(result["summary_path"])
