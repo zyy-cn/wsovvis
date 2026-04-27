@@ -14,6 +14,7 @@ _ALLOWED_AUG_LOSS_MODES=('soft_ce','hard_candidate_nce')
 _ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug','sinkhorn_prealign_only','sinkhorn_preaug_no_unknown')
 _ALLOWED_METRICS_PROFILES=('default','formal')
 _ALLOWED_BENCHMARKS=('lvvis',)
+_ALLOWED_SINKHORN_VOCAB_SCOPE_POLICIES=('weak_label_only','legacy_full')
 
 
 def _default_repo_root() -> Path:
@@ -90,6 +91,10 @@ class TrainPlan:
     sinkhorn_safe_neg_text_sim_threshold:float=0.50
     sinkhorn_safe_neg_exclude_model_topk:int=100
     sinkhorn_safe_neg_seed:int=3407
+    sinkhorn_extra_margin_gate:Optional[float]=None
+    sinkhorn_final_rerank_lambda_r:float=0.0
+    sinkhorn_vocab_scope_policy:str='weak_label_only'
+    sinkhorn_vocab_scope_strict_check:bool=True
 
 
     def __post_init__(self):
@@ -164,6 +169,10 @@ def resolve_train_plan(args)->TrainPlan:
         sinkhorn_safe_neg_text_sim_threshold=float(getattr(args, 'sinkhorn_safe_neg_text_sim_threshold', 0.50)),
         sinkhorn_safe_neg_exclude_model_topk=max(0, int(getattr(args, 'sinkhorn_safe_neg_exclude_model_topk', 100))),
         sinkhorn_safe_neg_seed=int(getattr(args, 'sinkhorn_safe_neg_seed', 3407)),
+        sinkhorn_extra_margin_gate=None if getattr(args, 'sinkhorn_extra_margin_gate', None) is None else float(getattr(args, 'sinkhorn_extra_margin_gate', None)),
+        sinkhorn_final_rerank_lambda_r=float(getattr(args, 'sinkhorn_final_rerank_lambda_r', 0.0)),
+        sinkhorn_vocab_scope_policy=_require(str(getattr(args, 'sinkhorn_vocab_scope_policy', 'weak_label_only')), _ALLOWED_SINKHORN_VOCAB_SCOPE_POLICIES, 'sinkhorn_vocab_scope_policy'),
+        sinkhorn_vocab_scope_strict_check=bool(getattr(args, 'sinkhorn_vocab_scope_strict_check', True)),
     )
 
 

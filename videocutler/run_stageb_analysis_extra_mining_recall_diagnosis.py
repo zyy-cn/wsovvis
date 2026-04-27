@@ -431,6 +431,50 @@ def _load_existing_probe_summary(run_root: Path, dataset_name: str, stage: str) 
     return _load_json(path) or {"path": str(path), "exists": False}
 
 
+def _weak_vocab_raw_ids_from_examples(examples: Sequence[Mapping[str, Any]]) -> set[int]:
+    return {
+        int(raw_id)
+        for ex in examples
+        for raw_id in _unique_ints(ex.get("observed_raw_ids"))
+    }
+
+
+def _gt_raw_id_from_diag_row(row: Mapping[str, Any]) -> Optional[int]:
+    for key in ("gt_raw_id", "matched_gt_raw_id_canonical", "gt_id", "gt_class_id"):
+        val = _safe_int(row.get(key))
+        if val is not None:
+            return int(val)
+    return None
+
+
+def _reachable_unobserved_payload(rows: Sequence[Mapping[str, Any]], *, weak_vocab_raw_ids: set[int]) -> Dict[str, Any]:
+    reachable = [r for r in rows if (_gt_raw_id_from_diag_row(r) in weak_vocab_raw_ids)]
+    unreachable = [r for r in rows if (_gt_raw_id_from_diag_row(r) not in weak_vocab_raw_ids)]
+    gt_in_reachable = [r for r in reachable if bool(r.get("gt_in_extra"))]
+    gt_in_unreachable = [r for r in unreachable if bool(r.get("gt_in_extra"))]
+    return {
+        "status": "PASS",
+        "scope_semantics": "base_unobserved_reachable keeps the original base_unobserved split and adds gt_raw_id in union(Yprime) from weak labels.",
+        "weak_vocab_count": int(len(weak_vocab_raw_ids)),
+        "overall": _summarize_rows(rows),
+        "base_unobserved_reachable": {
+            **_summarize_rows(reachable),
+            "P_top1_given_gt_in_extra": _rate_bools([bool(r.get("final_top1_is_gt")) for r in gt_in_reachable]),
+            "P_R_gt_winner_given_gt_in_extra": _rate_bools([bool(r.get("r_final_gt_winner")) for r in gt_in_reachable if r.get("r_final_gt_winner") is not None]),
+            "gt_in_extra_count": int(len(gt_in_reachable)),
+            "unique_gt_class_count": int(len({_gt_raw_id_from_diag_row(r) for r in reachable if _gt_raw_id_from_diag_row(r) is not None})),
+        },
+        "base_unobserved_unreachable_audit_only": {
+            **_summarize_rows(unreachable),
+            "P_top1_given_gt_in_extra": _rate_bools([bool(r.get("final_top1_is_gt")) for r in gt_in_unreachable]),
+            "P_R_gt_winner_given_gt_in_extra": _rate_bools([bool(r.get("r_final_gt_winner")) for r in gt_in_unreachable if r.get("r_final_gt_winner") is not None]),
+            "gt_in_extra_count": int(len(gt_in_unreachable)),
+            "unique_gt_class_count": int(len({_gt_raw_id_from_diag_row(r) for r in unreachable if _gt_raw_id_from_diag_row(r) is not None})),
+            "interpretation": "audit only; not the primary hidden recovery metric under observed-plus-reachable protocol",
+        },
+    }
+
+
 def _summarize_rows(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     gt_in_extra = [bool(r.get("gt_in_extra")) for r in rows]
     final_top1 = [bool(r.get("final_top1_is_gt")) for r in rows]
@@ -3240,6 +3284,11 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "by_transition": {},
         "status": "SKIPPED_NO_FORMAL_AUTHORITY_ROWS",
     }
+    weak_vocab_raw_ids = _weak_vocab_raw_ids_from_examples(effective_examples)
+    formal_aligned_reachable = _reachable_unobserved_payload(
+        formal_aligned_rows if formal_aligned_rows else target_rows,
+        weak_vocab_raw_ids=weak_vocab_raw_ids,
+    )
 
     hub_payload = {
         "class_name_mapping": class_name_meta,
@@ -3476,6 +3525,7 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "P_R_final_GT_winner_given_gt_in_extra": recall_to_top1["conditional"]["P_R_final_GT_winner_given_gt_in_extra"],
         "failure_bucket_histogram": recall_to_top1["all"]["failure_bucket_histogram"],
         "formal_aligned_summary": formal_aligned,
+        "formal_aligned_reachable_summary": formal_aligned_reachable,
         "class_name_mapping": class_name_meta,
         "formal_summary_existing": formal_summary,
         "extra_probe_summary_existing": existing_probe,
@@ -3507,6 +3557,9 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     takeaways.append(f"- P(final GT top1 | GT in extra): `{recall_to_top1['conditional']['P_formal_top1_given_gt_in_extra']}`")
     takeaways.append(f"- P(R_final GT winner | GT in extra): `{recall_to_top1['conditional']['P_R_final_GT_winner_given_gt_in_extra']}`")
     takeaways.append(f"- formal-aligned base_unobserved gt_count: `{formal_aligned.get('formal_gt_count')}`")
+    takeaways.append(f"- primary base_unobserved_reachable count: `{formal_aligned_reachable.get('base_unobserved_reachable', {}).get('count')}`")
+    takeaways.append(f"- primary base_unobserved_reachable top1: `{formal_aligned_reachable.get('base_unobserved_reachable', {}).get('final_top1_rate')}`")
+    takeaways.append(f"- primary base_unobserved_reachable GT-in-extra: `{formal_aligned_reachable.get('base_unobserved_reachable', {}).get('gt_in_extra_rate')}`")
     takeaways.append(f"- formal-aligned authority status: `{formal_aligned.get('formal_authority_status', {}).get('status')}`")
     takeaways.append(f"- formal-aligned top1 self-check diff: `{formal_aligned.get('self_check', {}).get('gt_top1_abs_diff_vs_minimal_split')}`")
     takeaways.append("")
@@ -3536,6 +3589,7 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
         "class_id_name_map_used": output_dir / "class_id_name_map_used.json",
         "formal_aligned_summary": output_dir / "formal_aligned_summary.json",
         "formal_aligned_recall_to_top1_decomposition": output_dir / "formal_aligned_recall_to_top1_decomposition.json",
+        "formal_aligned_reachable_summary": output_dir / "formal_aligned_reachable_summary.json",
         "formal_aligned_r_to_logit_transfer_gap": output_dir / "formal_aligned_r_to_logit_transfer_gap.json",
         "formal_aligned_row_diagnostics": output_dir / "formal_aligned_row_diagnostics.jsonl",
         "top_selected_extra_classes_named": output_dir / "top_selected_extra_classes_named.json",
@@ -3589,6 +3643,7 @@ def run_diagnosis(config: DiagnosisConfig) -> Dict[str, Any]:
     _write_json(files["wrong_extra_hub_report_named"], hub_payload)
     _write_json(files["class_id_name_map_used"], {"meta": class_name_meta, "records_by_raw": {str(k): dict(v) for k, v in sorted(records_by_raw.items())}})
     _write_json(files["formal_aligned_summary"], formal_aligned)
+    _write_json(files["formal_aligned_reachable_summary"], formal_aligned_reachable)
     _write_json(files["formal_aligned_recall_to_top1_decomposition"], formal_aligned)
     _write_json(files["formal_aligned_r_to_logit_transfer_gap"], formal_aligned_transfer)
     _write_jsonl(files["formal_aligned_row_diagnostics"], formal_aligned_rows)

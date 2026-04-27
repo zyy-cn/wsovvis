@@ -544,6 +544,25 @@ def materialize_phase1_training_samples(
     if not isinstance(weak_records, list):
         raise ValueError("weak_labels source must be a JSON array")
 
+    weak_vocab_raw_ids = sorted({
+        int(raw_id)
+        for rec in weak_records
+        for raw_id in list(rec.get("observed_raw_ids", []))
+    })
+    text_vocab_raw_ids = {int(raw_id) for raw_id in text_vocab_ids}
+    weak_vocab_missing_text = [raw_id for raw_id in weak_vocab_raw_ids if raw_id not in text_vocab_raw_ids]
+    if weak_vocab_missing_text:
+        raise KeyError(f"weak label vocab raw ids missing from text bank: {weak_vocab_missing_text[:16]}")
+    weak_vocab_info = {
+        "train_vocab_source": "weak_labels_train_union",
+        "weak_vocab_count": int(len(weak_vocab_raw_ids)),
+        "weak_vocab_raw_ids": weak_vocab_raw_ids,
+        "weak_label_path": str(runtime_output_root / assets["weak_labels"]["path"]),
+        "weak_label_sha256": weak_label_provenance.get("weak_label_payload_sha256"),
+        "full_text_vocab_count": int(len(text_vocab_ids)),
+        "weak_vocab_missing_text_count": int(len(weak_vocab_missing_text)),
+    }
+
     carrier_by_tid = _build_lookup_by_key(carrier_records, lambda rec: str(rec["trajectory_id"]))
     weak_by_clip = _build_lookup_by_key(weak_records, lambda rec: str(rec.get('clip_id', '')))
     weak_by_video = _build_lookup_by_key(weak_records, lambda rec: int(rec.get('video_id', -1)))
@@ -705,7 +724,7 @@ def materialize_phase1_training_samples(
     )
 
     return {
-        "resolution": {**resolution, "weak_label_provenance": weak_label_provenance},
+        "resolution": {**resolution, "weak_label_provenance": weak_label_provenance, "weak_label_vocab": weak_vocab_info},
         "samples": materialized,
         "valid_samples": valid_samples,
         "invalid_samples": invalid_samples,
@@ -721,5 +740,6 @@ def materialize_phase1_training_samples(
             "subset_fraction": float(config.subset_fraction) if config.subset_fraction is not None else None,
             "subset_seed": int(config.subset_seed),
             "weak_label_provenance": weak_label_provenance,
+            "weak_label_vocab": weak_vocab_info,
         },
     }

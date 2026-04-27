@@ -415,11 +415,28 @@ def _build_runtime_extra_cache(
     alpha: float,
     lambda_frame: float,
     device: torch.device,
+    extra_margin_gate: float | None = None,
+    allowed_extra_raw_ids: Optional[Iterable[int]] = None,
+    extra_vocab_scope_policy: str = 'legacy_full',
+    strict_check: bool = False,
 ) -> Dict[int, Dict[str, Any]]:
     if int(k_extra) <= 0:
         return {}
     audit_t0 = time.perf_counter()
-    vocab_ids, vocab_records, vocab_matrix = load_text_vocab(output_root)
+    full_vocab_ids, vocab_records, full_vocab_matrix = load_text_vocab(output_root)
+    full_idx_by_raw = {int(raw_id): idx for idx, raw_id in enumerate(full_vocab_ids)}
+    if allowed_extra_raw_ids is None:
+        vocab_ids = [int(raw_id) for raw_id in full_vocab_ids]
+    else:
+        allowed_set = {int(raw_id) for raw_id in allowed_extra_raw_ids}
+        missing_allowed = sorted(raw_id for raw_id in allowed_set if raw_id not in full_idx_by_raw)
+        if missing_allowed:
+            raise KeyError(f'allowed extra raw ids missing from text bank: {missing_allowed[:16]}')
+        vocab_ids = [int(raw_id) for raw_id in full_vocab_ids if int(raw_id) in allowed_set]
+    if not vocab_ids:
+        raise ValueError('runtime extra cache has empty scoped vocabulary')
+    scoped_indices = [full_idx_by_raw[int(raw_id)] for raw_id in vocab_ids]
+    vocab_matrix = np.asarray(full_vocab_matrix, dtype=np.float32)[scoped_indices]
     idx_by_raw = {int(raw_id): idx for idx, raw_id in enumerate(vocab_ids)}
     text_lookup = {int(rec['raw_id']): dict(rec) for rec in vocab_records}
     t_dis = _compute_t_dis(theta_t)
@@ -449,6 +466,9 @@ def _build_runtime_extra_cache(
     for clip_id, grouped in examples_by_clip.items():
         observed = sorted({int(x) for _, ex in grouped for x in list(ex.get('observed_raw_ids', []))})
         observed_set = set(observed)
+        outside_observed = sorted(raw_id for raw_id in observed_set if raw_id not in idx_by_raw)
+        if outside_observed and bool(strict_check):
+            raise RuntimeError(f'extra vocab scope violation: observed ids outside scoped training vocab: {outside_observed[:16]}')
         candidate_ids = [int(raw_id) for raw_id in vocab_ids if int(raw_id) not in observed_set]
         if not candidate_ids:
             cache[int(clip_id)] = {
@@ -457,6 +477,9 @@ def _build_runtime_extra_cache(
                 'candidate_ids_extra_runtime_authoritative': [],
                 'candidate_ids_extra_authority': 'runtime_refresh_cache_only',
                 'text_lookup': text_lookup,
+                'extra_vocab_scope_policy': str(extra_vocab_scope_policy),
+                'extra_allowed_vocab_count': int(len(vocab_ids)),
+                'candidate_ids_extra_outside_scope_count': 0,
             }
             continue
         row_indices = [row_idx for row_idx, _ in grouped]
@@ -487,7 +510,18 @@ def _build_runtime_extra_cache(
                 debias = float(max(text_text_sim[vocab_idx, idx_by_raw[int(obs)]] for obs in observed if int(obs) in idx_by_raw))
             per_class.append((float(s_max - float(alpha) * debias), int(raw_id), int(row_indices[argmax_local])))
         per_class.sort(key=lambda item: (-item[0], item[1]))
-        selected = per_class[: int(k_extra)]
+        pre_gate_count = int(len(per_class))
+        best_observed_score = float('-inf')
+        if observed:
+            observed_indices = [idx_by_raw[int(raw_id)] for raw_id in observed if int(raw_id) in idx_by_raw]
+            if observed_indices:
+                best_observed_score = float(np.max(score_slice[:, observed_indices]))
+        gate = None if extra_margin_gate is None else float(extra_margin_gate)
+        if gate is not None and gate > 0.0 and best_observed_score != float('-inf'):
+            selected = [item for item in per_class if float(item[0]) - float(best_observed_score) > float(gate)]
+        else:
+            selected = list(per_class)
+        selected = selected[: int(k_extra)]
         cache[int(clip_id)] = {
             'candidate_ids_extra': [int(raw_id) for _, raw_id, _ in selected],
             'candidate_ids_extra_provenance': [
@@ -503,6 +537,13 @@ def _build_runtime_extra_cache(
             'candidate_ids_extra_runtime_authoritative': [int(raw_id) for _, raw_id, _ in selected],
             'candidate_ids_extra_authority': 'runtime_refresh_cache_only',
             'text_lookup': text_lookup,
+            'candidate_ids_extra_pre_gate_count': int(pre_gate_count),
+            'candidate_ids_extra_retained_count': int(len(selected)),
+            'sinkhorn_extra_margin_gate': None if gate is None else float(gate),
+            'best_observed_score': None if best_observed_score == float('-inf') else float(best_observed_score),
+            'extra_vocab_scope_policy': str(extra_vocab_scope_policy),
+            'extra_allowed_vocab_count': int(len(vocab_ids)),
+            'candidate_ids_extra_outside_scope_count': int(sum(1 for _, raw_id, _ in selected if int(raw_id) not in idx_by_raw)),
         }
     memory_checkpoint(
         "softem_after_runtime_extra_cache_build",
@@ -546,6 +587,10 @@ def _apply_runtime_extra_cache(
         row['candidate_records'] = [*list(ex['candidate_records']), *extra_records]
         row['candidate_matrix'] = candidate_matrix
         row['candidate_ids_extra_provenance'] = list(cache_entry.get('candidate_ids_extra_provenance', []))
+        row['candidate_ids_extra_pre_gate_count'] = int(cache_entry.get('candidate_ids_extra_pre_gate_count', len(extra_ids)))
+        row['candidate_ids_extra_retained_count'] = int(cache_entry.get('candidate_ids_extra_retained_count', len(extra_ids)))
+        row['sinkhorn_extra_margin_gate'] = cache_entry.get('sinkhorn_extra_margin_gate')
+        row['best_observed_score'] = cache_entry.get('best_observed_score')
         augmented.append(row)
     return augmented
 

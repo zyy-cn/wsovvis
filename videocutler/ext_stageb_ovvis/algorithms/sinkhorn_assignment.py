@@ -165,6 +165,7 @@ def yprime_nce_with_safe_negatives_loss_from_assignment(
     generator_seed: int = 0,
     stopgrad_assignment: bool = True,
     eps: float = 1e-6,
+    allowed_vocab_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, Dict[str, Any]]:
     """Y'-restricted soft-label InfoNCE plus filtered full-vocab safe negatives.
 
@@ -189,6 +190,12 @@ def yprime_nce_with_safe_negatives_loss_from_assignment(
     if full_scores.shape[0] != B or full_scores.shape[1] != Q:
         raise ValueError('full_scores must match scores on [B,Q]')
     C = int(full_scores.shape[2])
+    if allowed_vocab_mask is None:
+        allowed_mask = torch.ones((C,), device=full_scores.device, dtype=torch.bool)
+    else:
+        allowed_mask = allowed_vocab_mask.to(device=full_scores.device, dtype=torch.bool).reshape(-1)
+        if int(allowed_mask.numel()) != C:
+            raise ValueError(f'allowed_vocab_mask length must match full_scores C={C}, got {int(allowed_mask.numel())}')
     K = max(0, int(safe_neg_count))
     beta = max(0.0, float(safe_neg_weight))
     if K <= 0 or beta <= 0.0:
@@ -213,11 +220,14 @@ def yprime_nce_with_safe_negatives_loss_from_assignment(
 
     # Build per-clip base safe mask [B,C]. Small B loop avoids brittle scatter
     # behavior with padded yidx while preserving the expensive work on GPU.
-    base_safe = torch.ones((B, C), device=full_scores.device, dtype=torch.bool)
+    candidate_exclusion_safe = allowed_mask[None, :].expand(B, C).clone()
+    base_safe = candidate_exclusion_safe.clone()
     for b in range(B):
         cand_idx = yidx[b, cand_mask[b]].long()
         if cand_idx.numel() > 0:
-            base_safe[b, cand_idx.clamp(0, C - 1)] = False
+            cand_idx = cand_idx.clamp(0, C - 1)
+            base_safe[b, cand_idx] = False
+            candidate_exclusion_safe[b, cand_idx] = False
         y_idx = yidx[b, yprime_mask[b]].long()
         if y_idx.numel() > 0:
             sims = raw_text_cos_all[y_idx.clamp(0, C - 1)].amax(dim=0)
@@ -226,7 +236,8 @@ def yprime_nce_with_safe_negatives_loss_from_assignment(
     safe_mask = base_safe[:, None, :].expand(B, Q, C).clone()
     topk = min(max(0, int(exclude_model_topk)), C)
     if topk > 0:
-        top_idx = full_scores.detach().topk(k=topk, dim=2).indices
+        scoped_scores_for_topk = full_scores.detach().masked_fill(~allowed_mask[None, None, :], -1.0e30)
+        top_idx = scoped_scores_for_topk.topk(k=min(topk, int(allowed_mask.sum().detach().cpu().item())), dim=2).indices
         safe_mask.scatter_(2, top_idx, False)
 
     weights = safe_mask.reshape(B * Q, C).float()
@@ -242,13 +253,26 @@ def yprime_nce_with_safe_negatives_loss_from_assignment(
         valid_count = weights.sum(dim=1)
     fallback_row2 = valid_count <= 0
     if bool(fallback_row2.any()):
-        weights = torch.where(fallback_row2[:, None], torch.ones_like(weights), weights)
+        fallback_weights2 = candidate_exclusion_safe[:, None, :].expand(B, Q, C).reshape(B * Q, C).float()
+        weights = torch.where(fallback_row2[:, None], fallback_weights2, weights)
+        valid_count = weights.sum(dim=1)
+    empty_safe_row = valid_count <= 0
+    if bool(empty_safe_row.any()):
+        # Degenerate clip: the scoped train vocab is exhausted by Y'/extra.
+        # Sample a harmless placeholder inside the scoped vocabulary and mask
+        # its logit out below so the denominator falls back to Y'-only.
+        placeholder = allowed_mask.float().clamp_min(0.0).reshape(1, C).expand(B * Q, C)
+        weights = torch.where(empty_safe_row[:, None], placeholder, weights)
         valid_count = weights.sum(dim=1)
 
     gen = torch.Generator(device=full_scores.device)
     gen.manual_seed(int(generator_seed))
     safe_idx = torch.multinomial(weights, num_samples=K, replacement=True, generator=gen)
     safe_logits = full_scores.reshape(B * Q, C).gather(1, safe_idx).reshape(B, Q, K)
+    if bool(empty_safe_row.any()):
+        safe_logits = safe_logits.reshape(B * Q, K)
+        safe_logits[empty_safe_row] = -1.0e4
+        safe_logits = safe_logits.reshape(B, Q, K)
 
     yprime_scores = scores.float().masked_fill(~yprime_mask[:, None, :], -1.0e4)
     safe_logits = safe_logits.float() + torch.log(torch.tensor(beta, device=full_scores.device, dtype=torch.float32))
@@ -276,6 +300,8 @@ def yprime_nce_with_safe_negatives_loss_from_assignment(
             'safe_neg_valid_mean': float(valid_count.detach().float().mean().cpu().item()),
             'safe_neg_valid_min': float(valid_count.detach().float().min().cpu().item()),
             'safe_neg_fallback_row_count': int((fallback_row | fallback_row2).detach().sum().cpu().item()),
+            'safe_neg_empty_row_count': int(empty_safe_row.detach().sum().cpu().item()),
+            'safe_neg_allowed_vocab_count': int(allowed_mask.detach().sum().cpu().item()),
         }
     return loss, metrics
 

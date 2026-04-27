@@ -46,6 +46,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--sinkhorn_safe_neg_text_sim_threshold', type=float, default=0.50)
     p.add_argument('--sinkhorn_safe_neg_exclude_model_topk', type=int, default=100)
     p.add_argument('--sinkhorn_safe_neg_seed', type=int, default=3407)
+    p.add_argument('--sinkhorn_extra_margin_gate', type=float, default=None)
+    p.add_argument('--sinkhorn_final_rerank_lambda_r', type=float, default=0.0)
+    p.add_argument('--sinkhorn_vocab_scope_policy', default='weak_label_only', choices=('weak_label_only','legacy_full'), help='Sinkhorn/no-unknown training category scope. weak_label_only restricts extra, safe negatives, model-topK, denominator, and responsibility candidates to union(Y-prime) from weak_labels_train.json. legacy_full preserves the retired full-vocab behavior for old-result reproduction only.')
+    p.add_argument('--sinkhorn_vocab_scope_strict_check', type=_parse_bool, default=True)
     return p.parse_args()
 def main() -> int:
     result=run_train_pipeline(resolve_train_plan(parse_args())); print(result['summary_path']); return 0

@@ -275,6 +275,12 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                 sinkhorn_safe_negatives=bool(getattr(plan, 'sinkhorn_safe_negatives', False)), sinkhorn_safe_neg_count=int(getattr(plan, 'sinkhorn_safe_neg_count', 64)),
                 sinkhorn_safe_neg_weight=float(getattr(plan, 'sinkhorn_safe_neg_weight', 0.25)), sinkhorn_safe_neg_text_sim_threshold=float(getattr(plan, 'sinkhorn_safe_neg_text_sim_threshold', 0.50)),
                 sinkhorn_safe_neg_exclude_model_topk=int(getattr(plan, 'sinkhorn_safe_neg_exclude_model_topk', 100)), sinkhorn_safe_neg_seed=int(getattr(plan, 'sinkhorn_safe_neg_seed', 3407)),
+                sinkhorn_extra_margin_gate=None if getattr(plan, 'sinkhorn_extra_margin_gate', None) is None else float(getattr(plan, 'sinkhorn_extra_margin_gate', None)),
+                sinkhorn_final_rerank_lambda_r=float(getattr(plan, 'sinkhorn_final_rerank_lambda_r', 0.0)),
+                sinkhorn_vocab_scope_policy=str(getattr(plan, 'sinkhorn_vocab_scope_policy', 'weak_label_only')),
+                sinkhorn_vocab_scope_strict_check=bool(getattr(plan, 'sinkhorn_vocab_scope_strict_check', True)),
+                train_vocab_raw_ids=list(((materialized.get('stats') or {}).get('weak_label_vocab') or {}).get('weak_vocab_raw_ids', [])),
+                train_vocab_source=str(((materialized.get('stats') or {}).get('weak_label_vocab') or {}).get('train_vocab_source', 'weak_labels_train_union')),
                 show_progress=plan.show_progress, log_every=plan.log_every,
                 write_runtime_metrics_jsonl=plan.write_runtime_metrics_jsonl, print_epoch_summary=plan.print_epoch_summary,
             ),
@@ -283,6 +289,7 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
         summary['selected_checkpoint_path'] = sink.get('selected_checkpoint_path')
         summary['unknown_disabled'] = True
         summary['softem_base_skipped'] = True
+        summary['vocab_scope_policy'] = sink.get('vocab_scope_policy', {}) if isinstance(sink, dict) else {}
     else:
         reservoir_samples = _resolve_materialized_samples(materialized, prefer_valid=True)
         pre = train_reservoir_prealign(
