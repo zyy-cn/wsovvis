@@ -39,6 +39,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--sinkhorn_extra_demand', type=float, default=0.25)
     p.add_argument('--sinkhorn_aug_extra_lambda', type=float, default=0.2)
     p.add_argument('--sinkhorn_assignment_stopgrad', type=_parse_bool, default=True)
+
+    p.add_argument('--sinkhorn_safe_negatives', type=_parse_bool, default=False)
+    p.add_argument('--sinkhorn_safe_neg_count', type=int, default=64)
+    p.add_argument('--sinkhorn_safe_neg_weight', type=float, default=0.25)
+    p.add_argument('--sinkhorn_safe_neg_text_sim_threshold', type=float, default=0.50)
+    p.add_argument('--sinkhorn_safe_neg_exclude_model_topk', type=int, default=100)
+    p.add_argument('--sinkhorn_safe_neg_seed', type=int, default=3407)
     return p.parse_args()
 def main() -> int:
     result=run_train_pipeline(resolve_train_plan(parse_args())); print(result['summary_path']); return 0

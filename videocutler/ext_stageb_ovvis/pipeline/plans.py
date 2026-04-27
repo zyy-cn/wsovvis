@@ -84,6 +84,12 @@ class TrainPlan:
     sinkhorn_extra_demand:float=0.25
     sinkhorn_aug_extra_lambda:float=0.2
     sinkhorn_assignment_stopgrad:bool=True
+    sinkhorn_safe_negatives:bool=False
+    sinkhorn_safe_neg_count:int=64
+    sinkhorn_safe_neg_weight:float=0.25
+    sinkhorn_safe_neg_text_sim_threshold:float=0.50
+    sinkhorn_safe_neg_exclude_model_topk:int=100
+    sinkhorn_safe_neg_seed:int=3407
 
 
     def __post_init__(self):
@@ -152,6 +158,12 @@ def resolve_train_plan(args)->TrainPlan:
         sinkhorn_extra_demand=float(getattr(args, 'sinkhorn_extra_demand', 0.25)),
         sinkhorn_aug_extra_lambda=float(getattr(args, 'sinkhorn_aug_extra_lambda', 0.2)),
         sinkhorn_assignment_stopgrad=bool(getattr(args, 'sinkhorn_assignment_stopgrad', True)),
+        sinkhorn_safe_negatives=bool(getattr(args, 'sinkhorn_safe_negatives', False)),
+        sinkhorn_safe_neg_count=max(0, int(getattr(args, 'sinkhorn_safe_neg_count', 64))),
+        sinkhorn_safe_neg_weight=float(getattr(args, 'sinkhorn_safe_neg_weight', 0.25)),
+        sinkhorn_safe_neg_text_sim_threshold=float(getattr(args, 'sinkhorn_safe_neg_text_sim_threshold', 0.50)),
+        sinkhorn_safe_neg_exclude_model_topk=max(0, int(getattr(args, 'sinkhorn_safe_neg_exclude_model_topk', 100))),
+        sinkhorn_safe_neg_seed=int(getattr(args, 'sinkhorn_safe_neg_seed', 3407)),
     )
 
 

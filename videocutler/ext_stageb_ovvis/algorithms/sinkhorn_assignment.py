@@ -147,6 +147,139 @@ def yprime_only_nce_loss_from_assignment(
     return scores.float().sum() * 0.0
 
 
+
+
+def yprime_nce_with_safe_negatives_loss_from_assignment(
+    scores: torch.Tensor,
+    assignment: torch.Tensor,
+    kind: torch.Tensor,
+    c_mask: torch.Tensor,
+    *,
+    full_scores: torch.Tensor,
+    yidx: torch.Tensor,
+    raw_text_cos_all: torch.Tensor,
+    safe_neg_count: int = 64,
+    safe_neg_weight: float = 0.25,
+    text_sim_exclude_threshold: float = 0.50,
+    exclude_model_topk: int = 100,
+    generator_seed: int = 0,
+    stopgrad_assignment: bool = True,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, Dict[str, Any]]:
+    """Y'-restricted soft-label InfoNCE plus filtered full-vocab safe negatives.
+
+    The positive soft labels remain Sinkhorn mass on Y' columns. The denominator
+    contains all Y' columns plus K sampled full-vocabulary negatives that pass
+    conservative filters:
+      - not in the current clip candidate set (Y' or extra),
+      - not a raw-text near neighbor of any Y' class,
+      - not in the current trajectory model top-K predictions.
+
+    Hidden/unobserved classes are therefore not exposed to a naive full-vocab
+    denominator. The sampled negatives only provide weak cross-vocabulary rank
+    pressure, controlled by safe_neg_weight.
+    """
+    if scores.ndim != 3 or assignment.ndim != 3 or full_scores.ndim != 3:
+        raise ValueError('scores, assignment, and full_scores must be [B,Q,*] tensors')
+    if tuple(scores.shape) != tuple(assignment.shape):
+        raise ValueError('scores and assignment must have the same shape')
+    B, Q, M = scores.shape
+    if tuple(kind.shape) != (B, M) or tuple(c_mask.shape) != (B, M) or tuple(yidx.shape) != (B, M):
+        raise ValueError('kind/c_mask/yidx shapes must match [B,M]')
+    if full_scores.shape[0] != B or full_scores.shape[1] != Q:
+        raise ValueError('full_scores must match scores on [B,Q]')
+    C = int(full_scores.shape[2])
+    K = max(0, int(safe_neg_count))
+    beta = max(0.0, float(safe_neg_weight))
+    if K <= 0 or beta <= 0.0:
+        loss = yprime_only_nce_loss_from_assignment(
+            scores,
+            assignment,
+            kind,
+            c_mask,
+            stopgrad_assignment=bool(stopgrad_assignment),
+            eps=eps,
+        )
+        return loss, {
+            'safe_neg_enabled': False,
+            'safe_neg_count': 0,
+            'safe_neg_valid_mean': 0.0,
+            'safe_neg_valid_min': 0.0,
+            'safe_neg_fallback_row_count': 0,
+        }
+
+    yprime_mask = c_mask.bool() & (kind == 1)
+    cand_mask = c_mask.bool()
+
+    # Build per-clip base safe mask [B,C]. Small B loop avoids brittle scatter
+    # behavior with padded yidx while preserving the expensive work on GPU.
+    base_safe = torch.ones((B, C), device=full_scores.device, dtype=torch.bool)
+    for b in range(B):
+        cand_idx = yidx[b, cand_mask[b]].long()
+        if cand_idx.numel() > 0:
+            base_safe[b, cand_idx.clamp(0, C - 1)] = False
+        y_idx = yidx[b, yprime_mask[b]].long()
+        if y_idx.numel() > 0:
+            sims = raw_text_cos_all[y_idx.clamp(0, C - 1)].amax(dim=0)
+            base_safe[b] &= sims <= float(text_sim_exclude_threshold)
+
+    safe_mask = base_safe[:, None, :].expand(B, Q, C).clone()
+    topk = min(max(0, int(exclude_model_topk)), C)
+    if topk > 0:
+        top_idx = full_scores.detach().topk(k=topk, dim=2).indices
+        safe_mask.scatter_(2, top_idx, False)
+
+    weights = safe_mask.reshape(B * Q, C).float()
+    valid_count = weights.sum(dim=1)
+
+    # Fallback 1: keep candidate/raw-text exclusions but ignore model-topK if
+    # those filters made a row empty. Fallback 2: sample anywhere if a clip has
+    # no safe classes at all (rare; recorded for audit).
+    fallback_row = valid_count <= 0
+    if bool(fallback_row.any()):
+        fallback_weights = base_safe[:, None, :].expand(B, Q, C).reshape(B * Q, C).float()
+        weights = torch.where(fallback_row[:, None], fallback_weights, weights)
+        valid_count = weights.sum(dim=1)
+    fallback_row2 = valid_count <= 0
+    if bool(fallback_row2.any()):
+        weights = torch.where(fallback_row2[:, None], torch.ones_like(weights), weights)
+        valid_count = weights.sum(dim=1)
+
+    gen = torch.Generator(device=full_scores.device)
+    gen.manual_seed(int(generator_seed))
+    safe_idx = torch.multinomial(weights, num_samples=K, replacement=True, generator=gen)
+    safe_logits = full_scores.reshape(B * Q, C).gather(1, safe_idx).reshape(B, Q, K)
+
+    yprime_scores = scores.float().masked_fill(~yprime_mask[:, None, :], -1.0e4)
+    safe_logits = safe_logits.float() + torch.log(torch.tensor(beta, device=full_scores.device, dtype=torch.float32))
+    concat_logits = torch.cat([yprime_scores, safe_logits], dim=2)
+    log_probs = concat_logits - torch.logsumexp(concat_logits, dim=2, keepdim=True)
+    log_probs_y = log_probs[:, :, :M]
+
+    P = assignment.detach() if bool(stopgrad_assignment) else assignment
+    P_y = P.float().masked_fill(~yprime_mask[:, None, :], 0.0)
+    mass = P_y.sum(dim=(1, 2))
+    per_clip = -(P_y * log_probs_y).sum(dim=(1, 2)) / mass.clamp_min(float(eps))
+    valid_clip = mass > float(eps)
+    if bool(valid_clip.any()):
+        loss = per_clip[valid_clip].mean()
+    else:
+        loss = scores.float().sum() * 0.0
+
+    with torch.no_grad():
+        metrics = {
+            'safe_neg_enabled': True,
+            'safe_neg_count': int(K),
+            'safe_neg_weight': float(beta),
+            'safe_neg_text_sim_threshold': float(text_sim_exclude_threshold),
+            'safe_neg_exclude_model_topk': int(topk),
+            'safe_neg_valid_mean': float(valid_count.detach().float().mean().cpu().item()),
+            'safe_neg_valid_min': float(valid_count.detach().float().min().cpu().item()),
+            'safe_neg_fallback_row_count': int((fallback_row | fallback_row2).detach().sum().cpu().item()),
+        }
+    return loss, metrics
+
+
 def assignment_metrics(
     assignment: torch.Tensor,
     q_mask: torch.Tensor,

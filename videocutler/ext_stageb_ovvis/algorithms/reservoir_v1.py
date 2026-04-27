@@ -239,6 +239,12 @@ class ReservoirSinkhornNoUnknownConfig:
     sinkhorn_extra_demand: float = 0.25
     sinkhorn_aug_extra_lambda: float = 0.2
     sinkhorn_assignment_stopgrad: bool = True
+    sinkhorn_safe_negatives: bool = False
+    sinkhorn_safe_neg_count: int = 64
+    sinkhorn_safe_neg_weight: float = 0.25
+    sinkhorn_safe_neg_text_sim_threshold: float = 0.50
+    sinkhorn_safe_neg_exclude_model_topk: int = 100
+    sinkhorn_safe_neg_seed: int = 3407
     show_progress: bool = True
     log_every: int = 10
     write_runtime_metrics_jsonl: bool = True
@@ -333,6 +339,15 @@ def _sinkhorn_scores_from_pack(projector: Projector, text_vocab_tensor: torch.Te
     return torch.bmm(Z, anchors.transpose(1, 2)) / temperature
 
 
+def _sinkhorn_candidate_and_full_scores_from_pack(projector: Projector, text_vocab_tensor: torch.Tensor, pack: Mapping[str, Any], temperature: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    text_proj_all = F.normalize(projector(text_vocab_tensor), p=2.0, dim=-1)
+    Z = F.normalize(pack['Z'], p=2.0, dim=-1)
+    full_scores = torch.matmul(Z, text_proj_all.transpose(0, 1)) / temperature
+    gather_idx = pack['yidx'][:, None, :].expand(-1, full_scores.shape[1], -1)
+    scores = full_scores.gather(dim=2, index=gather_idx)
+    return scores, full_scores
+
+
 def _sinkhorn_train_stage(
     *,
     stage_id: str,
@@ -354,6 +369,12 @@ def _sinkhorn_train_stage(
     extra_demand: float,
     extra_lambda: float,
     assignment_stopgrad: bool,
+    safe_negatives: bool,
+    safe_neg_count: int,
+    safe_neg_weight: float,
+    safe_neg_text_sim_threshold: float,
+    safe_neg_exclude_model_topk: int,
+    safe_neg_seed: int,
     show_progress: bool,
     write_runtime_metrics_jsonl: bool,
 ) -> Dict[str, Any]:
@@ -363,6 +384,7 @@ def _sinkhorn_train_stage(
         capped_sinkhorn_assignment,
         sinkhorn_loss_from_assignment,
         yprime_only_nce_loss_from_assignment,
+        yprime_nce_with_safe_negatives_loss_from_assignment,
     )
 
     for group in optimizer.param_groups:
@@ -374,6 +396,8 @@ def _sinkhorn_train_stage(
     cost_fn = _sinkhorn_group_cost_pre if str(mode) == 'prealign' else _sinkhorn_group_cost_aug
     bucket_fn = lambda grp: (len(grp), max(1, len(_sinkhorn_observed_ids(grp)) if str(mode) == 'prealign' else sum(len(x) for x in _sinkhorn_known_extra_ids(grp))))
     cfg = SinkhornAssignmentConfig(tau=float(sinkhorn_tau), iters=int(sinkhorn_iters), row_cap_scale=float(sinkhorn_row_cap_scale))
+    raw_text_norm = F.normalize(text_vocab_tensor.detach().float(), p=2.0, dim=-1)
+    raw_text_cos_all = torch.matmul(raw_text_norm, raw_text_norm.transpose(0, 1))
     for epoch_index in _maybe_tqdm(range(int(epochs)), enabled=bool(show_progress), desc=f'{stage_id} epochs', leave=True):
         shuffled_groups = list(groups)
         random.Random(int(seed) + int(epoch_index)).shuffle(shuffled_groups)
@@ -388,20 +412,41 @@ def _sinkhorn_train_stage(
                 continue
             optimizer.zero_grad(set_to_none=True)
             temperature = _compute_t_dis(theta_t)
-            scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, temperature)
+            if bool(safe_negatives):
+                scores, full_scores = _sinkhorn_candidate_and_full_scores_from_pack(projector, text_vocab_tensor, pack, temperature)
+            else:
+                scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, temperature)
+                full_scores = None
             P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)
-            # V2 loss: Sinkhorn gives soft trajectory<->class pairs, but
-            # training uses Y'-restricted soft-label InfoNCE. The denominator is
-            # only the observed/known label set Y' for each clip, never the full
-            # vocabulary and never extra columns. This avoids treating hidden GT
-            # classes as negatives while adding explicit competition inside Y'.
-            loss = yprime_only_nce_loss_from_assignment(
-                scores,
-                P,
-                pack['kind'],
-                pack['c_mask'],
-                stopgrad_assignment=bool(assignment_stopgrad),
-            )
+            # V3 loss: optional filtered full-vocabulary safe negatives add weak
+            # rank pressure to Y'-only soft-label NCE while avoiding naive
+            # full-vocab false negatives. With safe negatives disabled, behavior
+            # is identical to V2 Y'-only NCE.
+            if bool(safe_negatives):
+                loss, safe_metric_row = yprime_nce_with_safe_negatives_loss_from_assignment(
+                    scores,
+                    P,
+                    pack['kind'],
+                    pack['c_mask'],
+                    full_scores=full_scores,
+                    yidx=pack['yidx'],
+                    raw_text_cos_all=raw_text_cos_all,
+                    safe_neg_count=int(safe_neg_count),
+                    safe_neg_weight=float(safe_neg_weight),
+                    text_sim_exclude_threshold=float(safe_neg_text_sim_threshold),
+                    exclude_model_topk=int(safe_neg_exclude_model_topk),
+                    generator_seed=int(safe_neg_seed) + int(epoch_index) * 100000 + int(micro_idx),
+                    stopgrad_assignment=bool(assignment_stopgrad),
+                )
+            else:
+                loss = yprime_only_nce_loss_from_assignment(
+                    scores,
+                    P,
+                    pack['kind'],
+                    pack['c_mask'],
+                    stopgrad_assignment=bool(assignment_stopgrad),
+                )
+                safe_metric_row = {'safe_neg_enabled': False}
             loss.backward()
             optimizer.step()
             global_step += 1
@@ -411,13 +456,14 @@ def _sinkhorn_train_stage(
             batch_losses.append(batch_val)
             epoch_batch_losses.append(batch_val)
             metric_row = assignment_metrics(P, pack['q_mask'], pack['c_mask'], pack['demand'])
+            metric_row.update(safe_metric_row)
             epoch_metric_rows.append(metric_row)
             if bool(write_runtime_metrics_jsonl):
                 _append_jsonl(runtime_metrics_path, {
                     'row_type': 'microbatch',
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'stage': str(stage_id),
-                    'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
+                    'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(safe_negatives) else 'sinkhorn_yprime_nce_no_unknown',
                     'epoch': int(epoch_index) + 1,
                     'microbatch_idx': int(micro_idx),
                     'microbatch_total': int(epoch_plan.batch_count),
@@ -437,7 +483,7 @@ def _sinkhorn_train_stage(
                 'row_type': 'epoch_summary',
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'stage': str(stage_id),
-                'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
+                'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(safe_negatives) else 'sinkhorn_yprime_nce_no_unknown',
                 'epoch': int(epoch_index) + 1,
                 'microbatch_count': int(len(epoch_batch_losses)),
                 'loss_mean': _mean_or_zero(epoch_losses),
@@ -454,7 +500,12 @@ def _sinkhorn_train_stage(
         'optimization_loss_last': float(batch_losses[-1]) if batch_losses else 0.0,
         'global_step': int(global_step),
         'loss_normalization': 'sum_candidate_demand',
-        'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
+        'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(safe_negatives) else 'sinkhorn_yprime_nce_no_unknown',
+        'safe_neg_enabled': bool(safe_negatives),
+        'safe_neg_count': int(safe_neg_count),
+        'safe_neg_weight': float(safe_neg_weight),
+        'safe_neg_text_sim_threshold': float(safe_neg_text_sim_threshold),
+        'safe_neg_exclude_model_topk': int(safe_neg_exclude_model_topk),
     }
 
 
@@ -538,7 +589,7 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, optimizer=optimizer,
         epochs=int(config.prealign_epochs), learning_rate=float(config.prealign_learning_rate), batch_budget=int(batch_budget), seed=int(config.seed), mode='prealign',
         sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale),
-        extra_demand=0.0, extra_lambda=0.0, assignment_stopgrad=bool(config.sinkhorn_assignment_stopgrad), show_progress=bool(config.show_progress), write_runtime_metrics_jsonl=bool(config.write_runtime_metrics_jsonl),
+        extra_demand=0.0, extra_lambda=0.0, assignment_stopgrad=bool(config.sinkhorn_assignment_stopgrad), safe_negatives=bool(config.sinkhorn_safe_negatives), safe_neg_count=int(config.sinkhorn_safe_neg_count), safe_neg_weight=float(config.sinkhorn_safe_neg_weight), safe_neg_text_sim_threshold=float(config.sinkhorn_safe_neg_text_sim_threshold), safe_neg_exclude_model_topk=int(config.sinkhorn_safe_neg_exclude_model_topk), safe_neg_seed=int(config.sinkhorn_safe_neg_seed), show_progress=bool(config.show_progress), write_runtime_metrics_jsonl=bool(config.write_runtime_metrics_jsonl),
     )
     train_dir = output_root / 'train' / 'prealign'
     ckpt_dir = train_dir / 'checkpoints'
@@ -548,11 +599,11 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'text_projector_state_dict': projector.state_dict(),
         'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
         'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
-        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_yprime_nce_no_unknown'
+        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight)
     }, ckpt_last_path)
     pre_proxy_rows = _sinkhorn_collect_responsibility_rows(stage_id='prealign', dataset_name=str(config.dataset_name), groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='prealign', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=0.0)
     _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
-    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True}
+    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives)}
     _write_json(train_dir / 'train_state.json', pre_train_state)
     pre_summary = {**pre_stage, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth'}
     _write_json(train_dir / 'stage_summary.json', pre_summary)
@@ -572,7 +623,7 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
             text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, optimizer=optimizer,
             epochs=int(config.aug_epochs), learning_rate=float(config.aug_learning_rate), batch_budget=int(batch_budget), seed=int(config.seed) + 1000, mode='aug',
             sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale),
-            extra_demand=float(config.sinkhorn_extra_demand), extra_lambda=float(config.sinkhorn_aug_extra_lambda), assignment_stopgrad=bool(config.sinkhorn_assignment_stopgrad), show_progress=bool(config.show_progress), write_runtime_metrics_jsonl=bool(config.write_runtime_metrics_jsonl),
+            extra_demand=float(config.sinkhorn_extra_demand), extra_lambda=float(config.sinkhorn_aug_extra_lambda), assignment_stopgrad=bool(config.sinkhorn_assignment_stopgrad), safe_negatives=bool(config.sinkhorn_safe_negatives), safe_neg_count=int(config.sinkhorn_safe_neg_count), safe_neg_weight=float(config.sinkhorn_safe_neg_weight), safe_neg_text_sim_threshold=float(config.sinkhorn_safe_neg_text_sim_threshold), safe_neg_exclude_model_topk=int(config.sinkhorn_safe_neg_exclude_model_topk), safe_neg_seed=int(config.sinkhorn_safe_neg_seed) + 1000, show_progress=bool(config.show_progress), write_runtime_metrics_jsonl=bool(config.write_runtime_metrics_jsonl),
         )
         aug_dir = output_root / 'train' / 'softem_aug'
         aug_ckpt_dir = aug_dir / 'checkpoints'
