@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import json
 
 def _bootstrap_repo_root_for_direct_cli() -> None:
     repo_root = Path(__file__).resolve().parents[1]
@@ -18,6 +19,43 @@ def _parse_bool(value):
     if normalized in {'1','true','t','yes','y','on'}: return True
     if normalized in {'0','false','f','no','n','off'}: return False
     raise argparse.ArgumentTypeError(f'expected boolean, got {value!r}')
+
+def _merge_scope_contract_into_pipeline_summary(summary_path: Path) -> None:
+    try:
+        summary = json.loads(summary_path.read_text(encoding='utf-8'))
+    except Exception:
+        return
+    if not isinstance(summary, dict):
+        return
+    for stage_rel in (
+        summary_path.parent / 'softem_aug' / 'stage_summary.json',
+        summary_path.parent / 'prealign' / 'stage_summary.json',
+    ):
+        try:
+            if not stage_rel.exists():
+                continue
+            stage_summary = json.loads(stage_rel.read_text(encoding='utf-8'))
+            if not isinstance(stage_summary, dict):
+                continue
+            for key in (
+                'vocab_scope_policy',
+                'weak_vocab_count',
+                'full_text_vocab_count',
+                'extra_scope',
+                'safe_neg_scope',
+                'model_topk_scope',
+                'extra_outside_weak_count',
+                'safe_neg_outside_weak_count',
+                'model_topk_outside_weak_count',
+                'denominator_outside_weak_count',
+                'responsibility_candidate_outside_weak_count',
+            ):
+                if key in stage_summary:
+                    summary[key] = stage_summary.get(key)
+            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str) + '\n', encoding='utf-8')
+            return
+        except Exception:
+            continue
 
 def parse_args() -> argparse.Namespace:
     p=argparse.ArgumentParser(description='Unified Stage-B training entrypoint.')
@@ -52,5 +90,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--sinkhorn_vocab_scope_strict_check', type=_parse_bool, default=True)
     return p.parse_args()
 def main() -> int:
-    result=run_train_pipeline(resolve_train_plan(parse_args())); print(result['summary_path']); return 0
+    result=run_train_pipeline(resolve_train_plan(parse_args()))
+    _merge_scope_contract_into_pipeline_summary(Path(result['summary_path']))
+    print(result['summary_path'])
+    return 0
 if __name__=='__main__': raise SystemExit(main())

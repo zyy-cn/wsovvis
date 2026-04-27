@@ -409,6 +409,35 @@ def _sinkhorn_runtime_extra_cache_metrics(runtime_extra_cache: Mapping[int, Mapp
     }
 
 
+def _sinkhorn_scope_contract_fields(
+    vocab_scope_policy: Mapping[str, Any],
+    *,
+    runtime_extra_cache: Optional[Mapping[int, Mapping[str, Any]]] = None,
+    aug_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    allowed_train_vocab_count = int(vocab_scope_policy.get('allowed_train_vocab_count', 0))
+    full_text_vocab_count = int(vocab_scope_policy.get('full_text_vocab_count', 0))
+    extra_outside_weak_count = int(
+        sum(int(row.get('candidate_ids_extra_outside_scope_count', 0)) for row in (runtime_extra_cache or {}).values())
+    )
+    responsibility_candidate_outside_weak_count = int(
+        sum(int(row.get('candidate_outside_train_vocab_count', 0)) for row in (aug_rows or []))
+    )
+    return {
+        'vocab_scope_policy': str(vocab_scope_policy.get('policy', 'unknown')),
+        'weak_vocab_count': allowed_train_vocab_count,
+        'full_text_vocab_count': full_text_vocab_count,
+        'extra_scope': 'weak_union',
+        'safe_neg_scope': 'weak_union',
+        'model_topk_scope': 'weak_union',
+        'extra_outside_weak_count': extra_outside_weak_count,
+        'safe_neg_outside_weak_count': 0,
+        'model_topk_outside_weak_count': 0,
+        'denominator_outside_weak_count': 0,
+        'responsibility_candidate_outside_weak_count': responsibility_candidate_outside_weak_count,
+    }
+
+
 def _sinkhorn_scores_from_pack(projector: Projector, text_vocab_tensor: torch.Tensor, pack: Mapping[str, Any], temperature: torch.Tensor) -> torch.Tensor:
     text_proj_all = F.normalize(projector(text_vocab_tensor), p=2.0, dim=-1)
     anchors = text_proj_all[pack['yidx']]
@@ -720,7 +749,8 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
     _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
     pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
     _write_json(train_dir / 'train_state.json', pre_train_state)
-    pre_summary = {**pre_stage, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
+    pre_scope_contract = _sinkhorn_scope_contract_fields(vocab_scope_policy)
+    pre_summary = {**pre_stage, **pre_scope_contract, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
     _write_json(train_dir / 'stage_summary.json', pre_summary)
 
     stage_reports = [{'stage_id': 'prealign', 'responsibility_records_path': 'train/prealign/proxy_records.jsonl', 'train_state_path': 'train/prealign/train_state.json', 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'record_count_output': int(len(pre_proxy_rows)), **pre_stage}]
@@ -757,7 +787,8 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         _write_json(aug_dir / 'train_state.json', aug_state)
         runtime_extra_metrics = {'example_count': int(len(aug_examples)), 'k_extra': int(config.k_extra), 'extra_alpha': float(config.extra_alpha), 'sinkhorn_extra_demand': float(config.sinkhorn_extra_demand), 'sinkhorn_aug_extra_lambda': float(config.sinkhorn_aug_extra_lambda), 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
         runtime_extra_metrics.update(_sinkhorn_runtime_extra_cache_metrics(runtime_extra_cache))
-        aug_summary = {**aug_stage, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'softem_base_skipped': True, 'record_count_output': int(len(aug_rows)), 'runtime_extra_cache_metrics': runtime_extra_metrics, 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy, 'checkpoint_last_path': 'train/softem_aug/checkpoints/softem_aug_last.pth'}
+        aug_scope_contract = _sinkhorn_scope_contract_fields(vocab_scope_policy, runtime_extra_cache=runtime_extra_cache, aug_rows=aug_rows)
+        aug_summary = {**aug_stage, **aug_scope_contract, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'softem_base_skipped': True, 'record_count_output': int(len(aug_rows)), 'runtime_extra_cache_metrics': runtime_extra_metrics, 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy, 'checkpoint_last_path': 'train/softem_aug/checkpoints/softem_aug_last.pth'}
         _write_json(aug_dir / 'stage_summary.json', aug_summary)
         stage_reports.append({'stage_id': 'softem_aug', 'responsibility_records_path': 'train/softem_aug/responsibility_records.jsonl', 'train_state_path': 'train/softem_aug/train_state.json', 'checkpoint_last_path': 'train/softem_aug/checkpoints/softem_aug_last.pth', 'record_count_output': int(len(aug_rows)), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), **aug_stage})
         selected_checkpoint_path = 'train/softem_aug/checkpoints/softem_aug_last.pth'
@@ -776,4 +807,6 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         'pipeline': 'reservoir_v1_sinkhorn_no_unknown',
         'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
         'vocab_scope_policy': vocab_scope_policy,
+        **pre_scope_contract,
+        **(aug_scope_contract if str(stage_scope) != 'sinkhorn_prealign_only' else pre_scope_contract),
     }

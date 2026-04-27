@@ -355,8 +355,38 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                         show_progress=plan.show_progress, log_every=plan.log_every,
                         write_runtime_metrics_jsonl=plan.write_runtime_metrics_jsonl, print_epoch_summary=plan.print_epoch_summary,
                     ),
-                )
+            )
             summary['stages']['softem'] = soft
+            scope_source = {}
+            soft_stage_summary_path = Path(plan.output_root) / 'train' / 'softem_aug' / 'stage_summary.json'
+            pre_stage_summary_path = Path(plan.output_root) / 'train' / 'prealign' / 'stage_summary.json'
+            for candidate_path in (soft_stage_summary_path, pre_stage_summary_path):
+                try:
+                    if candidate_path.exists():
+                        scope_source = json.loads(candidate_path.read_text(encoding='utf-8'))
+                        if isinstance(scope_source, dict) and (
+                            'weak_vocab_count' in scope_source or 'extra_scope' in scope_source or 'vocab_scope_policy' in scope_source
+                        ):
+                            break
+                except Exception:
+                    scope_source = {}
+            if not scope_source:
+                scope_source = summary['stages'].get('prealign') or {}
+            for key in (
+                'vocab_scope_policy',
+                'weak_vocab_count',
+                'full_text_vocab_count',
+                'extra_scope',
+                'safe_neg_scope',
+                'model_topk_scope',
+                'extra_outside_weak_count',
+                'safe_neg_outside_weak_count',
+                'model_topk_outside_weak_count',
+                'denominator_outside_weak_count',
+                'responsibility_candidate_outside_weak_count',
+            ):
+                if key in scope_source:
+                    summary[key] = scope_source.get(key)
             summary['selected_checkpoint_path'] = soft.get('selected_checkpoint_path')
             summary['unknown_metrics'] = soft.get('unknown_metrics', {})
             if bool(getattr(plan, 'ablate_skip_base', False)):
