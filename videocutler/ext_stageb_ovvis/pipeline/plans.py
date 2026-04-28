@@ -11,7 +11,7 @@ _ALLOWED_EXTRA_SELECTION_MODES=('trajectory_epoch_topk_nonYprime','clip_observed
 _ALLOWED_EXTRA_ACTIVATION_MODES=('always','margin_over_yprime')
 _ALLOWED_EXTRA_COVERAGE_MODES=('observed_only','unified_with_yprime')
 _ALLOWED_AUG_LOSS_MODES=('soft_ce','hard_candidate_nce')
-_ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug','sinkhorn_prealign_only','sinkhorn_preaug_no_unknown')
+_ALLOWED_STAGE_SCOPES=('prealign_only','prealign_base','prealign_base_aug','sinkhorn_prealign_only','sinkhorn_preaug_no_unknown','support_null_prealign_base_only')
 _ALLOWED_METRICS_PROFILES=('default','formal')
 _ALLOWED_BENCHMARKS=('lvvis',)
 _ALLOWED_SINKHORN_VOCAB_SCOPE_POLICIES=('weak_label_only','legacy_full')
@@ -95,6 +95,17 @@ class TrainPlan:
     sinkhorn_final_rerank_lambda_r:float=0.0
     sinkhorn_vocab_scope_policy:str='weak_label_only'
     sinkhorn_vocab_scope_strict_check:bool=True
+    sinkhorn_enable_null_column:bool=False
+    sinkhorn_null_logit_bias:float=0.0
+    sinkhorn_null_residual:bool=False
+    sinkhorn_support_warmup_epochs:int=0
+    sinkhorn_yprime_demand_mode:str='fixed'
+    sinkhorn_yprime_demand_min:float=0.10
+    sinkhorn_yprime_support_topk:int=2
+    sinkhorn_yprime_support_temp:float=0.25
+    sinkhorn_yprime_support_ema:float=0.90
+    sinkhorn_null_collapse_max:float=0.85
+    sinkhorn_yprime_demand_min_guard:float=0.20
 
 
     def __post_init__(self):
@@ -173,6 +184,17 @@ def resolve_train_plan(args)->TrainPlan:
         sinkhorn_final_rerank_lambda_r=float(getattr(args, 'sinkhorn_final_rerank_lambda_r', 0.0)),
         sinkhorn_vocab_scope_policy=_require(str(getattr(args, 'sinkhorn_vocab_scope_policy', 'weak_label_only')), _ALLOWED_SINKHORN_VOCAB_SCOPE_POLICIES, 'sinkhorn_vocab_scope_policy'),
         sinkhorn_vocab_scope_strict_check=bool(getattr(args, 'sinkhorn_vocab_scope_strict_check', True)),
+        sinkhorn_enable_null_column=bool(getattr(args, 'sinkhorn_enable_null_column', False)),
+        sinkhorn_null_logit_bias=float(getattr(args, 'sinkhorn_null_logit_bias', 0.0)),
+        sinkhorn_null_residual=bool(getattr(args, 'sinkhorn_null_residual', False)),
+        sinkhorn_support_warmup_epochs=max(0, int(getattr(args, 'sinkhorn_support_warmup_epochs', 0))),
+        sinkhorn_yprime_demand_mode=str(getattr(args, 'sinkhorn_yprime_demand_mode', 'fixed')),
+        sinkhorn_yprime_demand_min=float(getattr(args, 'sinkhorn_yprime_demand_min', 0.10)),
+        sinkhorn_yprime_support_topk=max(1, int(getattr(args, 'sinkhorn_yprime_support_topk', 2))),
+        sinkhorn_yprime_support_temp=max(1.0e-6, float(getattr(args, 'sinkhorn_yprime_support_temp', 0.25))),
+        sinkhorn_yprime_support_ema=float(getattr(args, 'sinkhorn_yprime_support_ema', 0.90)),
+        sinkhorn_null_collapse_max=float(getattr(args, 'sinkhorn_null_collapse_max', 0.85)),
+        sinkhorn_yprime_demand_min_guard=float(getattr(args, 'sinkhorn_yprime_demand_min_guard', 0.20)),
     )
 
 

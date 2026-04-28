@@ -190,9 +190,9 @@ def _run_post_train_minimal_split_audit(plan: TrainPlan) -> Dict[str, Any]:
 
 
 def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
-    sinkhorn_scopes = {'sinkhorn_prealign_only', 'sinkhorn_preaug_no_unknown'}
+    sinkhorn_scopes = {'sinkhorn_prealign_only', 'sinkhorn_preaug_no_unknown', 'support_null_prealign_base_only'}
     if str(plan.pipeline) == 'reservoir_v1_sinkhorn_no_unknown' and str(plan.stage_scope) not in sinkhorn_scopes:
-        raise ValueError('reservoir_v1_sinkhorn_no_unknown requires stage_scope sinkhorn_prealign_only or sinkhorn_preaug_no_unknown')
+        raise ValueError('reservoir_v1_sinkhorn_no_unknown requires stage_scope sinkhorn_prealign_only, sinkhorn_preaug_no_unknown, or support_null_prealign_base_only')
     if str(plan.pipeline) != 'reservoir_v1_sinkhorn_no_unknown' and str(plan.stage_scope) in sinkhorn_scopes:
         raise ValueError('sinkhorn stage_scope is only valid with pipeline reservoir_v1_sinkhorn_no_unknown')
     materialized = _materialize(plan)
@@ -279,6 +279,17 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                 sinkhorn_final_rerank_lambda_r=float(getattr(plan, 'sinkhorn_final_rerank_lambda_r', 0.0)),
                 sinkhorn_vocab_scope_policy=str(getattr(plan, 'sinkhorn_vocab_scope_policy', 'weak_label_only')),
                 sinkhorn_vocab_scope_strict_check=bool(getattr(plan, 'sinkhorn_vocab_scope_strict_check', True)),
+                sinkhorn_enable_null_column=bool(getattr(plan, 'sinkhorn_enable_null_column', False)),
+                sinkhorn_null_logit_bias=float(getattr(plan, 'sinkhorn_null_logit_bias', 0.0)),
+                sinkhorn_null_residual=bool(getattr(plan, 'sinkhorn_null_residual', False)),
+                sinkhorn_support_warmup_epochs=max(0, int(getattr(plan, 'sinkhorn_support_warmup_epochs', 0))),
+                sinkhorn_yprime_demand_mode=str(getattr(plan, 'sinkhorn_yprime_demand_mode', 'fixed')),
+                sinkhorn_yprime_demand_min=float(getattr(plan, 'sinkhorn_yprime_demand_min', 0.10)),
+                sinkhorn_yprime_support_topk=max(1, int(getattr(plan, 'sinkhorn_yprime_support_topk', 2))),
+                sinkhorn_yprime_support_temp=max(1.0e-6, float(getattr(plan, 'sinkhorn_yprime_support_temp', 0.25))),
+                sinkhorn_yprime_support_ema=float(getattr(plan, 'sinkhorn_yprime_support_ema', 0.90)),
+                sinkhorn_null_collapse_max=float(getattr(plan, 'sinkhorn_null_collapse_max', 0.85)),
+                sinkhorn_yprime_demand_min_guard=float(getattr(plan, 'sinkhorn_yprime_demand_min_guard', 0.20)),
                 train_vocab_raw_ids=list(((materialized.get('stats') or {}).get('weak_label_vocab') or {}).get('weak_vocab_raw_ids', [])),
                 train_vocab_source=str(((materialized.get('stats') or {}).get('weak_label_vocab') or {}).get('train_vocab_source', 'weak_labels_train_union')),
                 show_progress=plan.show_progress, log_every=plan.log_every,

@@ -216,7 +216,9 @@ def yprime_nce_with_safe_negatives_loss_from_assignment(
         }
 
     yprime_mask = c_mask.bool() & (kind == 1)
-    cand_mask = c_mask.bool()
+    # Null/dustbin columns (kind <= 0) are assignment slack only and must not
+    # exclude real vocabulary ids from safe-negative sampling.
+    cand_mask = c_mask.bool() & (kind > 0)
 
     # Build per-clip base safe mask [B,C]. Small B loop avoids brittle scatter
     # behavior with padded yidx while preserving the expensive work on GPU.
