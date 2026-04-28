@@ -142,6 +142,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     support_state = payload.get("support_null_state_snapshot")
     if not isinstance(support_state, Mapping):
         support_state = {}
+    support_cfg = payload.get("support_null_config")
+    if not isinstance(support_cfg, Mapping):
+        support_cfg = {}
 
     rows = _sinkhorn_collect_responsibility_rows(
         stage_id=str(args.stage),
@@ -168,6 +171,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         yprime_support_topk=int(args.sinkhorn_yprime_support_topk),
         yprime_support_temp=float(args.sinkhorn_yprime_support_temp),
         support_state_snapshot=support_state,
+        enable_positive_protection=bool(support_cfg.get("positive_protection_enabled", False)),
+        positive_margin_threshold=float(support_cfg.get("positive_margin_threshold", 0.15)),
+        positive_margin_temp=float(support_cfg.get("positive_margin_temp", 0.10)),
+        positive_null_cap=float(support_cfg.get("positive_null_cap", 0.40)),
+        positive_redistribute_mode=str(support_cfg.get("positive_redistribute_mode", "best_y")),
     )
     train_dir = run_root / "train" / str(args.stage)
     _write_jsonl(train_dir / "responsibility_records.jsonl", rows)

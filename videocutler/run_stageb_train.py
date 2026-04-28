@@ -101,6 +101,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--sinkhorn_yprime_support_ema', type=float, default=0.90)
     p.add_argument('--sinkhorn_null_collapse_max', type=float, default=0.85)
     p.add_argument('--sinkhorn_yprime_demand_min_guard', type=float, default=0.20)
+    # V2-C positive-support protection. Defaults preserve old/V2-B behavior.
+    p.add_argument('--sinkhorn_enable_positive_protection', type=_parse_bool, default=False)
+    p.add_argument('--sinkhorn_positive_margin_threshold', type=float, default=0.15)
+    p.add_argument('--sinkhorn_positive_margin_temp', type=float, default=0.10)
+    p.add_argument('--sinkhorn_positive_null_cap', type=float, default=0.40)
+    p.add_argument('--sinkhorn_positive_redistribute_mode', default='best_y', choices=('best_y',))
     return p.parse_args()
 def main() -> int:
     result=run_train_pipeline(resolve_train_plan(parse_args()))

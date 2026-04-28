@@ -107,6 +107,11 @@ class TrainPlan:
     sinkhorn_yprime_support_ema:float=0.90
     sinkhorn_null_collapse_max:float=0.85
     sinkhorn_yprime_demand_min_guard:float=0.20
+    sinkhorn_enable_positive_protection:bool=False
+    sinkhorn_positive_margin_threshold:float=0.15
+    sinkhorn_positive_margin_temp:float=0.10
+    sinkhorn_positive_null_cap:float=0.40
+    sinkhorn_positive_redistribute_mode:str='best_y'
 
 
     def __post_init__(self):
@@ -197,6 +202,11 @@ def resolve_train_plan(args)->TrainPlan:
         sinkhorn_yprime_support_ema=float(getattr(args, 'sinkhorn_yprime_support_ema', 0.90)),
         sinkhorn_null_collapse_max=float(getattr(args, 'sinkhorn_null_collapse_max', 0.85)),
         sinkhorn_yprime_demand_min_guard=float(getattr(args, 'sinkhorn_yprime_demand_min_guard', 0.20)),
+        sinkhorn_enable_positive_protection=bool(getattr(args, 'sinkhorn_enable_positive_protection', False)),
+        sinkhorn_positive_margin_threshold=float(getattr(args, 'sinkhorn_positive_margin_threshold', 0.15)),
+        sinkhorn_positive_margin_temp=max(1.0e-6, float(getattr(args, 'sinkhorn_positive_margin_temp', 0.10))),
+        sinkhorn_positive_null_cap=float(getattr(args, 'sinkhorn_positive_null_cap', 0.40)),
+        sinkhorn_positive_redistribute_mode=str(getattr(args, 'sinkhorn_positive_redistribute_mode', 'best_y')),
     )
 
 

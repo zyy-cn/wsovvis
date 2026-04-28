@@ -268,6 +268,12 @@ class ReservoirSinkhornNoUnknownConfig:
     sinkhorn_yprime_support_ema: float = 0.90
     sinkhorn_null_collapse_max: float = 0.85
     sinkhorn_yprime_demand_min_guard: float = 0.20
+    # V2-C positive-support protection defaults are off for compatibility.
+    sinkhorn_enable_positive_protection: bool = False
+    sinkhorn_positive_margin_threshold: float = 0.15
+    sinkhorn_positive_margin_temp: float = 0.10
+    sinkhorn_positive_null_cap: float = 0.40
+    sinkhorn_positive_redistribute_mode: str = 'best_y'
 
 
 def _sinkhorn_observed_ids(group: Sequence[Mapping[str, Any]]) -> List[int]:
@@ -587,6 +593,117 @@ def _apply_support_null_to_pack(
     return pack2, scores2, metrics
 
 
+
+def _apply_positive_protection_to_assignment(
+    P: torch.Tensor,
+    scores: torch.Tensor,
+    pack: Mapping[str, Any],
+    *,
+    enable_positive_protection: bool,
+    margin_threshold: float,
+    margin_temp: float,
+    positive_null_cap: float,
+    redistribute_mode: str = 'best_y',
+    null_logit_bias: float = 0.0,
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    """Limit NULL mass for high relative-margin rows.
+
+    This is a non-GT proxy protection: if a trajectory strongly prefers one
+    Y' column over competing Y' columns and the fixed NULL bias, keep a minimum
+    amount of row mass in non-NULL assignment. NULL remains available for low
+    confidence/background rows.
+    """
+    metrics: Dict[str, Any] = {
+        'positive_protection_enabled': bool(enable_positive_protection),
+        'positive_protected_row_rate': 0.0,
+        'positive_strength_mean': 0.0,
+        'positive_margin_mean': 0.0,
+        'positive_margin_p50': 0.0,
+        'positive_margin_p90': 0.0,
+        'positive_null_mass_before_mean': 0.0,
+        'positive_null_mass_after_mean': 0.0,
+        'positive_null_excess_moved_mean': 0.0,
+        'positive_redistributed_mass_mean': 0.0,
+        'positive_null_cap': float(positive_null_cap),
+    }
+    if not bool(enable_positive_protection):
+        return P, metrics
+    if scores.ndim != 3 or P.ndim != 3 or tuple(scores.shape) != tuple(P.shape):
+        return P, metrics
+    q_mask = pack['q_mask'].bool()
+    c_mask = pack['c_mask'].bool()
+    kind = pack['kind']
+    yprime_mask = c_mask & (kind == 1)
+    null_mask = c_mask & (kind == 0)
+    if not bool(yprime_mask.any()) or not bool(null_mask.any()):
+        return P, metrics
+
+    eps = 1.0e-8
+    B, Q, M = scores.shape
+    masked_y = scores.float().masked_fill(~yprime_mask[:, None, :], -1.0e4)
+    best_vals, best_idx = masked_y.max(dim=2)  # [B,Q]
+    comp = masked_y.clone()
+    comp.scatter_(2, best_idx[:, :, None], -1.0e4)
+    second_vals = comp.max(dim=2).values
+    second_vals = torch.maximum(second_vals, torch.full_like(second_vals, float(null_logit_bias)))
+    margin = (best_vals - second_vals).masked_fill(~q_mask, 0.0)
+    valid_best = q_mask & (best_vals > -1.0e3)
+    temp = max(float(margin_temp), 1.0e-6)
+    strength = torch.sigmoid((margin - float(margin_threshold)) / temp).masked_fill(~valid_best, 0.0)
+
+    cap = float(max(0.0, min(1.0, positive_null_cap)))
+    row_load = P.float().sum(dim=2).clamp_min(eps)
+    null_mass_before = P.float().masked_fill(~null_mask[:, None, :], 0.0).sum(dim=2)
+    # Low strength rows have cap ~1.0; high strength rows approach positive_null_cap.
+    row_null_cap_fraction = 1.0 - strength * (1.0 - cap)
+    max_null_mass = row_load * row_null_cap_fraction
+    excess = (null_mass_before - max_null_mass).clamp_min(0.0).masked_fill(~valid_best, 0.0)
+    if float(excess.detach().sum().cpu().item()) <= 0.0:
+        with torch.no_grad():
+            valid_m = margin[valid_best]
+            if valid_m.numel():
+                metrics.update({
+                    'positive_protected_row_rate': float((strength[valid_best] > 0.5).float().mean().cpu().item()),
+                    'positive_strength_mean': float(strength[valid_best].float().mean().cpu().item()),
+                    'positive_margin_mean': float(valid_m.float().mean().cpu().item()),
+                    'positive_margin_p50': float(torch.quantile(valid_m.float(), 0.5).cpu().item()),
+                    'positive_margin_p90': float(torch.quantile(valid_m.float(), 0.9).cpu().item()),
+                    'positive_null_mass_before_mean': float((null_mass_before[valid_best] / row_load[valid_best]).float().mean().cpu().item()),
+                    'positive_null_mass_after_mean': float((null_mass_before[valid_best] / row_load[valid_best]).float().mean().cpu().item()),
+                })
+        return P, metrics
+
+    P2 = P.clone()
+    null_mass_safe = null_mass_before.clamp_min(eps)
+    null_share = P2.float().masked_fill(~null_mask[:, None, :], 0.0) / null_mass_safe[:, :, None]
+    null_delta = null_share * excess[:, :, None]
+    P2 = P2 - null_delta.to(dtype=P2.dtype)
+    add = torch.zeros_like(P2)
+    # First version intentionally redistributes to best_y only for a clear audit surface.
+    add.scatter_add_(2, best_idx[:, :, None], excess[:, :, None].to(dtype=add.dtype))
+    P2 = P2 + add
+    P2 = P2.clamp_min(0.0)
+    null_mass_after = P2.float().masked_fill(~null_mask[:, None, :], 0.0).sum(dim=2)
+
+    with torch.no_grad():
+        valid_m = margin[valid_best]
+        protected = valid_best & (strength > 0.5)
+        metrics.update({
+            'positive_protection_enabled': True,
+            'positive_protected_row_rate': float(protected.float().sum().cpu().item() / max(float(q_mask.float().sum().cpu().item()), 1.0)),
+            'positive_strength_mean': float(strength[valid_best].float().mean().cpu().item()) if bool(valid_best.any()) else 0.0,
+            'positive_margin_mean': float(valid_m.float().mean().cpu().item()) if valid_m.numel() else 0.0,
+            'positive_margin_p50': float(torch.quantile(valid_m.float(), 0.5).cpu().item()) if valid_m.numel() else 0.0,
+            'positive_margin_p90': float(torch.quantile(valid_m.float(), 0.9).cpu().item()) if valid_m.numel() else 0.0,
+            'positive_null_mass_before_mean': float((null_mass_before[valid_best] / row_load[valid_best]).float().mean().cpu().item()) if bool(valid_best.any()) else 0.0,
+            'positive_null_mass_after_mean': float((null_mass_after[valid_best] / row_load[valid_best]).float().mean().cpu().item()) if bool(valid_best.any()) else 0.0,
+            'positive_null_excess_moved_mean': float((excess[valid_best] / row_load[valid_best]).float().mean().cpu().item()) if bool(valid_best.any()) else 0.0,
+            'positive_redistributed_mass_mean': float(excess[valid_best].float().mean().cpu().item()) if bool(valid_best.any()) else 0.0,
+            'positive_null_cap': float(cap),
+            'positive_redistribute_mode_best_y': 1.0 if str(redistribute_mode) == 'best_y' else 0.0,
+        })
+    return P2, metrics
+
 def _sinkhorn_train_stage(
     *,
     stage_id: str,
@@ -631,6 +748,11 @@ def _sinkhorn_train_stage(
     yprime_support_ema: float = 0.90,
     null_collapse_max: float = 0.85,
     yprime_demand_min_guard: float = 0.20,
+    enable_positive_protection: bool = False,
+    positive_margin_threshold: float = 0.15,
+    positive_margin_temp: float = 0.10,
+    positive_null_cap: float = 0.40,
+    positive_redistribute_mode: str = 'best_y',
 ) -> Dict[str, Any]:
     from videocutler.ext_stageb_ovvis.algorithms.sinkhorn_assignment import (
         SinkhornAssignmentConfig,
@@ -690,6 +812,18 @@ def _sinkhorn_train_stage(
                 yprime_support_ema=float(yprime_support_ema),
             )
             P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)
+            P, positive_metric_row = _apply_positive_protection_to_assignment(
+                P,
+                scores,
+                pack,
+                enable_positive_protection=bool(enable_positive_protection) and bool(support_null_active),
+                margin_threshold=float(positive_margin_threshold),
+                margin_temp=float(positive_margin_temp),
+                positive_null_cap=float(positive_null_cap),
+                redistribute_mode=str(positive_redistribute_mode),
+                null_logit_bias=float(null_logit_bias),
+            )
+            support_metric_row.update(positive_metric_row)
             with torch.no_grad():
                 null_mask = pack['c_mask'].bool() & (pack['kind'] == 0)
                 nonnull_mask = pack['c_mask'].bool() & (pack['kind'] > 0)
@@ -804,7 +938,11 @@ def _sinkhorn_train_stage(
             key: _mean_or_zero([float(row.get(key, 0.0)) for row in support_null_epoch_metrics])
             for key in (
                 'null_mass_mean', 'nonnull_mass_mean', 'null_demand_mean', 'null_residual_uncapped_mean', 'null_cap_mean', 'null_demand_cap_ratio', 'yprime_demand_mean',
-                'yprime_low_demand_rate', 'null_collapse_guard_triggered', 'support_demand_guard_triggered'
+                'yprime_low_demand_rate', 'null_collapse_guard_triggered', 'support_demand_guard_triggered',
+                'positive_protection_enabled', 'positive_protected_row_rate', 'positive_strength_mean',
+                'positive_margin_mean', 'positive_margin_p50', 'positive_margin_p90',
+                'positive_null_mass_before_mean', 'positive_null_mass_after_mean',
+                'positive_null_excess_moved_mean', 'positive_redistributed_mass_mean', 'positive_null_cap'
             )
         } if support_null_epoch_metrics else {},
         'private_support_state_snapshot': {f'{int(k[0])}:{int(k[1])}': float(v) for k, v in support_state.items()},
@@ -838,6 +976,11 @@ def _sinkhorn_collect_responsibility_rows(
     yprime_support_topk: int = 2,
     yprime_support_temp: float = 0.25,
     support_state_snapshot: Mapping[str, float] | None = None,
+    enable_positive_protection: bool = False,
+    positive_margin_threshold: float = 0.15,
+    positive_margin_temp: float = 0.10,
+    positive_null_cap: float = 0.40,
+    positive_redistribute_mode: str = 'best_y',
 ) -> List[Record]:
     from videocutler.ext_stageb_ovvis.algorithms.sinkhorn_assignment import SinkhornAssignmentConfig, capped_sinkhorn_assignment
     rows: List[Record] = []
@@ -874,7 +1017,20 @@ def _sinkhorn_collect_responsibility_rows(
                     yprime_support_temp=float(yprime_support_temp),
                     yprime_support_ema=1.0 if support_state_snapshot else 0.0,
                 )
-            P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)[0]
+            P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)
+            P, positive_metric_row = _apply_positive_protection_to_assignment(
+                P,
+                scores,
+                pack,
+                enable_positive_protection=bool(enable_positive_protection) and bool(support_metric_row.get('support_null_active', False)),
+                margin_threshold=float(positive_margin_threshold),
+                margin_temp=float(positive_margin_temp),
+                positive_null_cap=float(positive_null_cap),
+                redistribute_mode=str(positive_redistribute_mode),
+                null_logit_bias=float(null_logit_bias),
+            )
+            support_metric_row.update(positive_metric_row)
+            P = P[0]
             raw_ids = [int(x) for x in pack['raw_ids'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.int64).tolist()]
             kind = [int(x) for x in pack['kind'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.int64).tolist()]
             demand_vals = [float(x) for x in pack['demand'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.float64).tolist()]
@@ -978,6 +1134,11 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         yprime_support_ema=float(config.sinkhorn_yprime_support_ema),
         null_collapse_max=float(config.sinkhorn_null_collapse_max),
         yprime_demand_min_guard=float(config.sinkhorn_yprime_demand_min_guard),
+        enable_positive_protection=bool(config.sinkhorn_enable_positive_protection),
+        positive_margin_threshold=float(config.sinkhorn_positive_margin_threshold),
+        positive_margin_temp=float(config.sinkhorn_positive_margin_temp),
+        positive_null_cap=float(config.sinkhorn_positive_null_cap),
+        positive_redistribute_mode=str(config.sinkhorn_positive_redistribute_mode),
     )
     train_dir = output_root / 'train' / 'prealign'
     ckpt_dir = train_dir / 'checkpoints'
@@ -987,7 +1148,7 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'text_projector_state_dict': projector.state_dict(),
         'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
         'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
-        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'support_null_state_snapshot': dict(pre_stage.get('private_support_state_snapshot', {})), 'support_null_config': {'enable_null_column': bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only', 'null_logit_bias': float(config.sinkhorn_null_logit_bias), 'null_residual': bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only', 'null_demand_cap_ratio': float(config.sinkhorn_null_demand_cap_ratio), 'yprime_demand_mode': str(config.sinkhorn_yprime_demand_mode), 'yprime_demand_min': float(config.sinkhorn_yprime_demand_min), 'yprime_support_topk': int(config.sinkhorn_yprime_support_topk), 'yprime_support_temp': float(config.sinkhorn_yprime_support_temp)}, 'vocab_scope_policy': vocab_scope_policy
+        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'support_null_state_snapshot': dict(pre_stage.get('private_support_state_snapshot', {})), 'support_null_config': {'enable_null_column': bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only', 'null_logit_bias': float(config.sinkhorn_null_logit_bias), 'null_residual': bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only', 'null_demand_cap_ratio': float(config.sinkhorn_null_demand_cap_ratio), 'yprime_demand_mode': str(config.sinkhorn_yprime_demand_mode), 'yprime_demand_min': float(config.sinkhorn_yprime_demand_min), 'yprime_support_topk': int(config.sinkhorn_yprime_support_topk), 'yprime_support_temp': float(config.sinkhorn_yprime_support_temp), 'positive_protection_enabled': bool(config.sinkhorn_enable_positive_protection), 'positive_margin_threshold': float(config.sinkhorn_positive_margin_threshold), 'positive_margin_temp': float(config.sinkhorn_positive_margin_temp), 'positive_null_cap': float(config.sinkhorn_positive_null_cap), 'positive_redistribute_mode': str(config.sinkhorn_positive_redistribute_mode)}, 'vocab_scope_policy': vocab_scope_policy
     }, ckpt_last_path)
     pre_proxy_rows = _sinkhorn_collect_responsibility_rows(
         stage_id='prealign', dataset_name=str(config.dataset_name), groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='prealign', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=0.0, sinkhorn_final_rerank_lambda_r=float(config.sinkhorn_final_rerank_lambda_r), vocab_scope_policy=vocab_scope_policy,
@@ -1000,6 +1161,11 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         yprime_support_topk=int(config.sinkhorn_yprime_support_topk),
         yprime_support_temp=float(config.sinkhorn_yprime_support_temp),
         support_state_snapshot=pre_stage.get('private_support_state_snapshot', {}),
+        enable_positive_protection=bool(config.sinkhorn_enable_positive_protection),
+        positive_margin_threshold=float(config.sinkhorn_positive_margin_threshold),
+        positive_margin_temp=float(config.sinkhorn_positive_margin_temp),
+        positive_null_cap=float(config.sinkhorn_positive_null_cap),
+        positive_redistribute_mode=str(config.sinkhorn_positive_redistribute_mode),
     )
     _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
     _write_jsonl(train_dir / 'responsibility_records.jsonl', pre_proxy_rows)
