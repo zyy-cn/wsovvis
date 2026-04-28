@@ -659,21 +659,21 @@ def _sinkhorn_collect_responsibility_rows(
             for q, ex in enumerate(pack['groups'][0]):
                 row_mass = P[q, :len(raw_ids)].detach().cpu().numpy().astype(np.float64)
                 total = float(np.sum(row_mass))
-            if total <= 1e-12:
-                # Fallback to local softmax when column coverage leaves a row with no mass.
-                local_scores = scores[0, q, :len(raw_ids)]
-                row_mass = torch.softmax(local_scores, dim=0).detach().cpu().numpy().astype(np.float64)
-                total = float(np.sum(row_mass))
-            probs = (row_mass / max(total, 1e-12)).astype(np.float64).tolist()
-            rerank_lambda = float(sinkhorn_final_rerank_lambda_r)
-            if rerank_lambda > 0.0 and len(probs) > 0:
-                local_scores = scores[0, q, :len(raw_ids)].detach().cpu().numpy().astype(np.float64)
-                final_scores = local_scores + rerank_lambda * np.log(np.asarray(probs, dtype=np.float64) + 1.0e-8)
-                final_scores = final_scores - float(np.max(final_scores))
-                final_probs = np.exp(final_scores)
-                final_probs = final_probs / max(float(np.sum(final_probs)), 1.0e-12)
-                probs = final_probs.astype(np.float64).tolist()
-            rows.append({
+                if total <= 1e-12:
+                    # Fallback to local softmax when column coverage leaves a row with no mass.
+                    local_scores = scores[0, q, :len(raw_ids)]
+                    row_mass = torch.softmax(local_scores, dim=0).detach().cpu().numpy().astype(np.float64)
+                    total = float(np.sum(row_mass))
+                probs = (row_mass / max(total, 1e-12)).astype(np.float64).tolist()
+                rerank_lambda = float(sinkhorn_final_rerank_lambda_r)
+                if rerank_lambda > 0.0 and len(probs) > 0:
+                    local_scores = scores[0, q, :len(raw_ids)].detach().cpu().numpy().astype(np.float64)
+                    final_scores = local_scores + rerank_lambda * np.log(np.asarray(probs, dtype=np.float64) + 1.0e-8)
+                    final_scores = final_scores - float(np.max(final_scores))
+                    final_probs = np.exp(final_scores)
+                    final_probs = final_probs / max(float(np.sum(final_probs)), 1.0e-12)
+                    probs = final_probs.astype(np.float64).tolist()
+                rows.append({
                     'dataset_name': str(dataset_name),
                     'clip_id': int(ex['clip_id']),
                     'video_id': int(ex['video_id']),
