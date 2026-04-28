@@ -259,6 +259,7 @@ class ReservoirSinkhornNoUnknownConfig:
     sinkhorn_enable_null_column: bool = False
     sinkhorn_null_logit_bias: float = 0.0
     sinkhorn_null_residual: bool = False
+    sinkhorn_null_demand_cap_ratio: float = 1.0
     sinkhorn_support_warmup_epochs: int = 0
     sinkhorn_yprime_demand_mode: str = 'fixed'
     sinkhorn_yprime_demand_min: float = 0.10
@@ -475,6 +476,7 @@ def _apply_support_null_to_pack(
     enable_null_column: bool,
     null_logit_bias: float,
     null_residual: bool,
+    null_demand_cap_ratio: float,
     yprime_demand_mode: str,
     yprime_demand_min: float,
     yprime_support_topk: int,
@@ -503,7 +505,7 @@ def _apply_support_null_to_pack(
     q_mask = pack['q_mask'].bool()
     yprime_mask = c_mask.bool() & (kind == 1)
 
-    if str(yprime_demand_mode) == 'support_ema':
+    if str(yprime_demand_mode) in ('support_ema', 'relative_margin_ema'):
         with torch.no_grad():
             new_demand = demand.clone()
             min_d = float(max(0.0, min(1.0, yprime_demand_min)))
@@ -518,7 +520,23 @@ def _apply_support_null_to_pack(
                         conf = min_d
                     else:
                         k = min(int(topk), int(vals.numel()))
-                        support_score = vals.topk(k=k).values.mean()
+                        if str(yprime_demand_mode) == 'relative_margin_ema':
+                            # Use relative evidence, not absolute score. A Y' class
+                            # only gets high demand when some trajectories prefer it
+                            # over competing Y' columns and the fixed NULL bias. This
+                            # prevents generic/hub trajectories from lifting every
+                            # Y' demand to ~1.0.
+                            comp_mask = yprime_mask[b].clone()
+                            comp_mask[int(m)] = False
+                            if bool(comp_mask.any()):
+                                comp = scores[b, q_valid][:, comp_mask].detach().float().amax(dim=1)
+                                comp = torch.maximum(comp, torch.full_like(comp, float(null_logit_bias)))
+                            else:
+                                comp = torch.full_like(vals, float(null_logit_bias))
+                            margin_vals = vals - comp
+                            support_score = margin_vals.topk(k=k).values.mean()
+                        else:
+                            support_score = vals.topk(k=k).values.mean()
                         conf = float(torch.sigmoid(support_score / temp).detach().cpu().item())
                         conf = max(min_d, min(1.0, conf))
                     group0 = pack['groups'][b][0]
@@ -538,9 +556,16 @@ def _apply_support_null_to_pack(
     q_count = q_mask.float().sum(dim=1).clamp_min(1.0)
     y_demand_sum = demand.masked_fill(~yprime_mask, 0.0).sum(dim=1)
     if bool(null_residual):
-        null_demand = (q_count - y_demand_sum).clamp_min(1.0e-6)
+        null_residual_uncapped = (q_count - y_demand_sum).clamp_min(1.0e-6)
     else:
-        null_demand = torch.ones_like(q_count).clamp_min(1.0e-6)
+        null_residual_uncapped = torch.ones_like(q_count).clamp_min(1.0e-6)
+    cap_ratio = float(max(0.0, null_demand_cap_ratio))
+    if cap_ratio > 0.0 and cap_ratio < 1.0e6:
+        null_cap = (q_count * cap_ratio).clamp_min(1.0e-6)
+        null_demand = torch.minimum(null_residual_uncapped, null_cap)
+    else:
+        null_cap = torch.full_like(q_count, float('inf'))
+        null_demand = null_residual_uncapped
     demand2 = torch.cat([demand, null_demand[:, None]], dim=1)
     pack2 = dict(pack)
     pack2.update({'c_mask': c_mask2, 'kind': kind2, 'yidx': yidx2, 'raw_ids': raw_ids2, 'demand': demand2})
@@ -551,6 +576,9 @@ def _apply_support_null_to_pack(
             'support_null_active': True,
             'support_epoch_index': int(epoch_index),
             'null_demand_mean': float(null_demand.detach().float().mean().cpu().item()),
+            'null_residual_uncapped_mean': float(null_residual_uncapped.detach().float().mean().cpu().item()),
+            'null_cap_mean': float(torch.where(torch.isfinite(null_cap), null_cap, torch.zeros_like(null_cap)).detach().float().mean().cpu().item()),
+            'null_demand_cap_ratio': float(null_demand_cap_ratio),
             'yprime_demand_mean': float(y_d.detach().float().mean().cpu().item()) if y_d.numel() else 0.0,
             'yprime_demand_min_observed': float(y_d.detach().float().min().cpu().item()) if y_d.numel() else 0.0,
             'yprime_demand_max_observed': float(y_d.detach().float().max().cpu().item()) if y_d.numel() else 0.0,
@@ -594,6 +622,7 @@ def _sinkhorn_train_stage(
     enable_null_column: bool = False,
     null_logit_bias: float = 0.0,
     null_residual: bool = False,
+    null_demand_cap_ratio: float = 1.0,
     support_warmup_epochs: int = 0,
     yprime_demand_mode: str = 'fixed',
     yprime_demand_min: float = 0.10,
@@ -653,6 +682,7 @@ def _sinkhorn_train_stage(
                 enable_null_column=support_null_active,
                 null_logit_bias=float(null_logit_bias),
                 null_residual=bool(null_residual),
+                null_demand_cap_ratio=float(null_demand_cap_ratio),
                 yprime_demand_mode=str(yprime_demand_mode),
                 yprime_demand_min=float(yprime_demand_min),
                 yprime_support_topk=int(yprime_support_topk),
@@ -773,7 +803,7 @@ def _sinkhorn_train_stage(
         'support_null_metric_summary': {
             key: _mean_or_zero([float(row.get(key, 0.0)) for row in support_null_epoch_metrics])
             for key in (
-                'null_mass_mean', 'nonnull_mass_mean', 'null_demand_mean', 'yprime_demand_mean',
+                'null_mass_mean', 'nonnull_mass_mean', 'null_demand_mean', 'null_residual_uncapped_mean', 'null_cap_mean', 'null_demand_cap_ratio', 'yprime_demand_mean',
                 'yprime_low_demand_rate', 'null_collapse_guard_triggered', 'support_demand_guard_triggered'
             )
         } if support_null_epoch_metrics else {},
@@ -895,6 +925,7 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         enable_null_column=bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only',
         null_logit_bias=float(config.sinkhorn_null_logit_bias),
         null_residual=bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only',
+        null_demand_cap_ratio=float(config.sinkhorn_null_demand_cap_ratio),
         support_warmup_epochs=int(config.sinkhorn_support_warmup_epochs),
         yprime_demand_mode=str(config.sinkhorn_yprime_demand_mode),
         yprime_demand_min=float(config.sinkhorn_yprime_demand_min),

@@ -282,6 +282,7 @@ def run_train_pipeline(plan: TrainPlan) -> Dict[str, Any]:
                 sinkhorn_enable_null_column=bool(getattr(plan, 'sinkhorn_enable_null_column', False)),
                 sinkhorn_null_logit_bias=float(getattr(plan, 'sinkhorn_null_logit_bias', 0.0)),
                 sinkhorn_null_residual=bool(getattr(plan, 'sinkhorn_null_residual', False)),
+                sinkhorn_null_demand_cap_ratio=float(getattr(plan, 'sinkhorn_null_demand_cap_ratio', 1.0)),
                 sinkhorn_support_warmup_epochs=max(0, int(getattr(plan, 'sinkhorn_support_warmup_epochs', 0))),
                 sinkhorn_yprime_demand_mode=str(getattr(plan, 'sinkhorn_yprime_demand_mode', 'fixed')),
                 sinkhorn_yprime_demand_min=float(getattr(plan, 'sinkhorn_yprime_demand_min', 0.10)),
