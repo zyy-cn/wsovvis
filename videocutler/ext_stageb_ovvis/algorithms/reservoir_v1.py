@@ -807,6 +807,7 @@ def _sinkhorn_train_stage(
                 'yprime_low_demand_rate', 'null_collapse_guard_triggered', 'support_demand_guard_triggered'
             )
         } if support_null_epoch_metrics else {},
+        'private_support_state_snapshot': {f'{int(k[0])}:{int(k[1])}': float(v) for k, v in support_state.items()},
         'vocab_scope_policy': dict(vocab_scope_policy),
     }
 
@@ -828,10 +829,27 @@ def _sinkhorn_collect_responsibility_rows(
     extra_demand: float,
     sinkhorn_final_rerank_lambda_r: float = 0.0,
     vocab_scope_policy: Mapping[str, Any] | None = None,
+    enable_null_column: bool = False,
+    null_logit_bias: float = 0.0,
+    null_residual: bool = False,
+    null_demand_cap_ratio: float = 1.0,
+    yprime_demand_mode: str = 'fixed',
+    yprime_demand_min: float = 0.10,
+    yprime_support_topk: int = 2,
+    yprime_support_temp: float = 0.25,
+    support_state_snapshot: Mapping[str, float] | None = None,
 ) -> List[Record]:
     from videocutler.ext_stageb_ovvis.algorithms.sinkhorn_assignment import SinkhornAssignmentConfig, capped_sinkhorn_assignment
     rows: List[Record] = []
     cfg = SinkhornAssignmentConfig(tau=float(sinkhorn_tau), iters=int(sinkhorn_iters), row_cap_scale=float(sinkhorn_row_cap_scale))
+    support_state: Dict[Tuple[int, int], float] = {}
+    if support_state_snapshot:
+        for key, value in dict(support_state_snapshot).items():
+            try:
+                a, b = str(key).split(':', 1)
+                support_state[(int(a), int(b))] = float(value)
+            except Exception:
+                continue
     projector.eval()
     with torch.no_grad():
         for group in groups:
@@ -839,11 +857,32 @@ def _sinkhorn_collect_responsibility_rows(
             if not pack:
                 continue
             scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, _compute_t_dis(theta_t))
+            support_metric_row: Dict[str, Any] = {'support_null_enabled': False, 'support_null_active': False}
+            if bool(enable_null_column) and str(mode) == 'prealign':
+                pack, scores, support_metric_row = _apply_support_null_to_pack(
+                    pack,
+                    scores,
+                    epoch_index=10**9,
+                    support_state=support_state,
+                    enable_null_column=True,
+                    null_logit_bias=float(null_logit_bias),
+                    null_residual=bool(null_residual),
+                    null_demand_cap_ratio=float(null_demand_cap_ratio),
+                    yprime_demand_mode=str(yprime_demand_mode),
+                    yprime_demand_min=float(yprime_demand_min),
+                    yprime_support_topk=int(yprime_support_topk),
+                    yprime_support_temp=float(yprime_support_temp),
+                    yprime_support_ema=1.0 if support_state_snapshot else 0.0,
+                )
             P = capped_sinkhorn_assignment(scores, pack['q_mask'], pack['c_mask'], pack['demand'], config=cfg)[0]
             raw_ids = [int(x) for x in pack['raw_ids'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.int64).tolist()]
             kind = [int(x) for x in pack['kind'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.int64).tolist()]
+            demand_vals = [float(x) for x in pack['demand'][0][pack['c_mask'][0]].detach().cpu().numpy().astype(np.float64).tolist()]
             known_ids = [raw for raw, k in zip(raw_ids, kind) if int(k) == 1]
             extra_ids = [raw for raw, k in zip(raw_ids, kind) if int(k) == 2]
+            null_ids = [raw for raw, k in zip(raw_ids, kind) if int(k) == 0]
+            demand_by_raw_id = {str(int(raw)): float(val) for raw, val in zip(raw_ids, demand_vals)}
+            kind_by_raw_id = {str(int(raw)): int(k) for raw, k in zip(raw_ids, kind)}
             for q, ex in enumerate(pack['groups'][0]):
                 row_mass = P[q, :len(raw_ids)].detach().cpu().numpy().astype(np.float64)
                 total = float(np.sum(row_mass))
@@ -868,7 +907,12 @@ def _sinkhorn_collect_responsibility_rows(
                     'trajectory_id': str(ex['trajectory_id']),
                     'candidate_ids_known': list(known_ids),
                     'candidate_ids_extra': list(extra_ids),
+                    'candidate_ids_null': list(null_ids),
                     'candidate_scope_policy': dict(vocab_scope_policy or {}),
+                    'candidate_demand_by_raw_id': dict(demand_by_raw_id),
+                    'candidate_kind_by_raw_id': dict(kind_by_raw_id),
+                    'support_null_active': bool(support_metric_row.get('support_null_active', False)),
+                    'support_null_metrics': dict(support_metric_row),
                     'candidate_outside_train_vocab_count': int(sum(1 for x in (list(known_ids) + list(extra_ids)) if int(x) not in set((vocab_scope_policy or {}).get('allowed_train_vocab_raw_ids', [])))) if vocab_scope_policy else 0,
                     'unknown_disabled': True,
                     'training_semantics': 'sinkhorn_yprime_nce_no_unknown',
@@ -943,14 +987,27 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'text_projector_state_dict': projector.state_dict(),
         'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
         'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
-        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy
+        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'support_null_state_snapshot': dict(pre_stage.get('private_support_state_snapshot', {})), 'support_null_config': {'enable_null_column': bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only', 'null_logit_bias': float(config.sinkhorn_null_logit_bias), 'null_residual': bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only', 'null_demand_cap_ratio': float(config.sinkhorn_null_demand_cap_ratio), 'yprime_demand_mode': str(config.sinkhorn_yprime_demand_mode), 'yprime_demand_min': float(config.sinkhorn_yprime_demand_min), 'yprime_support_topk': int(config.sinkhorn_yprime_support_topk), 'yprime_support_temp': float(config.sinkhorn_yprime_support_temp)}, 'vocab_scope_policy': vocab_scope_policy
     }, ckpt_last_path)
-    pre_proxy_rows = _sinkhorn_collect_responsibility_rows(stage_id='prealign', dataset_name=str(config.dataset_name), groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='prealign', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=0.0, sinkhorn_final_rerank_lambda_r=float(config.sinkhorn_final_rerank_lambda_r), vocab_scope_policy=vocab_scope_policy)
+    pre_proxy_rows = _sinkhorn_collect_responsibility_rows(
+        stage_id='prealign', dataset_name=str(config.dataset_name), groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='prealign', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=0.0, sinkhorn_final_rerank_lambda_r=float(config.sinkhorn_final_rerank_lambda_r), vocab_scope_policy=vocab_scope_policy,
+        enable_null_column=(bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only'),
+        null_logit_bias=float(config.sinkhorn_null_logit_bias),
+        null_residual=(bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only'),
+        null_demand_cap_ratio=float(config.sinkhorn_null_demand_cap_ratio),
+        yprime_demand_mode=str(config.sinkhorn_yprime_demand_mode),
+        yprime_demand_min=float(config.sinkhorn_yprime_demand_min),
+        yprime_support_topk=int(config.sinkhorn_yprime_support_topk),
+        yprime_support_temp=float(config.sinkhorn_yprime_support_temp),
+        support_state_snapshot=pre_stage.get('private_support_state_snapshot', {}),
+    )
     _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
+    _write_jsonl(train_dir / 'responsibility_records.jsonl', pre_proxy_rows)
     pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
     _write_json(train_dir / 'train_state.json', pre_train_state)
     pre_scope_contract = _sinkhorn_scope_contract_fields(vocab_scope_policy)
-    pre_summary = {**pre_stage, **pre_scope_contract, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
+    pre_stage_public = {k: v for k, v in dict(pre_stage).items() if k != 'private_support_state_snapshot'}
+    pre_summary = {**pre_stage_public, **pre_scope_contract, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
     _write_json(train_dir / 'stage_summary.json', pre_summary)
     if bool(pre_stage.get('support_null_enabled', False)):
         _write_json(train_dir / 'support_null_summary.json', {
@@ -962,7 +1019,7 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
             'null_semantics': 'non_semantic_assignment_slack_not_unknown_class',
         })
 
-    stage_reports = [{'stage_id': 'prealign', 'responsibility_records_path': 'train/prealign/proxy_records.jsonl', 'train_state_path': 'train/prealign/train_state.json', 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'record_count_output': int(len(pre_proxy_rows)), **pre_stage}]
+    stage_reports = [{'stage_id': 'prealign', 'responsibility_records_path': 'train/prealign/responsibility_records.jsonl', 'proxy_records_path': 'train/prealign/proxy_records.jsonl', 'train_state_path': 'train/prealign/train_state.json', 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'record_count_output': int(len(pre_proxy_rows)), **pre_stage_public}]
     selected_checkpoint_path = 'train/prealign/checkpoints/prealign_last.pth'
     final_count = len(pre_proxy_rows)
 
