@@ -107,6 +107,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--sinkhorn_positive_margin_temp', type=float, default=0.10)
     p.add_argument('--sinkhorn_positive_null_cap', type=float, default=0.40)
     p.add_argument('--sinkhorn_positive_redistribute_mode', default='best_y', choices=('best_y',))
+
+    # Oracle static residual-peeling candidate masking. Defaults are inert.
+    p.add_argument('--residual_peeling_mode', default='off', choices=('off','oracle_static'))
+    p.add_argument('--residual_schedule_csv', default='')
+    p.add_argument('--residual_variant', default='person_aware')
+    p.add_argument('--residual_annotation_json', default='')
+    p.add_argument('--residual_split_json', default='')
+    p.add_argument('--residual_round_epoch_plan', default='5,5,3,2')
+    p.add_argument('--residual_candidate_policy', default='base_residual', choices=('base_residual',))
+    p.add_argument('--known_null_gate', default='off', choices=('off','margin'))
+    p.add_argument('--known_null_margin', type=float, default=0.10)
     return p.parse_args()
 def main() -> int:
     result=run_train_pipeline(resolve_train_plan(parse_args()))

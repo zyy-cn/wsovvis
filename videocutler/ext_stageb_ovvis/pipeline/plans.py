@@ -112,6 +112,15 @@ class TrainPlan:
     sinkhorn_positive_margin_temp:float=0.10
     sinkhorn_positive_null_cap:float=0.40
     sinkhorn_positive_redistribute_mode:str='best_y'
+    residual_peeling_mode:str='off'
+    residual_schedule_csv:str=''
+    residual_variant:str='person_aware'
+    residual_annotation_json:str=''
+    residual_split_json:str=''
+    residual_round_epoch_plan:str='5,5,3,2'
+    residual_candidate_policy:str='base_residual'
+    known_null_gate:str='off'
+    known_null_margin:float=0.10
 
 
     def __post_init__(self):
@@ -207,6 +216,15 @@ def resolve_train_plan(args)->TrainPlan:
         sinkhorn_positive_margin_temp=max(1.0e-6, float(getattr(args, 'sinkhorn_positive_margin_temp', 0.10))),
         sinkhorn_positive_null_cap=float(getattr(args, 'sinkhorn_positive_null_cap', 0.40)),
         sinkhorn_positive_redistribute_mode=str(getattr(args, 'sinkhorn_positive_redistribute_mode', 'best_y')),
+        residual_peeling_mode=str(getattr(args, 'residual_peeling_mode', 'off')),
+        residual_schedule_csv=str(getattr(args, 'residual_schedule_csv', '') or ''),
+        residual_variant=str(getattr(args, 'residual_variant', 'person_aware')),
+        residual_annotation_json=str(getattr(args, 'residual_annotation_json', '') or ''),
+        residual_split_json=str(getattr(args, 'residual_split_json', '') or ''),
+        residual_round_epoch_plan=str(getattr(args, 'residual_round_epoch_plan', '5,5,3,2')),
+        residual_candidate_policy=str(getattr(args, 'residual_candidate_policy', 'base_residual')),
+        known_null_gate=str(getattr(args, 'known_null_gate', 'off')),
+        known_null_margin=float(getattr(args, 'known_null_margin', 0.10)),
     )
 
 

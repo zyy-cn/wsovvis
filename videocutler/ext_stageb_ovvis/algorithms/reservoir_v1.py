@@ -22,6 +22,16 @@ from videocutler.ext_stageb_ovvis.algorithms.prealign import _prepare_examples a
 from videocutler.ext_stageb_ovvis.algorithms.soft_em import _prepare_examples as _prepare_softem_examples, _build_runtime_extra_cache, _apply_runtime_extra_cache
 from videocutler.ext_stageb_ovvis.models.projector import Projector, ProjectorConfig
 from videocutler.ext_stageb_ovvis.utils.unknown_metrics import UnknownMetricsAccumulator
+try:
+    from videocutler.ext_stageb_ovvis.training.residual_peeling_schedule import (
+        ResidualPeelingSchedule,
+        apply_residual_candidate_override_to_groups,
+        load_oracle_static_residual_schedule,
+    )
+except Exception:  # keeps legacy imports robust when overlay helper is absent
+    ResidualPeelingSchedule = Any  # type: ignore
+    apply_residual_candidate_override_to_groups = None  # type: ignore
+    load_oracle_static_residual_schedule = None  # type: ignore
 Record=Dict[str,Any]
 @dataclass(frozen=True)
 class ReservoirPrealignConfig:
@@ -274,6 +284,15 @@ class ReservoirSinkhornNoUnknownConfig:
     sinkhorn_positive_margin_temp: float = 0.10
     sinkhorn_positive_null_cap: float = 0.40
     sinkhorn_positive_redistribute_mode: str = 'best_y'
+    residual_peeling_mode: str = 'off'
+    residual_schedule_csv: str = ''
+    residual_variant: str = 'person_aware'
+    residual_annotation_json: str = ''
+    residual_split_json: str = ''
+    residual_round_epoch_plan: str = '5,5,3,2'
+    residual_candidate_policy: str = 'base_residual'
+    known_null_gate: str = 'off'
+    known_null_margin: float = 0.10
 
 
 def _sinkhorn_observed_ids(group: Sequence[Mapping[str, Any]]) -> List[int]:
@@ -400,6 +419,15 @@ def _sinkhorn_pack_groups(
             label_kind = int(label_kind_by_group[b][m])
             kind[b, m] = label_kind
             demand[b, m] = 1.0 if label_kind == 1 else max(0.0, float(extra_demand))
+    residual_meta_by_group = []
+    for group in packed_groups:
+        first = group[0] if group else {}
+        residual_meta_by_group.append({
+            'round_id': int(first.get('residual_peeling_round_id', -1)),
+            'known_raw_ids': [int(x) for x in list(first.get('residual_known_raw_ids', []))],
+            'candidate_raw_ids': [int(x) for x in list(first.get('residual_candidate_raw_ids', []))],
+            'candidate_policy': str(first.get('residual_candidate_policy', '')),
+        })
     return {
         'groups': packed_groups,
         'Z': Z,
@@ -409,6 +437,7 @@ def _sinkhorn_pack_groups(
         'demand': demand,
         'kind': kind,
         'raw_ids': raw_ids_tensor,
+        'residual_meta_by_group': residual_meta_by_group,
     }
 
 
@@ -472,6 +501,71 @@ def _sinkhorn_candidate_and_full_scores_from_pack(projector: Projector, text_voc
     scores = full_scores.gather(dim=2, index=gather_idx)
     return scores, full_scores
 
+
+
+
+
+def _apply_residual_known_null_gate_to_pack(
+    pack: Mapping[str, Any],
+    scores: torch.Tensor,
+    full_scores: torch.Tensor,
+    *,
+    raw_to_vocab_idx: Mapping[int, int],
+    margin: float,
+    enabled: bool,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Mask rows that are clearly better explained by already-known classes.
+
+    This is not row-level GT supervision. It uses only the offline class schedule's
+    K_{t-1} and current model scores. Masked rows are excluded from the residual
+    assignment loss so known/person-like trajectories are not forced into residual
+    labels.
+    """
+    metrics: Dict[str, Any] = {
+        'residual_known_null_gate_enabled': bool(enabled),
+        'residual_known_null_routed_rate': 0.0,
+        'residual_known_null_routed_count': 0,
+        'residual_known_null_eligible_count': 0,
+        'residual_known_score_mean': 0.0,
+        'residual_best_score_mean': 0.0,
+    }
+    if not bool(enabled):
+        return dict(pack), metrics
+    if full_scores is None:
+        return dict(pack), metrics
+    q_mask = pack['q_mask'].bool().clone()
+    c_mask = pack['c_mask'].bool()
+    B, Q = q_mask.shape
+    routed_total = 0
+    eligible_total = 0
+    known_vals: List[float] = []
+    residual_vals: List[float] = []
+    for b in range(B):
+        meta = (pack.get('residual_meta_by_group') or [{}])[b]
+        known_raw = [int(x) for x in list(meta.get('known_raw_ids', [])) if int(x) in raw_to_vocab_idx]
+        if not known_raw:
+            continue
+        known_idx = torch.tensor([int(raw_to_vocab_idx[int(x)]) for x in known_raw], device=full_scores.device, dtype=torch.long)
+        known_score = full_scores[b, :, known_idx].max(dim=1).values
+        residual_score = scores[b].masked_fill(~c_mask[b][None, :], -1.0e4).max(dim=1).values
+        eligible = q_mask[b] & torch.isfinite(known_score) & (residual_score > -1.0e3)
+        routed = eligible & (known_score > (residual_score + float(margin)))
+        q_mask[b, routed] = False
+        eligible_total += int(eligible.detach().sum().cpu().item())
+        routed_total += int(routed.detach().sum().cpu().item())
+        if bool(eligible.any()):
+            known_vals.append(float(known_score[eligible].detach().float().mean().cpu().item()))
+            residual_vals.append(float(residual_score[eligible].detach().float().mean().cpu().item()))
+    pack2 = dict(pack)
+    pack2['q_mask'] = q_mask
+    metrics.update({
+        'residual_known_null_routed_count': int(routed_total),
+        'residual_known_null_eligible_count': int(eligible_total),
+        'residual_known_null_routed_rate': float(routed_total / max(eligible_total, 1)),
+        'residual_known_score_mean': _mean_or_zero(known_vals),
+        'residual_best_score_mean': _mean_or_zero(residual_vals),
+    })
+    return pack2, metrics
 
 def _apply_support_null_to_pack(
     pack: Mapping[str, Any],
@@ -753,6 +847,10 @@ def _sinkhorn_train_stage(
     positive_margin_temp: float = 0.10,
     positive_null_cap: float = 0.40,
     positive_redistribute_mode: str = 'best_y',
+    residual_schedule: Optional[Any] = None,
+    residual_candidate_policy: str = 'base_residual',
+    known_null_gate: str = 'off',
+    known_null_margin: float = 0.10,
 ) -> Dict[str, Any]:
     from videocutler.ext_stageb_ovvis.algorithms.sinkhorn_assignment import (
         SinkhornAssignmentConfig,
@@ -785,16 +883,32 @@ def _sinkhorn_train_stage(
         epoch_metric_rows: List[Dict[str, Any]] = []
         for micro_idx, batch_indices in enumerate(_maybe_tqdm(epoch_plan.batches, enabled=bool(show_progress), desc=f'{stage_id} epoch {int(epoch_index)+1}', total=len(epoch_plan.batches), leave=False), start=1):
             selected_groups = [shuffled_groups[int(i)] for i in batch_indices]
+            residual_metric_row: Dict[str, Any] = {'residual_peeling_enabled': False}
+            if residual_schedule is not None:
+                selected_groups, residual_metric_row = apply_residual_candidate_override_to_groups(
+                    selected_groups,
+                    schedule=residual_schedule,
+                    epoch_index=int(epoch_index),
+                    candidate_policy=str(residual_candidate_policy),
+                )
+                if not selected_groups:
+                    continue
             pack = _sinkhorn_pack_groups(selected_groups, raw_to_vocab_idx=raw_to_vocab_idx, device=text_vocab_tensor.device, mode=str(mode), extra_demand=float(extra_demand))
             if not pack:
                 continue
             optimizer.zero_grad(set_to_none=True)
             temperature = _compute_t_dis(theta_t)
-            if bool(safe_negatives):
+            need_full_scores_for_residual_gate = bool(residual_schedule is not None and str(known_null_gate) == 'margin')
+            if bool(safe_negatives) or need_full_scores_for_residual_gate:
                 scores, full_scores = _sinkhorn_candidate_and_full_scores_from_pack(projector, text_vocab_tensor, pack, temperature)
             else:
                 scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, temperature)
                 full_scores = None
+            residual_gate_metric_row: Dict[str, Any] = {'residual_known_null_gate_enabled': bool(need_full_scores_for_residual_gate)}
+            if need_full_scores_for_residual_gate:
+                pack, residual_gate_metric_row = _apply_residual_known_null_gate_to_pack(
+                    pack, scores, full_scores, raw_to_vocab_idx=raw_to_vocab_idx, margin=float(known_null_margin), enabled=True
+                )
             support_null_active = bool(enable_null_column) and str(mode) == 'prealign' and (int(epoch_index) >= int(max(0, support_warmup_epochs)))
             pack, scores, support_metric_row = _apply_support_null_to_pack(
                 pack,
@@ -824,6 +938,8 @@ def _sinkhorn_train_stage(
                 null_logit_bias=float(null_logit_bias),
             )
             support_metric_row.update(positive_metric_row)
+            support_metric_row.update(residual_metric_row)
+            support_metric_row.update(residual_gate_metric_row)
             with torch.no_grad():
                 null_mask = pack['c_mask'].bool() & (pack['kind'] == 0)
                 nonnull_mask = pack['c_mask'].bool() & (pack['kind'] > 0)
@@ -947,6 +1063,9 @@ def _sinkhorn_train_stage(
         } if support_null_epoch_metrics else {},
         'private_support_state_snapshot': {f'{int(k[0])}:{int(k[1])}': float(v) for k, v in support_state.items()},
         'vocab_scope_policy': dict(vocab_scope_policy),
+        'residual_peeling_enabled': bool(residual_schedule is not None),
+        'residual_candidate_policy': str(residual_candidate_policy),
+        'known_null_gate': str(known_null_gate),
     }
 
 
@@ -981,6 +1100,9 @@ def _sinkhorn_collect_responsibility_rows(
     positive_margin_temp: float = 0.10,
     positive_null_cap: float = 0.40,
     positive_redistribute_mode: str = 'best_y',
+    residual_schedule: Optional[Any] = None,
+    residual_candidate_policy: str = 'base_residual',
+    residual_collect_epoch_index: int = 0,
 ) -> List[Record]:
     from videocutler.ext_stageb_ovvis.algorithms.sinkhorn_assignment import SinkhornAssignmentConfig, capped_sinkhorn_assignment
     rows: List[Record] = []
@@ -996,7 +1118,14 @@ def _sinkhorn_collect_responsibility_rows(
     projector.eval()
     with torch.no_grad():
         for group in groups:
-            pack = _sinkhorn_pack_groups([group], raw_to_vocab_idx=raw_to_vocab_idx, device=text_vocab_tensor.device, mode=str(mode), extra_demand=float(extra_demand))
+            collect_groups = [group]
+            if residual_schedule is not None:
+                collect_groups, _residual_collect_metrics = apply_residual_candidate_override_to_groups(
+                    collect_groups, schedule=residual_schedule, epoch_index=int(residual_collect_epoch_index), candidate_policy=str(residual_candidate_policy)
+                )
+                if not collect_groups:
+                    continue
+            pack = _sinkhorn_pack_groups(collect_groups, raw_to_vocab_idx=raw_to_vocab_idx, device=text_vocab_tensor.device, mode=str(mode), extra_demand=float(extra_demand))
             if not pack:
                 continue
             scores = _sinkhorn_scores_from_pack(projector, text_vocab_tensor, pack, _compute_t_dis(theta_t))
@@ -1116,6 +1245,20 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         if outside_yprime:
             raise RuntimeError(f'weak-label-only scope violation: observed Yprime ids outside train vocab: {outside_yprime[:16]}')
     pre_groups = _clip_groups(pre_examples)
+    residual_schedule_obj = None
+    residual_schedule_summary: Dict[str, Any] = {'mode': str(config.residual_peeling_mode), 'enabled': False}
+    if str(config.residual_peeling_mode) == 'oracle_static':
+        if load_oracle_static_residual_schedule is None:
+            raise RuntimeError('residual peeling schedule helper is unavailable')
+        residual_schedule_obj = load_oracle_static_residual_schedule(
+            csv_path=str(config.residual_schedule_csv),
+            annotation_json=str(config.residual_annotation_json),
+            split_json=str(config.residual_split_json),
+            variant=str(config.residual_variant),
+            epoch_plan=str(config.residual_round_epoch_plan),
+        )
+        residual_schedule_summary = {**residual_schedule_obj.public_summary(), 'enabled': True}
+        _write_json(output_root / 'train' / 'residual_peeling_schedule_summary.json', residual_schedule_summary)
     pre_stage = _sinkhorn_train_stage(
         stage_id='prealign', groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t,
         text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, optimizer=optimizer,
@@ -1139,6 +1282,10 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         positive_margin_temp=float(config.sinkhorn_positive_margin_temp),
         positive_null_cap=float(config.sinkhorn_positive_null_cap),
         positive_redistribute_mode=str(config.sinkhorn_positive_redistribute_mode),
+        residual_schedule=residual_schedule_obj,
+        residual_candidate_policy=str(config.residual_candidate_policy),
+        known_null_gate=str(config.known_null_gate),
+        known_null_margin=float(config.known_null_margin),
     )
     train_dir = output_root / 'train' / 'prealign'
     ckpt_dir = train_dir / 'checkpoints'
@@ -1148,7 +1295,7 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'text_projector_state_dict': projector.state_dict(),
         'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
         'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
-        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'support_null_state_snapshot': dict(pre_stage.get('private_support_state_snapshot', {})), 'support_null_config': {'enable_null_column': bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only', 'null_logit_bias': float(config.sinkhorn_null_logit_bias), 'null_residual': bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only', 'null_demand_cap_ratio': float(config.sinkhorn_null_demand_cap_ratio), 'yprime_demand_mode': str(config.sinkhorn_yprime_demand_mode), 'yprime_demand_min': float(config.sinkhorn_yprime_demand_min), 'yprime_support_topk': int(config.sinkhorn_yprime_support_topk), 'yprime_support_temp': float(config.sinkhorn_yprime_support_temp), 'positive_protection_enabled': bool(config.sinkhorn_enable_positive_protection), 'positive_margin_threshold': float(config.sinkhorn_positive_margin_threshold), 'positive_margin_temp': float(config.sinkhorn_positive_margin_temp), 'positive_null_cap': float(config.sinkhorn_positive_null_cap), 'positive_redistribute_mode': str(config.sinkhorn_positive_redistribute_mode)}, 'vocab_scope_policy': vocab_scope_policy
+        'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'support_null_state_snapshot': dict(pre_stage.get('private_support_state_snapshot', {})), 'residual_peeling_schedule': residual_schedule_summary, 'support_null_config': {'enable_null_column': bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only', 'null_logit_bias': float(config.sinkhorn_null_logit_bias), 'null_residual': bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only', 'null_demand_cap_ratio': float(config.sinkhorn_null_demand_cap_ratio), 'yprime_demand_mode': str(config.sinkhorn_yprime_demand_mode), 'yprime_demand_min': float(config.sinkhorn_yprime_demand_min), 'yprime_support_topk': int(config.sinkhorn_yprime_support_topk), 'yprime_support_temp': float(config.sinkhorn_yprime_support_temp), 'positive_protection_enabled': bool(config.sinkhorn_enable_positive_protection), 'positive_margin_threshold': float(config.sinkhorn_positive_margin_threshold), 'positive_margin_temp': float(config.sinkhorn_positive_margin_temp), 'positive_null_cap': float(config.sinkhorn_positive_null_cap), 'positive_redistribute_mode': str(config.sinkhorn_positive_redistribute_mode)}, 'vocab_scope_policy': vocab_scope_policy
     }, ckpt_last_path)
     pre_proxy_rows = _sinkhorn_collect_responsibility_rows(
         stage_id='prealign', dataset_name=str(config.dataset_name), groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t, text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, mode='prealign', sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale), extra_demand=0.0, sinkhorn_final_rerank_lambda_r=float(config.sinkhorn_final_rerank_lambda_r), vocab_scope_policy=vocab_scope_policy,
@@ -1166,10 +1313,13 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         positive_margin_temp=float(config.sinkhorn_positive_margin_temp),
         positive_null_cap=float(config.sinkhorn_positive_null_cap),
         positive_redistribute_mode=str(config.sinkhorn_positive_redistribute_mode),
+        residual_schedule=residual_schedule_obj,
+        residual_candidate_policy=str(config.residual_candidate_policy),
+        residual_collect_epoch_index=max(0, int(config.prealign_epochs) - 1),
     )
     _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
     _write_jsonl(train_dir / 'responsibility_records.jsonl', pre_proxy_rows)
-    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
+    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy, 'residual_peeling_schedule': residual_schedule_summary}
     _write_json(train_dir / 'train_state.json', pre_train_state)
     pre_scope_contract = _sinkhorn_scope_contract_fields(vocab_scope_policy)
     pre_stage_public = {k: v for k, v in dict(pre_stage).items() if k != 'private_support_state_snapshot'}
