@@ -18,12 +18,17 @@ import math
 import os
 import re
 import sys
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+
+_ARRAY_CACHE: Dict[Tuple[str, Optional[str], Optional[int], str], Optional[np.ndarray]] = {}
+_FILE_CACHE: Dict[str, Any] = {}
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -115,6 +120,29 @@ def _safe_path(base: Optional[Path], p: Any) -> Optional[Path]:
     return pp
 
 
+_LOCATOR_RE = re.compile(r"^(?P<path>.+?)(?:#(?P<key>[^\[\]#]+)(?:\[(?P<index>\d+)\])?)?$")
+
+
+def _parse_locator_path(locator: Any) -> Dict[str, Any]:
+    text = "" if locator is None else str(locator).strip()
+    match = _LOCATOR_RE.match(text) if text else None
+    if not match:
+        return {
+            "original": text,
+            "file_path": text or None,
+            "key": None,
+            "index": None,
+            "status": "LOCATOR_PARSE_FAILED" if text else "LOCATOR_EMPTY",
+        }
+    return {
+        "original": text,
+        "file_path": match.group("path") or None,
+        "key": match.group("key") or None,
+        "index": _as_int(match.group("index")) if match.group("index") is not None else None,
+        "status": "OK",
+    }
+
+
 def _candidate_raw_id(record: Dict[str, Any]) -> Optional[int]:
     for k in (
         "raw_category_id",
@@ -162,30 +190,178 @@ def _vector_from_inline(record: Dict[str, Any]) -> Optional[np.ndarray]:
     return None
 
 
-def _load_np_array(path: Path, key: Optional[str] = None, index: Optional[int] = None) -> Optional[np.ndarray]:
-    if not path.exists():
-        return None
+def _array_from_obj(obj: Any, key: Optional[str] = None, index: Optional[int] = None) -> Optional[np.ndarray]:
+    """Best-effort vector extraction from common payload objects.
+
+    This is intentionally read-only and schema-conservative. It only returns a
+    numeric vector/array when it can be unambiguously found.
+    """
     try:
-        if path.suffix == ".npy":
-            arr = np.load(path, mmap_mode="r")
+        if isinstance(obj, np.ndarray):
+            arr = obj
+        elif isinstance(obj, (list, tuple)) and obj and isinstance(obj[0], (int, float)):
+            arr = np.asarray(obj, dtype=np.float32)
+        elif isinstance(obj, dict):
+            keys = []
+            if key:
+                keys.append(key)
+            keys.extend([
+                "vector", "feature", "features", "embedding", "emb",
+                "z", "z_raw", "z_norm", "prototype", "proto",
+                "text_feature", "text_features",
+                "mapped_text_feature", "mapped_text_prototype",
+                "arr_0", "vectors", "features_np",
+            ])
+            arr = None
+            for k in keys:
+                if k in obj:
+                    arr = _array_from_obj(obj[k], None, index=None)
+                    if arr is not None:
+                        break
+            if arr is None:
+                return None
         else:
-            npz = np.load(path, mmap_mode="r")
-            if key is None:
-                if len(npz.files) == 1:
-                    key = npz.files[0]
-                elif "arr_0" in npz.files:
-                    key = "arr_0"
-                elif "vectors" in npz.files:
-                    key = "vectors"
-                elif "features" in npz.files:
-                    key = "features"
-                else:
-                    key = npz.files[0]
-            arr = npz[key]
+            return None
+
+        arr = np.asarray(arr, dtype=np.float32)
         if index is not None and getattr(arr, "ndim", 0) >= 2:
             arr = arr[index]
-        return np.asarray(arr, dtype=np.float32)
+        if arr.ndim > 1:
+            # Accept single-row/singleton tensors, but avoid ambiguous matrices.
+            if 1 in arr.shape:
+                arr = arr.reshape(-1)
+            else:
+                return None
+        return arr.reshape(-1)
     except Exception:
+        return None
+
+
+def _load_np_array(path: Path, key: Optional[str] = None, index: Optional[int] = None) -> Optional[np.ndarray]:
+    """Load a vector from common prototype/carrier payload formats.
+
+    Supports direct npy/npz plus torch/json payloads used by some text-bank
+    indirection records. Returns None instead of raising on unsupported schemas.
+    """
+    if not path.exists():
+        return None
+
+    suffix = path.suffix.lower()
+    cache_key = (str(path.resolve()), key, index, suffix)
+    if cache_key in _ARRAY_CACHE:
+        cached = _ARRAY_CACHE[cache_key]
+        return None if cached is None else np.asarray(cached, dtype=np.float32)
+    try:
+        if suffix == ".npy":
+            file_key = str(path.resolve())
+            arr = _FILE_CACHE.get(file_key)
+            if arr is None:
+                arr = np.load(path, mmap_mode="r")
+                _FILE_CACHE[file_key] = arr
+            if index is not None and getattr(arr, "ndim", 0) >= 2:
+                arr = arr[index]
+            out = _array_from_obj(arr)
+            _ARRAY_CACHE[cache_key] = None if out is None else np.asarray(out, dtype=np.float32)
+            return out
+
+        if suffix == ".npz":
+            file_key = str(path.resolve())
+            npz = _FILE_CACHE.get(file_key)
+            if npz is None:
+                npz = np.load(path, mmap_mode="r")
+                _FILE_CACHE[file_key] = npz
+            if key is None:
+                preferred = ["arr_0", "vector", "feature", "features", "embedding", "vectors", "prototype", "z", "z_norm", "z_raw"]
+                for k in preferred:
+                    if k in npz.files:
+                        key = k
+                        break
+                if key is None:
+                    key = npz.files[0] if npz.files else None
+            if key is None:
+                return None
+            arr = npz[key]
+            if index is not None and getattr(arr, "ndim", 0) >= 2:
+                arr = arr[index]
+            out = _array_from_obj(arr)
+            _ARRAY_CACHE[cache_key] = None if out is None else np.asarray(out, dtype=np.float32)
+            return out
+
+        if suffix in {".pt", ".pth"}:
+            try:
+                import torch  # type: ignore
+            except Exception:
+                return None
+            file_key = str(path.resolve())
+            obj = _FILE_CACHE.get(file_key)
+            if obj is None:
+                obj = torch.load(path, map_location="cpu")
+                _FILE_CACHE[file_key] = obj
+            # Convert torch tensors recursively enough for common schemas.
+            if hasattr(obj, "detach"):
+                obj = obj.detach().cpu().numpy()
+            elif isinstance(obj, dict):
+                obj = {k: (v.detach().cpu().numpy() if hasattr(v, "detach") else v) for k, v in obj.items()}
+            out = _array_from_obj(obj, key=key, index=index)
+            _ARRAY_CACHE[cache_key] = None if out is None else np.asarray(out, dtype=np.float32)
+            return out
+
+        if suffix in {".json", ".js"}:
+            file_key = str(path.resolve())
+            obj = _FILE_CACHE.get(file_key)
+            if obj is None:
+                obj = json.loads(path.read_text(encoding="utf-8"))
+                _FILE_CACHE[file_key] = obj
+            out = _array_from_obj(obj, key=key, index=index)
+            _ARRAY_CACHE[cache_key] = None if out is None else np.asarray(out, dtype=np.float32)
+            return out
+
+        if suffix == ".jsonl":
+            file_key = str(path.resolve())
+            obj = _FILE_CACHE.get(file_key)
+            if obj is None:
+                rows = []
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rows.append(json.loads(line))
+                        except Exception:
+                            rows.append(None)
+                obj = rows
+                _FILE_CACHE[file_key] = obj
+            if isinstance(obj, list):
+                if index is None:
+                    if not obj:
+                        return None
+                    first = obj[0]
+                    out = _array_from_obj(first, key=key, index=None) if isinstance(first, dict) else None
+                    _ARRAY_CACHE[cache_key] = None if out is None else np.asarray(out, dtype=np.float32)
+                    return out
+                if 0 <= index < len(obj):
+                    row = obj[index]
+                    out = _array_from_obj(row, key=key, index=None) if isinstance(row, dict) else None
+                    _ARRAY_CACHE[cache_key] = None if out is None else np.asarray(out, dtype=np.float32)
+                    return out
+            return None
+
+        # Last-resort: try numpy loader for unknown extension.
+        try:
+            file_key = str(path.resolve())
+            obj = _FILE_CACHE.get(file_key)
+            if obj is None:
+                obj = np.load(path, mmap_mode="r")
+                _FILE_CACHE[file_key] = obj
+            out = _array_from_obj(obj, key=key, index=index)
+            _ARRAY_CACHE[cache_key] = None if out is None else np.asarray(out, dtype=np.float32)
+            return out
+        except Exception:
+            _ARRAY_CACHE[cache_key] = None
+            return None
+    except Exception:
+        _ARRAY_CACHE[cache_key] = None
         return None
 
 
@@ -216,11 +392,20 @@ def _vector_from_locator(record: Dict[str, Any], asset_root: Optional[Path]) -> 
             if arr is not None:
                 return arr
 
-    # Flat path fields.
+    # Flat path fields. Text-bank rows commonly use proto_path indirection
+    # with records like {"raw_id": ..., "proto_path": ...}. Try several safe
+    # base roots because proto_path may be relative to text_bank/, run root, or
+    # repo cwd depending on how the asset was written.
     for pk in (
+        "proto_path",
+        "prototype_path",
+        "text_proto_path",
+        "text_prototype_path",
         "vector_path",
         "feature_path",
         "z_path",
+        "z_norm_path",
+        "z_raw_path",
         "npy_path",
         "npz_path",
         "payload_path",
@@ -229,10 +414,72 @@ def _vector_from_locator(record: Dict[str, Any], asset_root: Optional[Path]) -> 
         p = record.get(pk)
         if not p:
             continue
-        key = record.get("array_key") or record.get("key")
-        index = _as_int(record.get("index") or record.get("row") or record.get("offset") or record.get("vector_index"))
-        pp = _safe_path(asset_root, p)
-        if pp is not None:
+        parsed = _parse_locator_path(p)
+        key = parsed.get("key") or record.get("array_key") or record.get("key") or record.get("proto_key") or record.get("vector_key")
+        index = parsed.get("index")
+        if index is None:
+            index = _as_int(record.get("index") or record.get("row") or record.get("offset") or record.get("vector_index"))
+
+        raw = Path(str(parsed.get("file_path") or p))
+        candidates = []
+        if raw.is_absolute():
+            candidates.append(raw)
+        else:
+            if asset_root is not None:
+                candidates.append(asset_root / raw)
+                candidates.append(asset_root.parent / raw)
+            candidates.append(Path.cwd() / raw)
+
+        seen = set()
+        for pp in candidates:
+            pp = pp.resolve() if pp.exists() else pp
+            key_s = str(pp)
+            if key_s in seen:
+                continue
+            seen.add(key_s)
+            arr = _load_np_array(pp, key=key, index=index)
+            if arr is not None:
+                return arr
+
+    # Locator strings with fragment syntax: <path>#<key>[<index>]
+    for pk in ("proto_path", "prototype_path", "text_proto_path", "text_prototype_path"):
+        locator = record.get(pk)
+        if not locator:
+            continue
+        parsed = _parse_locator_path(locator)
+        if parsed["status"] != "OK":
+            continue
+        key = parsed["key"] or record.get("array_key") or record.get("key") or record.get("proto_key") or record.get("vector_key")
+        index = parsed["index"]
+        raw_file = Path(str(parsed["file_path"]))
+        bases: List[Optional[Path]] = []
+        mode = str(record.get("path_base_mode") or "").strip().lower()
+        if mode == "artifact_parent_dir":
+            # The text-prototype records live under <run_root>/text_bank/ and the
+            # locator paths are relative to <run_root>/.
+            bases.extend([
+                asset_root.parent if asset_root is not None else None,
+                asset_root,
+                Path.cwd(),
+            ])
+        else:
+            bases.extend([
+                asset_root,
+                asset_root.parent if asset_root is not None else None,
+                Path.cwd(),
+            ])
+        candidates: List[Path] = []
+        if raw_file.is_absolute():
+            candidates.append(raw_file)
+        for base in bases:
+            if base is not None:
+                candidates.append(base / raw_file)
+        seen = set()
+        for pp in candidates:
+            key_s = str(pp)
+            if key_s in seen:
+                continue
+            seen.add(key_s)
             arr = _load_np_array(pp, key=key, index=index)
             if arr is not None:
                 return arr
@@ -277,6 +524,7 @@ def _load_identity(binding_path: Path) -> Dict[str, Dict[str, Any]]:
 def _load_text_vectors(text_records_path: Path, asset_root: Optional[Path]) -> Tuple[Dict[int, np.ndarray], Dict[str, Any]]:
     vecs: Dict[int, np.ndarray] = {}
     sampled_keys: List[List[str]] = []
+    examples: List[Dict[str, Any]] = []
     fail = 0
     rows = 0
     for r in _iter_jsonl(text_records_path) or []:
@@ -287,11 +535,53 @@ def _load_text_vectors(text_records_path: Path, asset_root: Optional[Path]) -> T
         if rid is None:
             fail += 1
             continue
+        parsed = _parse_locator_path(r.get("proto_path") or r.get("prototype_path") or r.get("text_proto_path") or r.get("text_prototype_path"))
         vec = _vector_from_locator(r, asset_root)
         if vec is None:
             fail += 1
+            if len(examples) < 5:
+                base_mode = str(r.get("path_base_mode") or "").strip().lower()
+                raw_file = parsed.get("file_path")
+                resolved_candidates: List[str] = []
+                if raw_file:
+                    raw_path = Path(str(raw_file))
+                    bases: List[Optional[Path]]
+                    if base_mode == "artifact_parent_dir":
+                        bases = [asset_root.parent if asset_root is not None else None, asset_root, Path.cwd()]
+                    else:
+                        bases = [asset_root, asset_root.parent if asset_root is not None else None, Path.cwd()]
+                    if raw_path.is_absolute():
+                        resolved_candidates.append(str(raw_path))
+                    for base in bases:
+                        if base is not None:
+                            resolved_candidates.append(str((base / raw_path).resolve() if (base / raw_path).exists() else base / raw_path))
+                examples.append({
+                    "raw_id": rid,
+                    "proto_path": r.get("proto_path"),
+                    "parsed_status": parsed.get("status"),
+                    "resolved_file_path": parsed.get("file_path"),
+                    "key": parsed.get("key"),
+                    "index": parsed.get("index"),
+                    "path_base_mode": base_mode,
+                    "exists": bool(any(Path(x).exists() for x in resolved_candidates)) if resolved_candidates else False,
+                    "resolved_candidates": resolved_candidates[:4],
+                    "reason": "VECTOR_LOAD_FAILED",
+                })
             continue
         vecs[rid] = _l2norm(vec)
+        if len(examples) < 5:
+            examples.append({
+                "raw_id": rid,
+                "proto_path": r.get("proto_path") or r.get("prototype_path") or r.get("text_proto_path") or r.get("text_prototype_path"),
+                "parsed_status": parsed.get("status"),
+                "resolved_file_path": parsed.get("file_path"),
+                "key": parsed.get("key"),
+                "index": parsed.get("index"),
+                "path_base_mode": str(r.get("path_base_mode") or "").strip().lower(),
+                "exists": True,
+                "shape": [int(vec.shape[0])],
+                "reason": None,
+            })
     dims = sorted({int(v.shape[0]) for v in vecs.values() if v is not None and v.ndim == 1})
     return vecs, {
         "path": str(text_records_path),
@@ -301,6 +591,7 @@ def _load_text_vectors(text_records_path: Path, asset_root: Optional[Path]) -> T
         "failed_rows": fail,
         "dims": dims,
         "sampled_key_sets": sampled_keys,
+        "resolved_proto_examples": examples,
     }
 
 
@@ -317,6 +608,82 @@ def _find_text_records(run_root_v2b: Path, explicit: Optional[Path]) -> Optional
         if p.exists():
             return p
     return None
+
+
+def _resolve_locator_candidates(record: Dict[str, Any], field: str, asset_root: Optional[Path]) -> Tuple[Dict[str, Any], List[Path]]:
+    parsed = _parse_locator_path(record.get(field))
+    raw_file = parsed.get("file_path")
+    if not raw_file:
+        return parsed, []
+    raw = Path(str(raw_file))
+    candidates: List[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        if asset_root is not None:
+            candidates.append(asset_root / raw)
+            candidates.append(asset_root.parent / raw)
+        candidates.append(Path.cwd() / raw)
+    seen = set()
+    out: List[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return parsed, out
+
+
+def _load_bulk_carrier_matrix(gt_carrier_path: Path) -> Tuple[Optional[np.ndarray], Optional[str], Optional[str], Dict[str, Any]]:
+    first = next(iter(_iter_jsonl(gt_carrier_path) or []), None)
+    if not first:
+        return None, None, None, {"status": "NO_CARRIER_ROWS"}
+    for field in ("z_norm_path", "z_raw_path"):
+        if not first.get(field):
+            continue
+        parsed, candidates = _resolve_locator_candidates(first, field, gt_carrier_path.parent)
+        key = parsed.get("key")
+        if not key:
+            continue
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                payload = np.load(path, mmap_mode="r")
+                if key not in payload.files:
+                    return None, None, None, {
+                        "status": "NPZ_KEY_MISSING",
+                        "field": field,
+                        "path": str(path),
+                        "key": key,
+                        "available_keys": list(payload.files),
+                    }
+                matrix = np.asarray(payload[key], dtype=np.float32)
+                if matrix.ndim != 2:
+                    return None, None, None, {
+                        "status": "VECTOR_LOAD_FAILED",
+                        "field": field,
+                        "path": str(path),
+                        "key": key,
+                        "shape": list(matrix.shape),
+                    }
+                return matrix, field, str(path), {
+                    "status": "OK",
+                    "field": field,
+                    "path": str(path),
+                    "key": key,
+                    "shape": [int(x) for x in matrix.shape],
+                }
+            except Exception as exc:
+                return None, None, None, {
+                    "status": "VECTOR_LOAD_FAILED",
+                    "field": field,
+                    "path": str(path),
+                    "key": key,
+                    "error": str(exc),
+                }
+    return None, None, None, {"status": "PROTO_FILE_MISSING", "fields_checked": ["z_norm_path", "z_raw_path"]}
 
 
 def _baseline_metrics_from_summary(summary: Dict[str, Any], backend_name: str) -> Dict[str, Any]:
@@ -351,10 +718,35 @@ def _score_raw_direct(
     carrier_asset_root: Optional[Path],
     output_rows_path: Optional[Path],
     topk: int,
+    device: str = "cuda:0",
+    score_chunk_size: int = 4096,
+    progress_every: int = 100,
     max_rows: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    start_time = time.time()
     identity = _load_identity(gt_identity_path)
     text_dim_set = sorted({int(v.shape[0]) for v in text_vecs.values() if v is not None})
+    carrier_locator_base = gt_carrier_path.parent
+    text_dim = int(text_dim_set[0]) if len(text_dim_set) == 1 else None
+    bulk_carrier_matrix, bulk_carrier_field, bulk_carrier_path, bulk_carrier_meta = _load_bulk_carrier_matrix(gt_carrier_path)
+
+    torch_mod = None
+    torch_device = None
+    backend_impl = "numpy_batched"
+    cuda_requested = str(device).startswith("cuda")
+    cuda_unavailable_reason = None
+    if cuda_requested:
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                torch_mod = torch
+                torch_device = torch.device(device)
+                backend_impl = "cuda_batched"
+            else:
+                cuda_unavailable_reason = "torch.cuda.is_available() is false"
+        except Exception as exc:
+            cuda_unavailable_reason = f"torch import/device unavailable: {exc}"
 
     ranks: List[int] = []
     margins: List[float] = []
@@ -382,130 +774,193 @@ def _score_raw_direct(
     missing_text = 0
     malformed = 0
     dim_mismatch = 0
+    carrier_dim: Optional[int] = None
+    rows_by_clip: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    if bulk_carrier_matrix is not None and getattr(bulk_carrier_matrix, "ndim", 0) == 2:
+        carrier_dim = int(bulk_carrier_matrix.shape[1])
+
+    for row_idx, carrier in enumerate(_iter_jsonl(gt_carrier_path) or []):
+        total += 1
+        if max_rows is not None and total > max_rows:
+            break
+        tid = carrier.get("trajectory_id") or carrier.get("carrier_id")
+        ident = identity["by_traj"].get(_norm_key(tid)) if tid is not None else None
+        if ident is None:
+            ident = identity["by_index"].get(_norm_key(row_idx))
+        if not ident:
+            malformed += 1
+            continue
+        gt = _as_int(ident.get("raw_category_id") or ident.get("raw_id") or ident.get("gt_raw_id"))
+        clip = ident.get("clip_id") if ident.get("clip_id") is not None else carrier.get("clip_id")
+        if gt is None or clip is None:
+            malformed += 1
+            continue
+        clip_key = _norm_key(clip)
+        labels = full_y.get(clip_key)
+        if labels is None:
+            continue
+        with_label += 1
+        if gt not in labels:
+            continue
+        in_scope += 1
+        candidate_ids = [int(rid) for rid in labels if int(rid) in text_vecs]
+        if gt not in candidate_ids:
+            missing_text += 1
+            continue
+        z = None
+        if bulk_carrier_matrix is not None and bulk_carrier_field:
+            parsed = _parse_locator_path(carrier.get(bulk_carrier_field))
+            ix = parsed.get("index")
+            if ix is None:
+                ix = row_idx
+            if isinstance(ix, int) and 0 <= ix < int(bulk_carrier_matrix.shape[0]):
+                z = bulk_carrier_matrix[ix]
+        if z is None:
+            z = _vector_from_locator(carrier, carrier_locator_base)
+        if z is None:
+            carrier_fail += 1
+            continue
+        z = _l2norm(z)
+        z_dim = int(z.shape[0])
+        if text_dim_set and z_dim not in text_dim_set:
+            dim_mismatch += 1
+            continue
+        carrier_dim = carrier_dim or z_dim
+        rows_by_clip[clip_key].append({
+            "row_index": row_idx,
+            "trajectory_id": tid,
+            "clip_id": clip,
+            "gt": int(gt),
+            "candidate_ids": candidate_ids,
+            "z": np.asarray(z, dtype=np.float32),
+        })
 
     out_f = None
     if output_rows_path is not None:
         output_rows_path.parent.mkdir(parents=True, exist_ok=True)
         out_f = output_rows_path.open("w", encoding="utf-8")
 
+    clip_items = sorted(rows_by_clip.items(), key=lambda kv: kv[0])
+    processed_rows = 0
     try:
-        for row_idx, carrier in enumerate(_iter_jsonl(gt_carrier_path) or []):
-            total += 1
-            if max_rows is not None and total > max_rows:
-                break
-            tid = carrier.get("trajectory_id") or carrier.get("carrier_id")
-            ident = None
-            if tid is not None:
-                ident = identity["by_traj"].get(_norm_key(tid))
-            if ident is None:
-                ident = identity["by_index"].get(_norm_key(row_idx))
-            if not ident:
-                malformed += 1
+        for clip_idx, (clip_key, clip_rows) in enumerate(clip_items, start=1):
+            if not clip_rows:
                 continue
-            gt = _as_int(ident.get("raw_category_id") or ident.get("raw_id") or ident.get("gt_raw_id"))
-            clip = ident.get("clip_id") if ident.get("clip_id") is not None else carrier.get("clip_id")
-            if gt is None or clip is None:
-                malformed += 1
-                continue
-            labels = full_y.get(_norm_key(clip))
-            if labels is None:
-                continue
-            with_label += 1
-            if gt not in labels:
-                continue
-            in_scope += 1
-            candidate_ids = [rid for rid in labels if rid in text_vecs]
-            if gt not in candidate_ids:
-                missing_text += 1
-                continue
-            z = _vector_from_locator(carrier, carrier_asset_root)
-            if z is None:
-                carrier_fail += 1
-                continue
-            z = _l2norm(z)
-            if text_dim_set and int(z.shape[0]) not in text_dim_set:
-                dim_mismatch += 1
-                continue
-            mat = np.stack([text_vecs[rid] for rid in candidate_ids], axis=0)
-            scores = mat @ z.reshape(-1)
-            order = np.argsort(-scores)
-            ranked_ids = [candidate_ids[int(i)] for i in order]
-            gt_pos = ranked_ids.index(gt)
-            rank = gt_pos + 1
-            top1 = ranked_ids[0]
-            score_gt = float(scores[candidate_ids.index(gt)])
-            if top1 == gt and len(order) > 1:
-                best_non_gt_score = float(scores[int(order[1])])
-            elif top1 != gt:
-                best_non_gt_score = float(scores[int(order[0])])
+            candidate_ids = list(clip_rows[0]["candidate_ids"])
+            candidate_index = {int(rid): i for i, rid in enumerate(candidate_ids)}
+            text_matrix = np.stack([text_vecs[int(rid)] for rid in candidate_ids], axis=0).astype(np.float32, copy=False)
+            z_matrix = np.stack([row["z"] for row in clip_rows], axis=0).astype(np.float32, copy=False)
+
+            if backend_impl == "cuda_batched" and torch_mod is not None and torch_device is not None:
+                with torch_mod.no_grad():
+                    t_tensor = torch_mod.as_tensor(text_matrix, dtype=torch_mod.float32, device=torch_device).T.contiguous()
+                    score_chunks = []
+                    for start in range(0, z_matrix.shape[0], max(1, int(score_chunk_size))):
+                        z_tensor = torch_mod.as_tensor(
+                            z_matrix[start:start + max(1, int(score_chunk_size))],
+                            dtype=torch_mod.float32,
+                            device=torch_device,
+                        )
+                        score_chunks.append((z_tensor @ t_tensor).detach().cpu().numpy())
+                    scores_all = np.concatenate(score_chunks, axis=0) if score_chunks else np.zeros((0, len(candidate_ids)), dtype=np.float32)
             else:
-                best_non_gt_score = float("nan")
-            margin = score_gt - best_non_gt_score if math.isfinite(best_non_gt_score) else float("nan")
+                scores_all = z_matrix @ text_matrix.T
 
-            evaluable += 1
-            ranks.append(rank)
-            if math.isfinite(margin):
-                margins.append(margin)
-            candidate_counts.append(len(candidate_ids))
-            top1_counter[int(top1)] += 1
-            if top1 != gt:
-                wrong_counter[int(top1)] += 1
-                confusion_counter[(int(gt), int(top1))] += 1
+            for local_idx, row in enumerate(clip_rows):
+                scores = np.asarray(scores_all[local_idx], dtype=np.float64)
+                gt = int(row["gt"])
+                gt_idx = int(candidate_index[gt])
+                order = np.argsort(-scores)
+                top1_idx = int(order[0])
+                top1 = int(candidate_ids[top1_idx])
+                gt_score = float(scores[gt_idx])
+                rank = int(np.count_nonzero(scores > gt_score) + 1)
+                if len(order) > 1:
+                    best_non_gt_idx = int(order[1]) if top1 == gt else top1_idx
+                    best_non_gt_score = float(scores[best_non_gt_idx])
+                    margin = float(gt_score - best_non_gt_score)
+                else:
+                    best_non_gt_score = float("nan")
+                    margin = float("nan")
 
-            bc = by_class[int(gt)]
-            bc["n"] += 1
-            bc["rank1"] += int(rank == 1)
-            bc["top5"] += int(rank <= 5)
-            bc["top20"] += int(rank <= 20)
-            bc["rank_sum"] += rank
-            bc["norm_rank_sum"] += (rank - 1) / max(len(candidate_ids) - 1, 1)
-            if math.isfinite(margin):
-                bc["margin_sum"] += margin
-            if top1 != gt:
-                bc["wrong_top1"][int(top1)] += 1
+                evaluable += 1
+                processed_rows += 1
+                ranks.append(rank)
+                if math.isfinite(margin):
+                    margins.append(margin)
+                candidate_counts.append(len(candidate_ids))
+                top1_counter[top1] += 1
+                if top1 != gt:
+                    wrong_counter[top1] += 1
+                    confusion_counter[(gt, top1)] += 1
 
-            cn = len(candidate_ids)
-            if cn <= 3:
-                cb = "01_<=3"
-            elif cn <= 5:
-                cb = "02_4-5"
-            elif cn <= 10:
-                cb = "03_6-10"
-            elif cn <= 20:
-                cb = "04_11-20"
-            else:
-                cb = "05_>20"
-            co = candidate_size_bins[cb]
-            co["n"] += 1
-            co["rank1"] += int(rank == 1)
-            co["wrong"] += int(rank != 1)
-            if math.isfinite(margin):
-                co["margin_sum"] += margin
+                bc = by_class[gt]
+                bc["n"] += 1
+                bc["rank1"] += int(rank == 1)
+                bc["top5"] += int(rank <= 5)
+                bc["top20"] += int(rank <= 20)
+                bc["rank_sum"] += rank
+                bc["norm_rank_sum"] += (rank - 1) / max(len(candidate_ids) - 1, 1)
+                if math.isfinite(margin):
+                    bc["margin_sum"] += margin
+                if top1 != gt:
+                    bc["wrong_top1"][top1] += 1
 
-            if out_f is not None:
-                compact = {
-                    "row_index": row_idx,
-                    "trajectory_id": tid,
-                    "clip_id": clip,
-                    "gt_raw_id": gt,
-                    "candidate_label_count": len(candidate_ids),
-                    "top1_raw_id": int(top1),
-                    "gt_rank": rank,
-                    "score_gt": score_gt,
-                    "score_top1": float(scores[int(order[0])]),
-                    "margin_gt_vs_best_non_gt": margin,
-                    "topk_raw_ids": [int(x) for x in ranked_ids[:topk]],
-                    "topk_scores": [float(scores[int(i)]) for i in order[:topk]],
-                }
-                out_f.write(json.dumps(compact, ensure_ascii=False) + "\n")
+                cn = len(candidate_ids)
+                if cn <= 3:
+                    cb = "01_<=3"
+                elif cn <= 5:
+                    cb = "02_4-5"
+                elif cn <= 10:
+                    cb = "03_6-10"
+                elif cn <= 20:
+                    cb = "04_11-20"
+                else:
+                    cb = "05_>20"
+                co = candidate_size_bins[cb]
+                co["n"] += 1
+                co["rank1"] += int(rank == 1)
+                co["wrong"] += int(rank != 1)
+                if math.isfinite(margin):
+                    co["margin_sum"] += margin
+
+                if out_f is not None:
+                    topk_idx = order[:topk]
+                    out_f.write(json.dumps({
+                        "row_index": row["row_index"],
+                        "trajectory_id": row["trajectory_id"],
+                        "clip_id": row["clip_id"],
+                        "gt_raw_id": gt,
+                        "candidate_label_count": len(candidate_ids),
+                        "top1_raw_id": top1,
+                        "gt_rank": rank,
+                        "score_gt": gt_score,
+                        "score_top1": float(scores[top1_idx]),
+                        "margin_gt_vs_best_non_gt": margin,
+                        "topk_raw_ids": [int(candidate_ids[int(i)]) for i in topk_idx],
+                        "topk_scores": [float(scores[int(i)]) for i in topk_idx],
+                    }, ensure_ascii=False) + "\n")
+            if progress_every > 0 and (clip_idx % progress_every == 0 or clip_idx == len(clip_items)):
+                elapsed = max(time.time() - start_time, 1e-9)
+                rows_per_sec = processed_rows / elapsed
+                remaining = max(in_scope - processed_rows, 0)
+                eta = remaining / rows_per_sec if rows_per_sec > 0 else None
+                eta_text = f"{eta:.1f}" if eta is not None else "nan"
+                print(
+                    f"[raw_direct] backend={backend_impl} clips={clip_idx}/{len(clip_items)} "
+                    f"rows={processed_rows}/{in_scope} rows_per_sec={rows_per_sec:.1f} "
+                    f"eta_sec={eta_text}",
+                    flush=True,
+                )
     finally:
         if out_f is not None:
             out_f.close()
 
     if evaluable == 0:
+        empty_status = "DIM_MISMATCH" if dim_mismatch > 0 and in_scope > 0 else "FAIL_NO_EVALUABLE_ROWS"
         return {
             "backend": "raw_direct_text_carrier_cosine",
-            "status": "FAIL_NO_EVALUABLE_ROWS",
+            "status": empty_status,
             "row_count_total": total,
             "row_count_with_label_record": with_label,
             "row_count_in_scope": in_scope,
@@ -514,6 +969,14 @@ def _score_raw_direct(
             "candidate_missing_vocab_count": missing_text,
             "malformed_count": malformed,
             "dim_mismatch_count": dim_mismatch,
+            "blocker": "DIM_MISMATCH" if empty_status == "DIM_MISMATCH" else None,
+            "backend_impl": backend_impl,
+            "cuda_unavailable_reason": cuda_unavailable_reason,
+            "runtime_seconds": time.time() - start_time,
+            "loaded_text_vectors": len(text_vecs),
+            "text_dim": text_dim,
+            "carrier_dim": carrier_dim,
+            "bulk_carrier_loader": bulk_carrier_meta,
         }, [], [], []
 
     rank_arr = np.asarray(ranks, dtype=np.float64)
@@ -529,6 +992,13 @@ def _score_raw_direct(
     metrics = {
         "backend": "raw_direct_text_carrier_cosine",
         "status": "PASS_SCORER",
+        "backend_impl": backend_impl,
+        "runtime_seconds": time.time() - start_time,
+        "loaded_text_vectors": len(text_vecs),
+        "text_dim": text_dim,
+        "carrier_dim": carrier_dim,
+        "bulk_carrier_loader": bulk_carrier_meta,
+        "cuda_unavailable_reason": cuda_unavailable_reason,
         "row_count_total": total,
         "row_count_with_label_record": with_label,
         "row_count_in_scope": in_scope,
@@ -554,6 +1024,18 @@ def _score_raw_direct(
         "dim_mismatch_count": dim_mismatch,
         "top1_top_label": {"raw_category_id": top1_label, "count": top1_count, "rate_over_evaluable": top1_count / evaluable},
         "wrong_top1_top_label": {"raw_category_id": wrong_label, "count": wrong_count, "rate_over_wrong": wrong_count / wrong_total if wrong_total else None},
+        "top1_label_top_counts": [
+            {"raw_category_id": int(raw_id), "count": int(count), "rate_over_evaluable": float(count / evaluable)}
+            for raw_id, count in top1_counter.most_common(20)
+        ],
+        "wrong_top1_label_top_counts": [
+            {"raw_category_id": int(raw_id), "count": int(count), "rate_over_wrong": float(count / wrong_total) if wrong_total else None}
+            for raw_id, count in wrong_counter.most_common(20)
+        ],
+        "confusion_pairs_top": [
+            {"gt_raw_id": int(gt), "wrong_top1_raw_id": int(pred), "count": int(cnt), "rate_over_wrong": float(cnt / wrong_total) if wrong_total else None}
+            for (gt, pred), cnt in confusion_counter.most_common(20)
+        ],
     }
 
     wrong_rows = [
@@ -597,6 +1079,9 @@ def main() -> None:
     ap.add_argument("--topk", type=int, default=20)
     ap.add_argument("--max_rows", type=int, default=0)
     ap.add_argument("--write_raw_rows", action="store_true")
+    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--score_chunk_size", type=int, default=4096)
+    ap.add_argument("--progress_every", type=int, default=100)
     args = ap.parse_args()
 
     run_root_v2b = Path(args.run_root_v2b)
@@ -672,6 +1157,9 @@ def main() -> None:
                 carrier_asset_root=Path(args.carrier_asset_root) if args.carrier_asset_root else None,
                 output_rows_path=raw_rows_path,
                 topk=args.topk,
+                device=args.device,
+                score_chunk_size=args.score_chunk_size,
+                progress_every=args.progress_every,
                 max_rows=args.max_rows if args.max_rows > 0 else None,
             )
             comparison.append(metrics)
@@ -681,6 +1169,7 @@ def main() -> None:
                     "gt_rank1_rate", "gt_top5_rate", "mean_gt_margin_vs_best_non_gt",
                     "wrong_large_negative_margin_rate", "hub_like_top1_concentration",
                     "latent_evaluable_row_count", "carrier_load_fail_count", "dim_mismatch_count",
+                    "backend_impl", "runtime_seconds", "loaded_text_vectors", "text_dim", "carrier_dim",
                 )},
                 "rows_path": str(raw_rows_path) if raw_rows_path else None,
             })
@@ -690,21 +1179,25 @@ def main() -> None:
 
     # Delta fields against V2-B.
     v2b_rank1 = _as_float(v2b_metrics.get("gt_rank1_rate"))
+    v2b_top5 = _as_float(v2b_metrics.get("gt_top5_rate"))
     v2b_margin = _as_float(v2b_metrics.get("mean_gt_margin_vs_best_non_gt"))
     v2b_hub = _as_float(v2b_metrics.get("hub_like_top1_concentration"))
     v2b_large = _as_float(v2b_metrics.get("wrong_large_negative_margin_rate"))
     for r in comparison:
         if r["backend"] == "v2b_prealign_checkpoint":
             r["delta_rank1_vs_v2b"] = 0.0
+            r["delta_top5_vs_v2b"] = 0.0
             r["delta_margin_vs_v2b"] = 0.0
             r["delta_hub_concentration_vs_v2b"] = 0.0
             r["delta_large_wrong_margin_vs_v2b"] = 0.0
         else:
             r_rank1 = _as_float(r.get("gt_rank1_rate"))
+            r_top5 = _as_float(r.get("gt_top5_rate"))
             r_margin = _as_float(r.get("mean_gt_margin_vs_best_non_gt"))
             r_hub = _as_float(r.get("hub_like_top1_concentration"))
             r_large = _as_float(r.get("wrong_large_negative_margin_rate"))
             r["delta_rank1_vs_v2b"] = (r_rank1 - v2b_rank1) if r_rank1 is not None and v2b_rank1 is not None else None
+            r["delta_top5_vs_v2b"] = (r_top5 - v2b_top5) if r_top5 is not None and v2b_top5 is not None else None
             r["delta_margin_vs_v2b"] = (r_margin - v2b_margin) if r_margin is not None and v2b_margin is not None else None
             r["delta_hub_concentration_vs_v2b"] = (r_hub - v2b_hub) if r_hub is not None and v2b_hub is not None else None
             r["delta_large_wrong_margin_vs_v2b"] = (r_large - v2b_large) if r_large is not None and v2b_large is not None else None
