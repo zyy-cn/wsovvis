@@ -28,7 +28,8 @@
     "videocutler/run_stageb_train.py",
     "videocutler/run_stageb_train_softem.py",
     "tests/stageb/",
-    "codex/outputs/G8_inference_and_eval/"
+    "codex/outputs/G8_inference_and_eval/",
+    "videocutler/run_stageb_analysis_videocutler_residual_peeling_oracle_v2.py"
   ],
   "forbid_paths": [],
   "protected_paths": [],
