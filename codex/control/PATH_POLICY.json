@@ -24,6 +24,7 @@
     "videocutler/run_stageb_eval_lvvis.py",
     "videocutler/run_stageb_eval_ytvis2019.py",
     "videocutler/run_stageb_analysis_soft_explained_mass_routing_feasibility.py",
+    "videocutler/run_stageb_analysis_gt_full_y_clean_attribution_compare.py",
     "videocutler/run_stageb_audit_g7_gt_attribution_rank.py",
     "videocutler/run_stageb_test.py",
     "videocutler/run_stageb_train.py",
