@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+from videocutler.ext_stageb_ovvis.banks.carrier_bank import read_vector_from_locator
 
 try:  # torch is required for checkpoint-backed scorer replay.
     import torch
@@ -158,33 +159,14 @@ def _parse_vector_locator(locator: str) -> Tuple[Path, str, int]:
 class VectorReader:
     def __init__(self, artifact_parent_dir: Path) -> None:
         self.artifact_parent_dir = Path(artifact_parent_dir)
-        self._npz_cache: Dict[Path, Any] = {}
+        self._reads = 0
 
     def close(self) -> None:
-        for payload in self._npz_cache.values():
-            try:
-                payload.close()
-            except Exception:
-                pass
-        self._npz_cache.clear()
+        self._reads = 0
 
     def read(self, locator: str) -> np.ndarray:
-        rel_path, key, idx = _parse_vector_locator(locator)
-        payload_path = rel_path if rel_path.is_absolute() else self.artifact_parent_dir / rel_path
-        payload_path = payload_path.resolve()
-        payload = self._npz_cache.get(payload_path)
-        if payload is None:
-            payload = np.load(payload_path, allow_pickle=False)
-            self._npz_cache[payload_path] = payload
-        if key in payload.files:
-            arr = np.asarray(payload[key])
-        elif key == "z_norm" and "feats" in payload.files:
-            arr = np.asarray(payload["feats"])
-        else:
-            raise KeyError(f"key {key!r} not found in {payload_path}; keys={payload.files}")
-        if idx < 0 or idx >= int(arr.shape[0]):
-            raise IndexError(f"index {idx} out of range for {locator}; shape={arr.shape}")
-        return np.asarray(arr[idx], dtype=np.float32)
+        self._reads += 1
+        return np.asarray(read_vector_from_locator(self.artifact_parent_dir, locator), dtype=np.float32)
 
 
 def _record_clip_id(record: Mapping[str, Any]) -> str:
@@ -203,6 +185,8 @@ def _record_trajectory_id(record: Mapping[str, Any]) -> str:
 
 def _record_vector_locator(record: Mapping[str, Any]) -> Optional[str]:
     for key in (
+        "z_norm_path",
+        "z_raw_path",
         "traj_vector_locator",
         "trajectory_vector_locator",
         "vector_locator",
@@ -214,6 +198,11 @@ def _record_vector_locator(record: Mapping[str, Any]) -> Optional[str]:
         value = record.get(key)
         if value and "#" in str(value):
             return str(value)
+    value = record.get("frame_carriers_norm_paths")
+    if isinstance(value, Sequence) and value:
+        first = value[0]
+        if isinstance(first, str) and "#" in first:
+            return first
     # Some records keep a locator dict.
     for key in ("locator", "vector", "traj_vector"):
         value = record.get(key)
@@ -539,7 +528,25 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     # Load carrier records into lightweight grouped metadata only; vector payloads remain lazy.
     clip_records: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     counters: Counter[str] = Counter()
+    carrier_record_sample_keys: List[List[str]] = []
+    accepted_locator_fields = [
+        "z_norm_path",
+        "z_raw_path",
+        "traj_vector_locator",
+        "trajectory_vector_locator",
+        "vector_locator",
+        "carrier_locator",
+        "z_norm_locator",
+        "feature_locator",
+        "traj_locator",
+        "frame_carriers_norm_paths",
+        "locator",
+        "vector",
+        "traj_vector",
+    ]
     for record in _read_jsonl_stream(carrier_records):
+        if len(carrier_record_sample_keys) < 5:
+            carrier_record_sample_keys.append(sorted(str(k) for k in record.keys()))
         clip_id = _record_clip_id(record)
         traj_id = _record_trajectory_id(record)
         locator = _record_vector_locator(record)
@@ -734,6 +741,11 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     finally:
         vector_reader.close()
 
+    if checkpoint_summaries and all(int(row.get("processed_rows", 0)) == 0 for row in checkpoint_summaries):
+        raise RuntimeError(
+            "FAIL: processed_rows were zero for every checkpoint; carrier locator parsing or vector loading is broken"
+        )
+
     # Aggregate by checkpoint using default setting, or first available setting.
     default_variant = args.default_variant
     default_tau = float(args.default_tau)
@@ -774,6 +786,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         "output_dir": str(output_dir),
         "asset_root": str(asset_root),
         "carrier_records": str(carrier_records),
+        "carrier_record_sample_keys": carrier_record_sample_keys,
+        "accepted_locator_fields": accepted_locator_fields,
         "annotation_json": str(args.annotation_json),
         "split_json": str(args.split_json),
         "schedule_csv": str(args.schedule_csv),
@@ -782,6 +796,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         "novel_count": len(novel_ids),
         "clip_context_count": len(clip_y_base),
         "carrier_record_counters": dict(counters),
+        "processed_rows_by_checkpoint": {row["checkpoint"]: int(row.get("processed_rows", 0)) for row in checkpoint_summaries},
+        "skipped_by_reason": {str(k): int(v) for k, v in sorted(dict(counters).items())},
         "checkpoints": checkpoint_summaries,
         "tau_values": tau_values,
         "gamma_values": gamma_values,

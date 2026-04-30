@@ -1,6 +1,6 @@
 {
   "task_id": "G8_inference_and_eval-task",
-  "task_truth_stamp": "eeecd22fbf23380e81e019b19efea8a803fb33bd970b74e635bfbae2bd9934c0",
+  "task_truth_stamp": "f8720fae6b2195dff72e16b29f68fe6ebef66748cf39dd41016cf1966bf49e2a",
   "active_gate": "G8_inference_and_eval",
   "allow_paths": [
     "videocutler/ext_stageb_ovvis/algorithms/_g7_semantics.py",
@@ -23,13 +23,13 @@
     "videocutler/run_stageb_eval_internal.py",
     "videocutler/run_stageb_eval_lvvis.py",
     "videocutler/run_stageb_eval_ytvis2019.py",
+    "videocutler/run_stageb_analysis_soft_explained_mass_routing_feasibility.py",
     "videocutler/run_stageb_audit_g7_gt_attribution_rank.py",
     "videocutler/run_stageb_test.py",
     "videocutler/run_stageb_train.py",
     "videocutler/run_stageb_train_softem.py",
     "tests/stageb/",
-    "codex/outputs/G8_inference_and_eval/",
-    "videocutler/run_stageb_analysis_videocutler_residual_peeling_oracle_v2.py"
+    "codex/outputs/G8_inference_and_eval/"
   ],
   "forbid_paths": [],
   "protected_paths": [],
