@@ -108,6 +108,15 @@ def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
             h.write(json.dumps(dict(row), ensure_ascii=False, default=str) + "\n")
 
 
+def _write_csv_rows(path: Path, rows: Sequence[Mapping[str, Any]], fieldnames: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as h:
+        writer = csv.DictWriter(h, fieldnames=list(fieldnames), extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(dict(row))
+
+
 def _as_int(x: Any) -> Optional[int]:
     if x is None:
         return None
@@ -521,12 +530,16 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             raise ValueError("schedule_csv is required for static_residual or residual soft floor scope")
         schedule = _load_residual_schedule(Path(args.schedule_csv), variant=str(args.residual_variant), epoch_plan=str(args.round_epoch_plan), base_ids=base_ids)
 
+    if bool(args.enable_absorber_logging) and str(args.protocol) != "soft_routing":
+        raise ValueError("--enable_absorber_logging is only supported for --protocol soft_routing")
+
     if str(args.protocol) == "static_residual" and args.epochs is None:
         epochs = int(sum(_parse_epoch_plan(str(args.round_epoch_plan))))
     else:
         epochs = int(args.epochs if args.epochs is not None else 15)
 
     text_vocab_ids, _text_records, text_vocab_matrix = load_text_vocab(output_root)
+    class_name_by_raw = _class_name_map_from_text_records(_text_records if isinstance(_text_records, list) else [])
     raw_to_idx = {int(raw_id): idx for idx, raw_id in enumerate(text_vocab_ids)}
     text_vocab_tensor = torch.from_numpy(np.asarray(text_vocab_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
     projector_cfg = ProjectorConfig()
@@ -550,6 +563,13 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
     global_step = 0
     train_start = datetime.now(timezone.utc).isoformat()
 
+    absorber_logging_enabled = bool(args.enable_absorber_logging)
+    absorber_decay = float(args.absorber_ema_decay)
+    absorber_ema: Dict[int, Dict[str, float]] = {}
+    absorber_ema_rows: List[Dict[str, Any]] = []
+    top_absorber_rows: List[Dict[str, Any]] = []
+    top_absorbers_k = max(1, int(args.top_absorbers_k))
+
     for epoch_idx in _iter_progress(range(epochs), enabled=bool(args.show_progress), desc=f"{args.protocol} epochs", leave=True):
         rng = random.Random(int(args.seed) + int(epoch_idx))
         shuffled = list(groups)
@@ -560,6 +580,9 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
         epoch_stats = Counter()
         epoch_float_stats: Dict[str, List[float]] = defaultdict(list)
         round_hist = Counter()
+        absorber_epoch_support: Dict[int, float] = defaultdict(float)
+        absorber_epoch_mass: Dict[int, float] = defaultdict(float)
+        absorber_epoch_top1: Dict[int, float] = defaultdict(float)
 
         for mb_idx, batch_indices in enumerate(batches, start=1):
             optimizer.zero_grad(set_to_none=True)
@@ -602,7 +625,17 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                 log_probs = torch.log_softmax(scores, dim=1)
                 per_row_loss = -(P_for_loss * log_probs).sum(dim=1)
                 row_weight = torch.ones((Q,), device=device, dtype=torch.float32)
-                soft_row = {"soft_routing_enabled": False, "residual_weight_mean": 1.0, "explained_mass_mean": 0.0, "hub_top1_share": 0.0}
+                soft_row = {
+                    "soft_routing_enabled": False,
+                    "residual_weight_mean": 1.0,
+                    "residual_weight_sum": float(Q),
+                    "residual_weight_min": 1.0,
+                    "residual_weight_p10": 1.0,
+                    "residual_weight_p50": 1.0,
+                    "residual_weight_p90": 1.0,
+                    "explained_mass_mean": 0.0,
+                    "explicit_hub_top1_share": 0.0,
+                }
                 if str(args.protocol) == "soft_routing":
                     probs = torch.softmax(scores.detach(), dim=1)
                     conf, top_idx = torch.max(probs, dim=1)
@@ -610,13 +643,14 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                     row_weight = 1.0 - explained
                     cand_raw_tensor = torch.tensor(candidates, device=device, dtype=torch.long)
                     top_raw = cand_raw_tensor[top_idx]
-                    if float(args.hub_cap) < 1.0 and str(args.hub_raw_ids).strip():
-                        hub_ids = {int(float(x)) for x in str(args.hub_raw_ids).split(",") if str(x).strip()}
-                        if hub_ids:
-                            hub_mask = torch.zeros_like(row_weight, dtype=torch.bool)
-                            for hid in sorted(hub_ids):
-                                hub_mask |= top_raw == int(hid)
-                            row_weight = torch.where(hub_mask, torch.clamp(row_weight, min=float(1.0 - float(args.hub_cap))), row_weight)
+
+                    explicit_hub_ids = set() if bool(args.disable_explicit_hub_cap) else _parse_optional_id_set(args.hub_raw_ids)
+                    if float(args.hub_cap) < 1.0 and explicit_hub_ids:
+                        hub_mask = torch.zeros_like(row_weight, dtype=torch.bool)
+                        for hid in sorted(explicit_hub_ids):
+                            hub_mask |= top_raw == int(hid)
+                        row_weight = torch.where(hub_mask, torch.clamp(row_weight, min=float(1.0 - float(args.hub_cap))), row_weight)
+
                     if float(args.rare_floor) > 0.0:
                         floor_mask = torch.zeros_like(row_weight, dtype=torch.bool)
                         if str(args.soft_floor_scope) == "all":
@@ -626,15 +660,39 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                             for rid in residual_ids:
                                 floor_mask |= top_raw == int(rid)
                         row_weight = torch.where(floor_mask, torch.clamp(row_weight, min=float(args.rare_floor)), row_weight)
+
+                    if float(args.min_row_weight) > 0.0:
+                        row_weight = torch.clamp(row_weight, min=float(args.min_row_weight))
                     row_weight = torch.clamp(row_weight, min=0.0, max=1.0)
+
+                    if absorber_logging_enabled:
+                        probs_cpu = probs.detach().cpu().numpy().astype(np.float64)
+                        top_raw_list = top_raw.detach().cpu().numpy().astype(np.int64).tolist()
+                        top_counter = Counter(int(x) for x in top_raw_list)
+                        for j, raw_id in enumerate(candidates):
+                            rid = int(raw_id)
+                            absorber_epoch_support[rid] += 1.0
+                            absorber_epoch_mass[rid] += float(probs_cpu[:, j].sum())
+                            absorber_epoch_top1[rid] += float(top_counter.get(rid, 0))
+
                     denom = torch.clamp(row_weight.sum(), min=1.0)
                     sample_loss = (per_row_loss * row_weight).sum() / denom
+                    row_weight_np = row_weight.detach().cpu().numpy().astype(np.float64)
+                    explicit_hub_share = 0.0
+                    if explicit_hub_ids:
+                        top_raw_list_for_hub = top_raw.detach().cpu().numpy().astype(np.int64).tolist()
+                        explicit_hub_share = float(sum(1 for x in top_raw_list_for_hub if int(x) in explicit_hub_ids) / max(Q, 1))
                     soft_row = {
                         "soft_routing_enabled": True,
-                        "residual_weight_mean": float(row_weight.detach().mean().cpu().item()),
-                        "residual_weight_sum": float(row_weight.detach().sum().cpu().item()),
-                        "explained_mass_mean": float((1.0 - row_weight).detach().mean().cpu().item()),
-                        "hub_top1_share": float(sum(1 for x in top_raw.detach().cpu().numpy().astype(np.int64).tolist() if int(x) in {int(float(v)) for v in str(args.hub_raw_ids).split(',') if str(v).strip()}) / max(Q, 1)),
+                        "explicit_hub_cap_disabled": bool(args.disable_explicit_hub_cap),
+                        "residual_weight_mean": float(row_weight_np.mean()) if row_weight_np.size else 0.0,
+                        "residual_weight_sum": float(row_weight_np.sum()) if row_weight_np.size else 0.0,
+                        "residual_weight_min": float(row_weight_np.min()) if row_weight_np.size else 0.0,
+                        "residual_weight_p10": float(np.percentile(row_weight_np, 10)) if row_weight_np.size else 0.0,
+                        "residual_weight_p50": float(np.percentile(row_weight_np, 50)) if row_weight_np.size else 0.0,
+                        "residual_weight_p90": float(np.percentile(row_weight_np, 90)) if row_weight_np.size else 0.0,
+                        "explained_mass_mean": float((1.0 - row_weight_np).mean()) if row_weight_np.size else 0.0,
+                        "explicit_hub_top1_share": explicit_hub_share,
                     }
                 else:
                     sample_loss = per_row_loss.mean()
@@ -674,8 +732,13 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                 "trajectory_count_mean": _mean(batch_float_stats.get("trajectory_count", [])),
                 "empty_group_rate": float(batch_stats.get("groups_empty_candidate", 0) / max(batch_stats.get("groups_seen", 1), 1)),
                 "residual_weight_mean": _mean(batch_float_stats.get("residual_weight_mean", [])),
+                "residual_weight_sum_mean": _mean(batch_float_stats.get("residual_weight_sum", [])),
+                "residual_weight_min_mean": _mean(batch_float_stats.get("residual_weight_min", [])),
+                "residual_weight_p10_mean": _mean(batch_float_stats.get("residual_weight_p10", [])),
+                "residual_weight_p50_mean": _mean(batch_float_stats.get("residual_weight_p50", [])),
+                "residual_weight_p90_mean": _mean(batch_float_stats.get("residual_weight_p90", [])),
                 "explained_mass_mean": _mean(batch_float_stats.get("explained_mass_mean", [])),
-                "hub_top1_share": _mean(batch_float_stats.get("hub_top1_share", [])),
+                "explicit_hub_top1_share": _mean(batch_float_stats.get("explicit_hub_top1_share", [])),
             }
             _append_jsonl(runtime_metrics_path, batch_summary)
             _append_jsonl(protocol_metrics_path, batch_summary)
@@ -699,12 +762,57 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             "candidate_size_mean_epoch": _mean(epoch_float_stats.get("candidate_size_mean", [])),
             "empty_group_rate_epoch": _mean(epoch_float_stats.get("empty_group_rate", [])),
             "residual_weight_mean_epoch": _mean(epoch_float_stats.get("residual_weight_mean", [])),
+            "residual_weight_sum_mean_epoch": _mean(epoch_float_stats.get("residual_weight_sum_mean", [])),
+            "residual_weight_min_mean_epoch": _mean(epoch_float_stats.get("residual_weight_min_mean", [])),
+            "residual_weight_p10_mean_epoch": _mean(epoch_float_stats.get("residual_weight_p10_mean", [])),
+            "residual_weight_p50_mean_epoch": _mean(epoch_float_stats.get("residual_weight_p50_mean", [])),
+            "residual_weight_p90_mean_epoch": _mean(epoch_float_stats.get("residual_weight_p90_mean", [])),
             "explained_mass_mean_epoch": _mean(epoch_float_stats.get("explained_mass_mean", [])),
-            "hub_top1_share_epoch": _mean(epoch_float_stats.get("hub_top1_share", [])),
+            "explicit_hub_top1_share_epoch": _mean(epoch_float_stats.get("explicit_hub_top1_share", [])),
+            "absorber_logging_enabled": bool(absorber_logging_enabled),
             "round_hist_epoch": dict(round_hist),
         }
         _append_jsonl(runtime_metrics_path, epoch_summary)
         _append_jsonl(protocol_metrics_path, epoch_summary)
+
+        if absorber_logging_enabled:
+            all_absorber_ids = set(absorber_ema.keys()) | set(absorber_epoch_support.keys()) | set(absorber_epoch_mass.keys()) | set(absorber_epoch_top1.keys())
+            epoch_rows: List[Dict[str, Any]] = []
+            for rid in sorted(int(x) for x in all_absorber_ids):
+                prev = absorber_ema.get(int(rid), {"label_support_ema": 0.0, "responsibility_mass_ema": 0.0, "top1_count_ema": 0.0})
+                support_epoch = float(absorber_epoch_support.get(int(rid), 0.0))
+                mass_epoch = float(absorber_epoch_mass.get(int(rid), 0.0))
+                top1_epoch = float(absorber_epoch_top1.get(int(rid), 0.0))
+                support_ema = absorber_decay * float(prev.get("label_support_ema", 0.0)) + (1.0 - absorber_decay) * support_epoch
+                mass_ema = absorber_decay * float(prev.get("responsibility_mass_ema", 0.0)) + (1.0 - absorber_decay) * mass_epoch
+                top1_ema = absorber_decay * float(prev.get("top1_count_ema", 0.0)) + (1.0 - absorber_decay) * top1_epoch
+                absorber_ema[int(rid)] = {
+                    "label_support_ema": float(support_ema),
+                    "responsibility_mass_ema": float(mass_ema),
+                    "top1_count_ema": float(top1_ema),
+                }
+                absorber_score = float(mass_ema / max(support_ema, 1.0e-12)) if support_ema > 0 else 0.0
+                top1_absorb_score = float(top1_ema / max(support_ema, 1.0e-12)) if support_ema > 0 else 0.0
+                epoch_rows.append({
+                    "epoch": int(epoch_idx) + 1,
+                    "raw_id": int(rid),
+                    "class_name": class_name_by_raw.get(int(rid), ""),
+                    "label_support_epoch": support_epoch,
+                    "responsibility_mass_epoch": mass_epoch,
+                    "top1_count_epoch": top1_epoch,
+                    "label_support_ema": float(support_ema),
+                    "responsibility_mass_ema": float(mass_ema),
+                    "top1_count_ema": float(top1_ema),
+                    "absorber_score": absorber_score,
+                    "top1_absorb_score": top1_absorb_score,
+                })
+            epoch_rows_sorted = sorted(epoch_rows, key=lambda r: (float(r.get("absorber_score", 0.0)), float(r.get("top1_absorb_score", 0.0))), reverse=True)
+            for rank, row in enumerate(epoch_rows_sorted[:top_absorbers_k], start=1):
+                out = dict(row)
+                out["rank_by_absorber_score"] = int(rank)
+                top_absorber_rows.append(out)
+            absorber_ema_rows.extend(epoch_rows)
+
         if bool(args.print_epoch_summary):
             print(json.dumps({k: epoch_summary[k] for k in ["epoch", "protocol", "loss_mean", "effective_trajectory_count_epoch", "candidate_size_mean_epoch", "empty_group_rate_epoch"]}, ensure_ascii=False))
 
@@ -745,6 +853,45 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
     )
     _write_jsonl(train_dir / "responsibility_records.jsonl", response_rows)
 
+    absorber_outputs: Dict[str, str] = {}
+    if absorber_logging_enabled:
+        absorber_fields = [
+            "epoch", "raw_id", "class_name",
+            "label_support_epoch", "responsibility_mass_epoch", "top1_count_epoch",
+            "label_support_ema", "responsibility_mass_ema", "top1_count_ema",
+            "absorber_score", "top1_absorb_score",
+        ]
+        top_fields = absorber_fields + ["rank_by_absorber_score"]
+        final_rows = []
+        for rid, vals in sorted(absorber_ema.items()):
+            support = float(vals.get("label_support_ema", 0.0))
+            mass = float(vals.get("responsibility_mass_ema", 0.0))
+            top1 = float(vals.get("top1_count_ema", 0.0))
+            final_rows.append({
+                "epoch": int(epochs),
+                "raw_id": int(rid),
+                "class_name": class_name_by_raw.get(int(rid), ""),
+                "label_support_epoch": "",
+                "responsibility_mass_epoch": "",
+                "top1_count_epoch": "",
+                "label_support_ema": support,
+                "responsibility_mass_ema": mass,
+                "top1_count_ema": top1,
+                "absorber_score": float(mass / max(support, 1.0e-12)) if support > 0 else 0.0,
+                "top1_absorb_score": float(top1 / max(support, 1.0e-12)) if support > 0 else 0.0,
+            })
+        final_rows = sorted(final_rows, key=lambda r: (float(r.get("absorber_score", 0.0)), float(r.get("top1_absorb_score", 0.0))), reverse=True)
+        for rank, row in enumerate(final_rows, start=1):
+            row["rank_by_absorber_score"] = int(rank)
+        _write_csv_rows(train_dir / "absorber_ema_by_epoch.csv", absorber_ema_rows, absorber_fields)
+        _write_csv_rows(train_dir / "top_absorbers_by_epoch.csv", top_absorber_rows, top_fields)
+        _write_csv_rows(train_dir / "final_absorber_scores.csv", final_rows, top_fields)
+        absorber_outputs = {
+            "absorber_ema_by_epoch": str((Path("train") / "prealign" / "absorber_ema_by_epoch.csv").as_posix()),
+            "top_absorbers_by_epoch": str((Path("train") / "prealign" / "top_absorbers_by_epoch.csv").as_posix()),
+            "final_absorber_scores": str((Path("train") / "prealign" / "final_absorber_scores.csv").as_posix()),
+        }
+
     stage_summary = {
         "stage_id": "prealign",
         "pipeline": "gt_full_y_clean",
@@ -771,7 +918,13 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             "rare_floor": float(args.rare_floor),
             "hub_cap": float(args.hub_cap),
             "hub_raw_ids": str(args.hub_raw_ids),
+            "disable_explicit_hub_cap": bool(args.disable_explicit_hub_cap),
+            "min_row_weight": float(args.min_row_weight),
             "soft_floor_scope": str(args.soft_floor_scope),
+            "enable_absorber_logging": bool(args.enable_absorber_logging),
+            "absorber_ema_decay": float(args.absorber_ema_decay),
+            "top_absorbers_k": int(args.top_absorbers_k),
+            "absorber_outputs": absorber_outputs,
         } if str(args.protocol) == "soft_routing" else None,
     }
     _write_json(train_dir / "stage_summary.json", stage_summary)
@@ -842,6 +995,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rare_floor", type=float, default=0.25)
     p.add_argument("--hub_cap", type=float, default=0.75)
     p.add_argument("--hub_raw_ids", default="773")
+    p.add_argument("--disable_explicit_hub_cap", action="store_true", help="Ignore hub_raw_ids/hub_cap and use no hand-specified hub prior.")
+    p.add_argument("--min_row_weight", type=float, default=0.0, help="Global minimum soft-routing row weight; train-usable and does not use GT counts.")
+    p.add_argument("--enable_absorber_logging", action="store_true", help="Log observable class absorber EMA statistics without affecting loss.")
+    p.add_argument("--absorber_ema_decay", type=float, default=0.95)
+    p.add_argument("--top_absorbers_k", type=int, default=50)
     p.add_argument("--soft_floor_scope", default="residual", choices=("none", "all", "residual", "resolved"))
     return p.parse_args()
 
