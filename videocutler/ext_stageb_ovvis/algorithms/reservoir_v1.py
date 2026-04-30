@@ -864,6 +864,8 @@ def _sinkhorn_train_stage(
     for group in optimizer.param_groups:
         group['lr'] = float(learning_rate)
     runtime_metrics_path = output_root / 'train' / stage_id / 'runtime_metrics.jsonl'
+    residual_metrics_path = output_root / 'train' / stage_id / 'residual_training_metrics.jsonl'
+    residual_metrics_written = 0
     losses: List[float] = []
     batch_losses: List[float] = []
     global_step = 0
@@ -1013,6 +1015,21 @@ def _sinkhorn_train_stage(
                     'allowed_train_vocab_count': int(vocab_scope_policy.get('allowed_train_vocab_count', 0)),
                     **metric_row,
                 })
+            if residual_schedule is not None:
+                residual_payload = {
+                    'row_type': 'microbatch',
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'stage': str(stage_id),
+                    'epoch': int(epoch_index) + 1,
+                    'microbatch_idx': int(micro_idx),
+                    'microbatch_total': int(epoch_plan.batch_count),
+                    'loss': batch_val,
+                    'effective_trajectory_count': int(pack['q_mask'].sum().detach().cpu().item()),
+                    'candidate_column_count': int(pack['c_mask'].sum().detach().cpu().item()),
+                    **{k: v for k, v in metric_row.items() if str(k).startswith('residual_')},
+                }
+                _append_jsonl(residual_metrics_path, residual_payload)
+                residual_metrics_written += 1
         if bool(write_runtime_metrics_jsonl):
             merged: Dict[str, float] = {}
             if epoch_metric_rows:
@@ -1032,6 +1049,18 @@ def _sinkhorn_train_stage(
                 'optimization_loss_last': float(epoch_batch_losses[-1]) if epoch_batch_losses else 0.0,
                 **merged,
             })
+            if residual_schedule is not None:
+                residual_epoch_payload = {
+                    'row_type': 'epoch_summary',
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'stage': str(stage_id),
+                    'epoch': int(epoch_index) + 1,
+                    'microbatch_count': int(len(epoch_batch_losses)),
+                    'loss_mean': _mean_or_zero(epoch_losses),
+                    'loss_last': float(epoch_losses[-1]) if epoch_losses else 0.0,
+                    **{k: v for k, v in merged.items() if str(k).startswith('residual_')},
+                }
+                _append_jsonl(residual_metrics_path, residual_epoch_payload)
     return {
         'stage_id': str(stage_id),
         'loss_mean': _mean_or_zero(losses),
@@ -1066,6 +1095,8 @@ def _sinkhorn_train_stage(
         'residual_peeling_enabled': bool(residual_schedule is not None),
         'residual_candidate_policy': str(residual_candidate_policy),
         'known_null_gate': str(known_null_gate),
+        'residual_metrics_written': int(residual_metrics_written),
+        'residual_metrics_path': str(residual_metrics_path.relative_to(output_root)) if bool(residual_schedule is not None) else '',
     }
 
 
@@ -1257,12 +1288,17 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
             variant=str(config.residual_variant),
             epoch_plan=str(config.residual_round_epoch_plan),
         )
-        residual_schedule_summary = {**residual_schedule_obj.public_summary(), 'enabled': True}
+        residual_total_epochs = int(sum(int(x) for x in list(residual_schedule_obj.epoch_plan)))
+        if residual_total_epochs <= 0:
+            raise ValueError(f'residual_round_epoch_plan must contain at least one positive epoch: {config.residual_round_epoch_plan!r}')
+        residual_schedule_summary = {**residual_schedule_obj.public_summary(), 'enabled': True, 'effective_prealign_epochs': residual_total_epochs, 'prealign_epochs_overridden_by_residual_plan': True}
         _write_json(output_root / 'train' / 'residual_peeling_schedule_summary.json', residual_schedule_summary)
+    else:
+        residual_total_epochs = int(config.prealign_epochs)
     pre_stage = _sinkhorn_train_stage(
         stage_id='prealign', groups=pre_groups, output_root=output_root, projector=projector, theta_t=theta_t,
         text_vocab_tensor=text_vocab_tensor, raw_to_vocab_idx=raw_to_vocab_idx, optimizer=optimizer,
-        epochs=int(config.prealign_epochs), learning_rate=float(config.prealign_learning_rate), batch_budget=int(batch_budget), seed=int(config.seed), mode='prealign',
+        epochs=int(residual_total_epochs), learning_rate=float(config.prealign_learning_rate), batch_budget=int(batch_budget), seed=int(config.seed), mode='prealign',
         sinkhorn_tau=float(config.sinkhorn_tau), sinkhorn_iters=int(config.sinkhorn_iters), sinkhorn_row_cap_scale=float(config.sinkhorn_row_cap_scale),
         extra_demand=0.0, extra_lambda=0.0, assignment_stopgrad=bool(config.sinkhorn_assignment_stopgrad), safe_negatives=bool(config.sinkhorn_safe_negatives), safe_neg_count=int(config.sinkhorn_safe_neg_count), safe_neg_weight=float(config.sinkhorn_safe_neg_weight), safe_neg_text_sim_threshold=float(config.sinkhorn_safe_neg_text_sim_threshold), safe_neg_exclude_model_topk=int(config.sinkhorn_safe_neg_exclude_model_topk), safe_neg_seed=int(config.sinkhorn_safe_neg_seed), sinkhorn_final_rerank_lambda_r=float(config.sinkhorn_final_rerank_lambda_r), allowed_vocab_mask=allowed_vocab_mask, vocab_scope_policy=vocab_scope_policy, show_progress=bool(config.show_progress), write_runtime_metrics_jsonl=bool(config.write_runtime_metrics_jsonl),
         enable_null_column=bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only',
@@ -1287,12 +1323,14 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         known_null_gate=str(config.known_null_gate),
         known_null_margin=float(config.known_null_margin),
     )
+    if residual_schedule_obj is not None and int(pre_stage.get('residual_metrics_written', 0)) <= 0:
+        raise RuntimeError('RCP oracle_static requested but no residual_training_metrics rows were written; residual hook did not execute on the active training path')
     train_dir = output_root / 'train' / 'prealign'
     ckpt_dir = train_dir / 'checkpoints'
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_last_path = ckpt_dir / 'prealign_last.pth'
     torch.save({
-        'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'text_projector_state_dict': projector.state_dict(),
+        'stage_id': 'prealign', 'epoch': int(residual_total_epochs), 'text_projector_state_dict': projector.state_dict(),
         'text_projector_config': {'input_dim': int(config.projector.input_dim), 'hidden_dim': int(config.projector.hidden_dim), 'output_dim': int(config.projector.output_dim), 'dropout': float(config.projector.dropout), 'use_layernorm': bool(config.projector.use_layernorm)},
         'theta_T': float(theta_t.detach().cpu().item()), 'b_u': 0.0, 'unknown_disabled': True,
         'seed': int(config.seed), 'global_step': int(pre_stage.get('global_step', 0)), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'safe_neg_count': int(config.sinkhorn_safe_neg_count), 'safe_neg_weight': float(config.sinkhorn_safe_neg_weight), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'support_null_state_snapshot': dict(pre_stage.get('private_support_state_snapshot', {})), 'residual_peeling_schedule': residual_schedule_summary, 'support_null_config': {'enable_null_column': bool(config.sinkhorn_enable_null_column) or str(stage_scope) == 'support_null_prealign_base_only', 'null_logit_bias': float(config.sinkhorn_null_logit_bias), 'null_residual': bool(config.sinkhorn_null_residual) or str(stage_scope) == 'support_null_prealign_base_only', 'null_demand_cap_ratio': float(config.sinkhorn_null_demand_cap_ratio), 'yprime_demand_mode': str(config.sinkhorn_yprime_demand_mode), 'yprime_demand_min': float(config.sinkhorn_yprime_demand_min), 'yprime_support_topk': int(config.sinkhorn_yprime_support_topk), 'yprime_support_temp': float(config.sinkhorn_yprime_support_temp), 'positive_protection_enabled': bool(config.sinkhorn_enable_positive_protection), 'positive_margin_threshold': float(config.sinkhorn_positive_margin_threshold), 'positive_margin_temp': float(config.sinkhorn_positive_margin_temp), 'positive_null_cap': float(config.sinkhorn_positive_null_cap), 'positive_redistribute_mode': str(config.sinkhorn_positive_redistribute_mode)}, 'vocab_scope_policy': vocab_scope_policy
@@ -1315,15 +1353,15 @@ def run_reservoir_sinkhorn_no_unknown(*, output_root: Path, materialized_samples
         positive_redistribute_mode=str(config.sinkhorn_positive_redistribute_mode),
         residual_schedule=residual_schedule_obj,
         residual_candidate_policy=str(config.residual_candidate_policy),
-        residual_collect_epoch_index=max(0, int(config.prealign_epochs) - 1),
+        residual_collect_epoch_index=max(0, int(residual_total_epochs) - 1),
     )
     _write_jsonl(train_dir / 'proxy_records.jsonl', pre_proxy_rows)
     _write_jsonl(train_dir / 'responsibility_records.jsonl', pre_proxy_rows)
-    pre_train_state = {'stage_id': 'prealign', 'epoch': int(config.prealign_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy, 'residual_peeling_schedule': residual_schedule_summary}
+    pre_train_state = {'stage_id': 'prealign', 'epoch': int(residual_total_epochs), 'selected_for_infer': 'prealign_only', 'selected_for_infer_authority': 'explicit_train_state_field', 'checkpoint_last': 'train/prealign/checkpoints/prealign_last.pth', 'checkpoint_selected': 'train/prealign/checkpoints/prealign_last.pth', 'global_step': int(pre_stage.get('global_step', 0)), 'runtime_asset_source': str(config.runtime_asset_source), 'runtime_asset_source_local_incomplete': bool(config.runtime_asset_source_local_incomplete), 'runtime_asset_output_root': str(config.runtime_asset_output_root), 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'training_semantics': 'sinkhorn_safe_neg_yprime_nce_no_unknown' if bool(config.sinkhorn_safe_negatives) else 'sinkhorn_yprime_nce_no_unknown', 'unknown_disabled': True, 'safe_neg_enabled': bool(config.sinkhorn_safe_negatives), 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy, 'residual_peeling_schedule': residual_schedule_summary}
     _write_json(train_dir / 'train_state.json', pre_train_state)
     pre_scope_contract = _sinkhorn_scope_contract_fields(vocab_scope_policy)
     pre_stage_public = {k: v for k, v in dict(pre_stage).items() if k != 'private_support_state_snapshot'}
-    pre_summary = {**pre_stage_public, **pre_scope_contract, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy}
+    pre_summary = {**pre_stage_public, **pre_scope_contract, 'pipeline': 'reservoir_v1_sinkhorn_no_unknown', 'unknown_disabled': True, 'record_count_output': int(len(pre_proxy_rows)), 'checkpoint_last_path': 'train/prealign/checkpoints/prealign_last.pth', 'sinkhorn_extra_margin_gate': float(config.sinkhorn_extra_margin_gate) if config.sinkhorn_extra_margin_gate is not None else None, 'sinkhorn_final_rerank_lambda_r': float(config.sinkhorn_final_rerank_lambda_r), 'vocab_scope_policy': vocab_scope_policy, 'residual_peeling_schedule': residual_schedule_summary}
     _write_json(train_dir / 'stage_summary.json', pre_summary)
     if bool(pre_stage.get('support_null_enabled', False)):
         _write_json(train_dir / 'support_null_summary.json', {
