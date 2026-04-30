@@ -129,6 +129,67 @@ def _as_int(x: Any) -> Optional[int]:
             return None
 
 
+    for rec in obj.get("categories", []) or []:
+        if not isinstance(rec, Mapping):
+            continue
+        raw_id = _as_int(rec.get("id"))
+        if raw_id is None:
+            continue
+        name = rec.get("name") or rec.get("category_name") or rec.get("synset") or str(raw_id)
+        out[int(raw_id)] = str(name)
+    return out
+
+
+def _class_name_map_from_annotation_json(annotation_json: Path) -> Dict[int, str]:
+    """Build raw category id -> class name map from LV-VIS annotation JSON.
+
+    Diagnostic-only helper for absorber logging. It must not affect training loss.
+    """
+    out: Dict[int, str] = {}
+    try:
+        obj = json.loads(Path(annotation_json).read_text(encoding="utf-8"))
+    except Exception:
+        return out
+    for rec in obj.get("categories", []) or []:
+        if not isinstance(rec, Mapping):
+            continue
+        raw_id = _as_int(rec.get("id"))
+        if raw_id is None:
+            continue
+        name = rec.get("name") or rec.get("category_name") or rec.get("synset") or str(raw_id)
+        out[int(raw_id)] = str(name)
+    return out
+
+
+def _class_name_map_from_text_records(records: Sequence[Mapping[str, Any]]) -> Dict[int, str]:
+    """Build raw category id -> class name map from text prototype records.
+
+    This is used only for absorber logging / diagnostics. It must not affect loss.
+    """
+    out: Dict[int, str] = {}
+    for rec in records or []:
+        if not isinstance(rec, Mapping):
+            continue
+
+        raw_id = None
+        for key in ("raw_id", "raw_category_id", "category_id", "class_id", "id"):
+            raw_id = _as_int(rec.get(key))
+            if raw_id is not None:
+                break
+        if raw_id is None:
+            continue
+
+        name = ""
+        for key in ("class_name", "category_name", "name", "synset", "label"):
+            val = rec.get(key)
+            if val is not None and str(val).strip():
+                name = str(val).strip()
+                break
+
+        out[int(raw_id)] = name or str(raw_id)
+    return out
+
+
 def _truthy(x: Any) -> bool:
     return str(x).strip().lower() in {"1", "true", "yes", "y", "on"}
 
@@ -539,7 +600,10 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
         epochs = int(args.epochs if args.epochs is not None else 15)
 
     text_vocab_ids, _text_records, text_vocab_matrix = load_text_vocab(output_root)
-    class_name_by_raw = _class_name_map_from_text_records(_text_records if isinstance(_text_records, list) else [])
+    class_name_by_raw = _class_name_map_from_text_records(_text_records if isinstance(_text_records, (list, tuple)) else (list(_text_records.values()) if isinstance(_text_records, dict) else []))
+    ann_name_by_raw = _class_name_map_from_annotation_json(Path(args.annotation_json))
+    if ann_name_by_raw:
+        class_name_by_raw.update(ann_name_by_raw)
     raw_to_idx = {int(raw_id): idx for idx, raw_id in enumerate(text_vocab_ids)}
     text_vocab_tensor = torch.from_numpy(np.asarray(text_vocab_matrix, dtype=np.float32)).to(device=device, dtype=torch.float32)
     projector_cfg = ProjectorConfig()
