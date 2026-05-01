@@ -198,6 +198,16 @@ def _mean(vals: Sequence[float]) -> float:
     return float(np.mean(np.asarray(list(vals), dtype=np.float32))) if vals else 0.0
 
 
+def _percentile(vals: Sequence[float], q: float) -> float:
+    arr = np.asarray(list(vals), dtype=np.float32)
+    if arr.size <= 0:
+        return 0.0
+    qq = float(q)
+    if qq <= 1.0:
+        qq *= 100.0
+    return float(np.percentile(arr, qq))
+
+
 def _normalize_np(vec: np.ndarray) -> np.ndarray:
     arr = np.asarray(vec, dtype=np.float32).reshape(-1)
     denom = float(np.linalg.norm(arr))
@@ -213,6 +223,48 @@ def _inverse_softplus(value: float) -> float:
 
 def _compute_t_dis(theta_t: torch.nn.Parameter) -> torch.Tensor:
     return F.softplus(theta_t) + 1.0e-4
+
+
+def _support_floor_absorber_score(ema_row: Mapping[str, float], support_floor: float) -> float:
+    support = float(ema_row.get("label_support_ema", 0.0))
+    mass = float(ema_row.get("responsibility_mass_ema", 0.0))
+    if support <= 0.0 and mass <= 0.0:
+        return 0.0
+    return float(mass / max(support, float(support_floor)))
+
+
+def _build_support_floor_absorber_class_weights(
+    absorber_ema: Mapping[int, Mapping[str, float]],
+    *,
+    support_floor: float,
+    alpha: float,
+    min_class_weight: float,
+) -> Tuple[Dict[int, float], Dict[str, float]]:
+    rows: List[Tuple[int, float]] = []
+    for rid, ema_row in sorted(absorber_ema.items()):
+        rows.append((int(rid), _support_floor_absorber_score(ema_row, float(support_floor))))
+    scores = [float(score) for _, score in rows]
+    score_p95 = _percentile(scores, 0.95)
+    if score_p95 <= 1.0e-12:
+        weights = {rid: 1.0 for rid, _ in rows}
+    else:
+        weights = {
+            rid: float(np.clip(1.0 - float(alpha) * float(np.clip(score / score_p95, 0.0, 1.0)), float(min_class_weight), 1.0))
+            for rid, score in rows
+        }
+    weight_vals = list(weights.values())
+    stats = {
+        "tracked_class_count": float(len(rows)),
+        "support_floor_score_mean": _mean(scores),
+        "support_floor_score_min": float(min(scores)) if scores else 0.0,
+        "support_floor_score_p95": float(score_p95),
+        "class_weight_mean": _mean(weight_vals),
+        "class_weight_min": float(min(weight_vals)) if weight_vals else 1.0,
+        "class_weight_p10": _percentile(weight_vals, 0.10),
+        "class_weight_p50": _percentile(weight_vals, 0.50),
+        "class_weight_p90": _percentile(weight_vals, 0.90),
+    }
+    return weights, stats
 
 
 def _iter_progress(iterable: Iterable[Any], *, enabled: bool, **kwargs):
@@ -591,8 +643,10 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             raise ValueError("schedule_csv is required for static_residual or residual soft floor scope")
         schedule = _load_residual_schedule(Path(args.schedule_csv), variant=str(args.residual_variant), epoch_plan=str(args.round_epoch_plan), base_ids=base_ids)
 
-    if bool(args.enable_absorber_logging) and str(args.protocol) != "soft_routing":
+    if (bool(args.enable_absorber_logging) or bool(args.enable_auto_absorber_weight)) and str(args.protocol) != "soft_routing":
         raise ValueError("--enable_absorber_logging is only supported for --protocol soft_routing")
+    if bool(args.enable_auto_absorber_weight) and str(args.absorber_metric) != "support_floor":
+        raise ValueError("--absorber_metric currently supports only support_floor")
 
     if str(args.protocol) == "static_residual" and args.epochs is None:
         epochs = int(sum(_parse_epoch_plan(str(args.round_epoch_plan))))
@@ -628,10 +682,18 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
     train_start = datetime.now(timezone.utc).isoformat()
 
     absorber_logging_enabled = bool(args.enable_absorber_logging)
+    absorber_logging_enabled = absorber_logging_enabled or bool(args.enable_auto_absorber_weight)
     absorber_decay = float(args.absorber_ema_decay)
+    absorber_auto_weight_enabled = bool(args.enable_auto_absorber_weight) and str(args.protocol) == "soft_routing"
+    absorber_support_floor = float(args.absorber_support_floor)
+    absorber_alpha = float(args.absorber_alpha)
+    absorber_min_class_weight = float(args.absorber_min_class_weight)
+    absorber_warmup_epochs = int(args.absorber_warmup_epochs)
+    absorber_metric = str(args.absorber_metric)
     absorber_ema: Dict[int, Dict[str, float]] = {}
     absorber_ema_rows: List[Dict[str, Any]] = []
     top_absorber_rows: List[Dict[str, Any]] = []
+    class_weight_stats_rows: List[Dict[str, Any]] = []
     top_absorbers_k = max(1, int(args.top_absorbers_k))
 
     for epoch_idx in _iter_progress(range(epochs), enabled=bool(args.show_progress), desc=f"{args.protocol} epochs", leave=True):
@@ -647,6 +709,37 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
         absorber_epoch_support: Dict[int, float] = defaultdict(float)
         absorber_epoch_mass: Dict[int, float] = defaultdict(float)
         absorber_epoch_top1: Dict[int, float] = defaultdict(float)
+        absorber_active_after_warmup = bool(absorber_auto_weight_enabled and (int(epoch_idx) + 1 > absorber_warmup_epochs))
+        class_weight_lookup: Dict[int, float] = {}
+        class_weight_lookup_stats: Dict[str, float] = {
+            "tracked_class_count": float(len(absorber_ema)),
+            "support_floor_score_mean": 0.0,
+            "support_floor_score_min": 0.0,
+            "support_floor_score_p95": 0.0,
+            "class_weight_mean": 1.0,
+            "class_weight_min": 1.0,
+            "class_weight_p10": 1.0,
+            "class_weight_p50": 1.0,
+            "class_weight_p90": 1.0,
+        }
+        if absorber_active_after_warmup:
+            class_weight_lookup, class_weight_lookup_stats = _build_support_floor_absorber_class_weights(
+                absorber_ema,
+                support_floor=absorber_support_floor,
+                alpha=absorber_alpha,
+                min_class_weight=absorber_min_class_weight,
+            )
+        class_weight_stats_rows.append({
+            "epoch": int(epoch_idx) + 1,
+            "absorber_metric": absorber_metric,
+            "absorber_support_floor": absorber_support_floor,
+            "absorber_alpha": absorber_alpha,
+            "absorber_min_class_weight": absorber_min_class_weight,
+            "absorber_warmup_epochs": absorber_warmup_epochs,
+            "absorber_ema_decay": absorber_decay,
+            "absorber_active_after_warmup": bool(absorber_active_after_warmup),
+            **class_weight_lookup_stats,
+        })
 
         for mb_idx, batch_indices in enumerate(batches, start=1):
             optimizer.zero_grad(set_to_none=True)
@@ -689,6 +782,7 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                 log_probs = torch.log_softmax(scores, dim=1)
                 per_row_loss = -(P_for_loss * log_probs).sum(dim=1)
                 row_weight = torch.ones((Q,), device=device, dtype=torch.float32)
+                class_weight_row = torch.ones((Q,), device=device, dtype=torch.float32)
                 soft_row = {
                     "soft_routing_enabled": False,
                     "residual_weight_mean": 1.0,
@@ -699,6 +793,12 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                     "residual_weight_p90": 1.0,
                     "explained_mass_mean": 0.0,
                     "explicit_hub_top1_share": 0.0,
+                    "class_weight_mean": 1.0,
+                    "class_weight_min": 1.0,
+                    "class_weight_p10": 1.0,
+                    "class_weight_p50": 1.0,
+                    "class_weight_p90": 1.0,
+                    "absorber_active_after_warmup": float(absorber_active_after_warmup),
                 }
                 if str(args.protocol) == "soft_routing":
                     probs = torch.softmax(scores.detach(), dim=1)
@@ -729,6 +829,15 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                         row_weight = torch.clamp(row_weight, min=float(args.min_row_weight))
                     row_weight = torch.clamp(row_weight, min=0.0, max=1.0)
 
+                    if absorber_active_after_warmup and class_weight_lookup:
+                        cand_class_weights = torch.tensor(
+                            [float(class_weight_lookup.get(int(rid), 1.0)) for rid in candidates],
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                        class_weight_row = torch.sum(P_for_loss.detach() * cand_class_weights.unsqueeze(0), dim=1)
+                        class_weight_row = torch.clamp(class_weight_row, min=float(absorber_min_class_weight), max=1.0)
+
                     if absorber_logging_enabled:
                         probs_cpu = probs.detach().cpu().numpy().astype(np.float64)
                         top_raw_list = top_raw.detach().cpu().numpy().astype(np.int64).tolist()
@@ -739,9 +848,11 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                             absorber_epoch_mass[rid] += float(probs_cpu[:, j].sum())
                             absorber_epoch_top1[rid] += float(top_counter.get(rid, 0))
 
-                    denom = torch.clamp(row_weight.sum(), min=1.0)
-                    sample_loss = (per_row_loss * row_weight).sum() / denom
+                    effective_row_weight = row_weight * class_weight_row
+                    denom = torch.clamp(effective_row_weight.sum(), min=1.0)
+                    sample_loss = (per_row_loss * effective_row_weight).sum() / denom
                     row_weight_np = row_weight.detach().cpu().numpy().astype(np.float64)
+                    class_weight_row_np = class_weight_row.detach().cpu().numpy().astype(np.float64)
                     explicit_hub_share = 0.0
                     if explicit_hub_ids:
                         top_raw_list_for_hub = top_raw.detach().cpu().numpy().astype(np.int64).tolist()
@@ -757,6 +868,12 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                         "residual_weight_p90": float(np.percentile(row_weight_np, 90)) if row_weight_np.size else 0.0,
                         "explained_mass_mean": float((1.0 - row_weight_np).mean()) if row_weight_np.size else 0.0,
                         "explicit_hub_top1_share": explicit_hub_share,
+                        "class_weight_mean": float(class_weight_row_np.mean()) if class_weight_row_np.size else 1.0,
+                        "class_weight_min": float(class_weight_row_np.min()) if class_weight_row_np.size else 1.0,
+                        "class_weight_p10": float(np.percentile(class_weight_row_np, 10)) if class_weight_row_np.size else 1.0,
+                        "class_weight_p50": float(np.percentile(class_weight_row_np, 50)) if class_weight_row_np.size else 1.0,
+                        "class_weight_p90": float(np.percentile(class_weight_row_np, 90)) if class_weight_row_np.size else 1.0,
+                        "absorber_active_after_warmup": float(absorber_active_after_warmup),
                     }
                 else:
                     sample_loss = per_row_loss.mean()
@@ -803,6 +920,12 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                 "residual_weight_p90_mean": _mean(batch_float_stats.get("residual_weight_p90", [])),
                 "explained_mass_mean": _mean(batch_float_stats.get("explained_mass_mean", [])),
                 "explicit_hub_top1_share": _mean(batch_float_stats.get("explicit_hub_top1_share", [])),
+                "class_weight_mean": _mean(batch_float_stats.get("class_weight_mean", [])),
+                "class_weight_min": _mean(batch_float_stats.get("class_weight_min", [])),
+                "class_weight_p10": _mean(batch_float_stats.get("class_weight_p10", [])),
+                "class_weight_p50": _mean(batch_float_stats.get("class_weight_p50", [])),
+                "class_weight_p90": _mean(batch_float_stats.get("class_weight_p90", [])),
+                "absorber_active_after_warmup": bool(absorber_active_after_warmup),
             }
             _append_jsonl(runtime_metrics_path, batch_summary)
             _append_jsonl(protocol_metrics_path, batch_summary)
@@ -833,6 +956,12 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             "residual_weight_p90_mean_epoch": _mean(epoch_float_stats.get("residual_weight_p90_mean", [])),
             "explained_mass_mean_epoch": _mean(epoch_float_stats.get("explained_mass_mean", [])),
             "explicit_hub_top1_share_epoch": _mean(epoch_float_stats.get("explicit_hub_top1_share", [])),
+            "class_weight_mean_epoch": _mean(epoch_float_stats.get("class_weight_mean", [])),
+            "class_weight_min_epoch": _mean(epoch_float_stats.get("class_weight_min", [])),
+            "class_weight_p10_epoch": _mean(epoch_float_stats.get("class_weight_p10", [])),
+            "class_weight_p50_epoch": _mean(epoch_float_stats.get("class_weight_p50", [])),
+            "class_weight_p90_epoch": _mean(epoch_float_stats.get("class_weight_p90", [])),
+            "absorber_active_after_warmup": bool(absorber_active_after_warmup),
             "absorber_logging_enabled": bool(absorber_logging_enabled),
             "round_hist_epoch": dict(round_hist),
         }
@@ -955,6 +1084,28 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             "top_absorbers_by_epoch": str((Path("train") / "prealign" / "top_absorbers_by_epoch.csv").as_posix()),
             "final_absorber_scores": str((Path("train") / "prealign" / "final_absorber_scores.csv").as_posix()),
         }
+    class_weight_stats_path = train_dir / "class_weight_stats_by_epoch.csv"
+    if class_weight_stats_rows:
+        class_weight_fields = [
+            "epoch",
+            "absorber_metric",
+            "absorber_support_floor",
+            "absorber_alpha",
+            "absorber_min_class_weight",
+            "absorber_warmup_epochs",
+            "absorber_ema_decay",
+            "absorber_active_after_warmup",
+            "tracked_class_count",
+            "support_floor_score_mean",
+            "support_floor_score_min",
+            "support_floor_score_p95",
+            "class_weight_mean",
+            "class_weight_min",
+            "class_weight_p10",
+            "class_weight_p50",
+            "class_weight_p90",
+        ]
+        _write_csv_rows(class_weight_stats_path, class_weight_stats_rows, class_weight_fields)
 
     stage_summary = {
         "stage_id": "prealign",
@@ -986,8 +1137,15 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             "min_row_weight": float(args.min_row_weight),
             "soft_floor_scope": str(args.soft_floor_scope),
             "enable_absorber_logging": bool(args.enable_absorber_logging),
+            "enable_auto_absorber_weight": bool(args.enable_auto_absorber_weight),
+            "absorber_metric": str(absorber_metric),
+            "absorber_support_floor": float(absorber_support_floor),
+            "absorber_alpha": float(absorber_alpha),
+            "absorber_min_class_weight": float(absorber_min_class_weight),
+            "absorber_warmup_epochs": int(absorber_warmup_epochs),
             "absorber_ema_decay": float(args.absorber_ema_decay),
             "top_absorbers_k": int(args.top_absorbers_k),
+            "class_weight_stats_by_epoch": str((Path("train") / "prealign" / "class_weight_stats_by_epoch.csv").as_posix()) if class_weight_stats_rows else None,
             "absorber_outputs": absorber_outputs,
         } if str(args.protocol) == "soft_routing" else None,
     }
@@ -1062,6 +1220,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable_explicit_hub_cap", action="store_true", help="Ignore hub_raw_ids/hub_cap and use no hand-specified hub prior.")
     p.add_argument("--min_row_weight", type=float, default=0.0, help="Global minimum soft-routing row weight; train-usable and does not use GT counts.")
     p.add_argument("--enable_absorber_logging", action="store_true", help="Log observable class absorber EMA statistics without affecting loss.")
+    p.add_argument("--enable_auto_absorber_weight", action="store_true", help="Enable stop-gradient class absorber downweighting after warmup using observable support-floor EMA statistics.")
+    p.add_argument("--absorber_metric", default="support_floor")
+    p.add_argument("--absorber_support_floor", type=float, default=20.0)
+    p.add_argument("--absorber_alpha", type=float, default=0.02)
+    p.add_argument("--absorber_min_class_weight", type=float, default=0.95)
+    p.add_argument("--absorber_warmup_epochs", type=int, default=5)
     p.add_argument("--absorber_ema_decay", type=float, default=0.95)
     p.add_argument("--top_absorbers_k", type=int, default=50)
     p.add_argument("--soft_floor_scope", default="residual", choices=("none", "all", "residual", "resolved"))
