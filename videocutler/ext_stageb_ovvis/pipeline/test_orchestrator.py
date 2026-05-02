@@ -74,6 +74,7 @@ def run_test_pipeline(plan: TestPlan) -> Dict[str, Any]:
                 device=plan.device,
                 metrics_profile=plan.metrics_profile,
                 selected_for_infer=str(inference_summary.get('selected_for_infer', 'augmented')),
+                ckpt_path=str(plan.ckpt_path) if plan.ckpt_path is not None else None,
                 show_progress=True,
             )
             stage_bar.update(1)

@@ -144,12 +144,23 @@ def canonical_checkpoint_relpath(selected_for_infer: str) -> str:
 def resolve_selected_for_infer(output_root: Path, *, ckpt_path: str | None = None) -> InferResolution:
     rule = load_train_infer_handoff_rule()
     if ckpt_path:
+        checkpoint_path = Path(ckpt_path).expanduser().resolve()
+        checkpoint_payload: Dict[str, Any] | None = None
+        selected_for_infer = "augmented"
+        try:
+            checkpoint_payload = torch.load(checkpoint_path, map_location="cpu")
+            pipeline = str(checkpoint_payload.get("pipeline", "")).strip()
+            label_source = str(checkpoint_payload.get("label_source", "")).strip()
+            if bool(checkpoint_payload.get("vc_full_y_validation", False)) or pipeline == "videocutler_full_y_clean" or label_source == "full_Y_base":
+                selected_for_infer = "prealign_only"
+        except Exception:
+            checkpoint_payload = None
         return InferResolution(
-            selected_for_infer="augmented",
-            checkpoint_path=Path(ckpt_path).expanduser().resolve(),
+            selected_for_infer=selected_for_infer,
+            checkpoint_path=checkpoint_path,
             source="run_meta_override_only",
             train_state_path=None,
-            train_state_payload=None,
+            train_state_payload=checkpoint_payload,
         )
 
     state_relpaths = rule["state_files"]

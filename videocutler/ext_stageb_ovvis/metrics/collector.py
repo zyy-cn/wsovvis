@@ -139,7 +139,7 @@ def run_inference(*, output_root: Path, dataset_name: str, device: str, seed: in
             stage_bar.close()
 
 
-def collect_gt_attribution_rank(*, output_root: Path, dataset_name: str, device: str, metrics_profile: str, selected_for_infer: str, show_progress: bool = True) -> Dict[str, Any]:
+def collect_gt_attribution_rank(*, output_root: Path, dataset_name: str, device: str, metrics_profile: str, selected_for_infer: str, ckpt_path: Optional[str] = None, show_progress: bool = True) -> Dict[str, Any]:
     stage = 'all' if str(metrics_profile) == 'formal' else _selected_audit_stage(selected_for_infer)
     bar = tqdm(total=1, desc=f'gt_attribution_rank[{stage}]', unit='stage', leave=True) if show_progress else None
     try:
@@ -149,6 +149,7 @@ def collect_gt_attribution_rank(*, output_root: Path, dataset_name: str, device:
                 output_root=output_root,
                 stage=stage,
                 device=torch.device(device),
+                ckpt_path=ckpt_path,
                 all_gt_only=True,
                 all_gt_generate_sidecars_if_missing=False,
             )

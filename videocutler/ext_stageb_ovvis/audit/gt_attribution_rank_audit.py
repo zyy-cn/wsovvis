@@ -71,6 +71,7 @@ class GTAttributionRankAuditConfig:
     device: torch.device
     logit_chunk_size: int = 256
     trajectory_source_branch: str = "mainline"
+    ckpt_path: Optional[str] = None
     all_gt_only: bool = False
     all_gt_generate_sidecars_if_missing: bool = False
     all_gt_heartbeat_every_rows: int = 256
@@ -524,8 +525,8 @@ def _all_gt_split_label(*, dataset_name: str, gt_raw_id: int, observed_raw_ids: 
     raise ValueError(f"unsupported dataset_name for all-GT split label: {dataset_name}")
 
 
-def _resolve_asset_roots(output_root: Path) -> InferenceAssetRoots:
-    resolution = resolve_selected_for_infer(output_root)
+def _resolve_asset_roots(output_root: Path, *, ckpt_path: Optional[str] = None) -> InferenceAssetRoots:
+    resolution = resolve_selected_for_infer(output_root, ckpt_path=ckpt_path)
     return resolve_inference_asset_roots(
         output_root,
         dataset_name=resolution.train_state_payload.get("dataset_name", "lvvis_val") if resolution.train_state_payload else "lvvis_val",
@@ -534,8 +535,8 @@ def _resolve_asset_roots(output_root: Path) -> InferenceAssetRoots:
     )
 
 
-def _resolve_asset_roots_for_dataset(output_root: Path, dataset_name: str) -> InferenceAssetRoots:
-    resolution = resolve_selected_for_infer(output_root)
+def _resolve_asset_roots_for_dataset(output_root: Path, dataset_name: str, *, ckpt_path: Optional[str] = None) -> InferenceAssetRoots:
+    resolution = resolve_selected_for_infer(output_root, ckpt_path=ckpt_path)
     return resolve_inference_asset_roots(
         output_root,
         dataset_name=dataset_name,
@@ -544,7 +545,9 @@ def _resolve_asset_roots_for_dataset(output_root: Path, dataset_name: str) -> In
     )
 
 
-def _stage_checkpoint_path(output_root: Path, stage: str) -> Path:
+def _stage_checkpoint_path(output_root: Path, stage: str, *, ckpt_path: Optional[str] = None) -> Path:
+    if ckpt_path:
+        return Path(ckpt_path).expanduser().resolve()
     selected = STAGE_TO_SELECTED[stage]
     return (output_root / canonical_checkpoint_relpath(selected)).resolve()
 
@@ -699,7 +702,7 @@ def _prepare_all_gt_shared_inputs(config: GTAttributionRankAuditConfig) -> Dict[
         clip_ids=[int(x) for x in clip_ids],
         generate_if_missing=bool(config.all_gt_generate_sidecars_if_missing),
     )
-    asset_roots = _resolve_asset_roots_for_dataset(config.output_root, config.dataset_name)
+    asset_roots = _resolve_asset_roots_for_dataset(config.output_root, config.dataset_name, ckpt_path=config.ckpt_path)
     gt_payload = _load_gt_payload(config.dataset_name)
     full_vocab_ids, vocab_matrix = _dataset_vocab(asset_roots.asset_root, config.dataset_name, gt_payload)
     base_vocab_ids = _load_base_vocab_ids_for_dataset(config.dataset_name, gt_payload)
@@ -825,7 +828,7 @@ def run_stage_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig, st
     if stage not in ALL_STAGES:
         raise ValueError(f"stage must be one of {ALL_STAGES}, got {stage!r}")
 
-    checkpoint_path = _stage_checkpoint_path(config.output_root, stage)
+    checkpoint_path = _stage_checkpoint_path(config.output_root, stage, ckpt_path=config.ckpt_path)
     if not checkpoint_path.is_file():
         result = StageAuditResult(
             dataset_name=config.dataset_name,
@@ -939,7 +942,7 @@ def run_stage_all_gt_attribution_rank_audit(
     if stage not in ALL_STAGES:
         raise ValueError(f"stage must be one of {ALL_STAGES}, got {stage!r}")
 
-    checkpoint_path = _stage_checkpoint_path(config.output_root, stage)
+    checkpoint_path = _stage_checkpoint_path(config.output_root, stage, ckpt_path=config.ckpt_path)
     summary_path = _stage_all_gt_summary_by_split_path(config.output_root, config.dataset_name, stage)
     split_order = _all_gt_split_order_for_dataset(config.dataset_name)
     observed_set_sources = list((prepared_inputs or {}).get("observed_set_sources", []))
