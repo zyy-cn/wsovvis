@@ -487,6 +487,113 @@ def _iter_microbatches(groups: Sequence[Sequence[Mapping[str, Any]]], *, max_gro
     return [list(range(i, min(i + n, len(groups)))) for i in range(0, len(groups), n)]
 
 
+def _trajectory_ema_key(ex: Mapping[str, Any]) -> str:
+    """Stable per-trajectory key for confidence EMA state."""
+    dataset_name = str(ex.get("dataset_name", ""))
+    clip_id = str(ex.get("clip_id", ""))
+    video_id = str(ex.get("video_id", clip_id))
+    trajectory_id = str(ex.get("trajectory_id", ex.get("join_key", "")))
+    if not trajectory_id:
+        trajectory_id = str(ex.get("gt_instance_id", ex.get("ann_id", "")))
+    return "|".join([dataset_name, video_id, clip_id, trajectory_id])
+
+
+def _percentile(vals: Sequence[float], q: float) -> float:
+    arr = np.asarray(list(vals), dtype=np.float32)
+    if arr.size <= 0:
+        return 0.0
+    qq = float(q)
+    if qq <= 1.0:
+        qq *= 100.0
+    return float(np.percentile(arr, qq))
+
+
+class ConfidenceEMAState:
+    """GPU-friendly delayed-use per-trajectory EMA for soft-routing confidence."""
+
+    def __init__(self, *, num_items: int, device: torch.device, beta: float) -> None:
+        self.num_items = int(num_items)
+        self.beta = float(beta)
+        self.device = device
+        self.explained_ema = torch.zeros((self.num_items,), device=device, dtype=torch.float32)
+        self.update_count = torch.zeros((self.num_items,), device=device, dtype=torch.long)
+
+    def gate_and_update(
+        self,
+        *,
+        ids: torch.Tensor,
+        local_explained: torch.Tensor,
+        epoch_one_based: int,
+        warmup_epochs: int,
+        min_updates: int,
+        delayed_use: bool = True,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        if ids.numel() == 0:
+            return local_explained.detach(), {
+                "confidence_ema_enabled": 1.0,
+                "confidence_ema_ready_rate": 0.0,
+                "confidence_ema_fallback_rate": 1.0,
+                "confidence_ema_update_count_mean": 0.0,
+                "confidence_ema_local_explained_mean": 0.0,
+                "confidence_ema_gate_explained_mean": 0.0,
+                "confidence_ema_abs_local_minus_ema_mean": 0.0,
+            }
+        ids = ids.to(device=self.device, dtype=torch.long)
+        local = local_explained.detach().to(device=self.device, dtype=torch.float32)
+        prev = self.explained_ema[ids]
+        counts = self.update_count[ids]
+        if int(epoch_one_based) >= int(warmup_epochs):
+            ready = counts >= int(min_updates)
+        else:
+            ready = torch.zeros_like(counts, dtype=torch.bool)
+        ready = ready.to(device=self.device, dtype=torch.bool)
+
+        if bool(delayed_use):
+            gate = torch.where(ready, prev, local)
+        else:
+            first = counts <= 0
+            candidate_new = torch.where(first, local, self.beta * prev + (1.0 - self.beta) * local)
+            gate = torch.where(ready, candidate_new, local)
+
+        first = counts <= 0
+        new = torch.where(first, local, self.beta * prev + (1.0 - self.beta) * local)
+        self.explained_ema[ids] = new
+        self.update_count[ids] = counts + 1
+
+        ready_f = ready.float()
+        stats = {
+            "confidence_ema_enabled": 1.0,
+            "confidence_ema_ready_rate": float(ready_f.mean().detach().cpu().item()),
+            "confidence_ema_fallback_rate": float((1.0 - ready_f).mean().detach().cpu().item()),
+            "confidence_ema_update_count_mean": float(counts.float().mean().detach().cpu().item()),
+            "confidence_ema_local_explained_mean": float(local.mean().detach().cpu().item()),
+            "confidence_ema_gate_explained_mean": float(gate.mean().detach().cpu().item()),
+            "confidence_ema_abs_local_minus_ema_mean": float(torch.abs(local - prev).mean().detach().cpu().item()),
+        }
+        return gate.detach(), stats
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "num_items": int(self.num_items),
+            "beta": float(self.beta),
+            "explained_ema": self.explained_ema.detach().cpu(),
+            "update_count": self.update_count.detach().cpu(),
+        }
+
+    def final_rows(self, *, key_by_index: Sequence[str]) -> List[Dict[str, Any]]:
+        explained = self.explained_ema.detach().cpu().numpy().astype(float).tolist()
+        counts = self.update_count.detach().cpu().numpy().astype(int).tolist()
+        rows: List[Dict[str, Any]] = []
+        for idx in range(int(self.num_items)):
+            rows.append({
+                "ema_index": int(idx),
+                "trajectory_key": str(key_by_index[idx]) if idx < len(key_by_index) else str(idx),
+                "explained_ema": float(explained[idx]),
+                "update_count": int(counts[idx]),
+            })
+        return rows
+
+
 def _load_materialized_gt_examples(
     *,
     repo_root: Path,
@@ -647,6 +754,10 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
         raise ValueError("--enable_absorber_logging is only supported for --protocol soft_routing")
     if bool(args.enable_auto_absorber_weight) and str(args.absorber_metric) != "support_floor":
         raise ValueError("--absorber_metric currently supports only support_floor")
+    if bool(getattr(args, "enable_confidence_ema", False)) and str(args.protocol) != "soft_routing":
+        raise ValueError("--enable_confidence_ema is only supported for --protocol soft_routing")
+    if str(getattr(args, "confidence_ema_signal", "local_explained")) != "local_explained":
+        raise ValueError("Only --confidence_ema_signal local_explained is supported in the first EMA version")
 
     if str(args.protocol) == "static_residual" and args.epochs is None:
         epochs = int(sum(_parse_epoch_plan(str(args.round_epoch_plan))))
@@ -668,6 +779,23 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
     sinkhorn_cfg = SinkhornAssignmentConfig(tau=float(args.sinkhorn_tau), iters=int(args.sinkhorn_iters), row_cap_scale=float(args.sinkhorn_row_cap_scale))
 
     groups = _group_by_clip(examples)
+    confidence_ema_enabled = bool(getattr(args, "enable_confidence_ema", False))
+    confidence_ema_logging_enabled = bool(getattr(args, "enable_confidence_ema_logging", False))
+    confidence_ema_state: Optional[ConfidenceEMAState] = None
+    confidence_ema_key_to_index: Dict[str, int] = {}
+    confidence_ema_key_by_index: List[str] = []
+    confidence_ema_epoch_rows: List[Dict[str, Any]] = []
+    if confidence_ema_enabled:
+        for ex in examples:
+            key = _trajectory_ema_key(ex)
+            if key not in confidence_ema_key_to_index:
+                confidence_ema_key_to_index[key] = len(confidence_ema_key_by_index)
+                confidence_ema_key_by_index.append(key)
+        confidence_ema_state = ConfidenceEMAState(
+            num_items=len(confidence_ema_key_by_index),
+            device=device,
+            beta=float(getattr(args, "confidence_ema_beta", 0.9)),
+        )
     max_groups_per_batch = max(1, int(args.max_groups_per_batch))
     runtime_metrics_path = output_root / "train" / "prealign" / "runtime_metrics.jsonl"
     if runtime_metrics_path.exists():
@@ -804,7 +932,24 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                     probs = torch.softmax(scores.detach(), dim=1)
                     conf, top_idx = torch.max(probs, dim=1)
                     explained = torch.sigmoid(float(args.soft_gamma) * (conf - float(args.soft_tau)))
-                    row_weight = 1.0 - explained
+                    confidence_ema_row: Dict[str, float] = {}
+                    if confidence_ema_state is not None:
+                        ema_ids = torch.tensor(
+                            [int(confidence_ema_key_to_index[_trajectory_ema_key(ex)]) for ex in group],
+                            device=device,
+                            dtype=torch.long,
+                        )
+                        gate_explained, confidence_ema_row = confidence_ema_state.gate_and_update(
+                            ids=ema_ids,
+                            local_explained=explained.detach(),
+                            epoch_one_based=int(epoch_idx) + 1,
+                            warmup_epochs=int(getattr(args, "confidence_ema_warmup_epochs", 3)),
+                            min_updates=int(getattr(args, "confidence_ema_min_updates", 3)),
+                            delayed_use=bool(getattr(args, "confidence_ema_delayed_use", True)),
+                        )
+                        row_weight = 1.0 - gate_explained
+                    else:
+                        row_weight = 1.0 - explained
                     cand_raw_tensor = torch.tensor(candidates, device=device, dtype=torch.long)
                     top_raw = cand_raw_tensor[top_idx]
 
@@ -875,6 +1020,8 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                         "class_weight_p90": float(np.percentile(class_weight_row_np, 90)) if class_weight_row_np.size else 1.0,
                         "absorber_active_after_warmup": float(absorber_active_after_warmup),
                     }
+                    if confidence_ema_row:
+                        soft_row.update(confidence_ema_row)
                 else:
                     sample_loss = per_row_loss.mean()
                 batch_loss_accum = sample_loss if batch_loss_accum is None else batch_loss_accum + sample_loss
@@ -920,6 +1067,12 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
                 "residual_weight_p90_mean": _mean(batch_float_stats.get("residual_weight_p90", [])),
                 "explained_mass_mean": _mean(batch_float_stats.get("explained_mass_mean", [])),
                 "explicit_hub_top1_share": _mean(batch_float_stats.get("explicit_hub_top1_share", [])),
+                "confidence_ema_ready_rate": _mean(batch_float_stats.get("confidence_ema_ready_rate", [])),
+                "confidence_ema_fallback_rate": _mean(batch_float_stats.get("confidence_ema_fallback_rate", [])),
+                "confidence_ema_update_count_mean": _mean(batch_float_stats.get("confidence_ema_update_count_mean", [])),
+                "confidence_ema_local_explained_mean": _mean(batch_float_stats.get("confidence_ema_local_explained_mean", [])),
+                "confidence_ema_gate_explained_mean": _mean(batch_float_stats.get("confidence_ema_gate_explained_mean", [])),
+                "confidence_ema_abs_local_minus_ema_mean": _mean(batch_float_stats.get("confidence_ema_abs_local_minus_ema_mean", [])),
                 "class_weight_mean": _mean(batch_float_stats.get("class_weight_mean", [])),
                 "class_weight_min": _mean(batch_float_stats.get("class_weight_min", [])),
                 "class_weight_p10": _mean(batch_float_stats.get("class_weight_p10", [])),
@@ -956,6 +1109,13 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             "residual_weight_p90_mean_epoch": _mean(epoch_float_stats.get("residual_weight_p90_mean", [])),
             "explained_mass_mean_epoch": _mean(epoch_float_stats.get("explained_mass_mean", [])),
             "explicit_hub_top1_share_epoch": _mean(epoch_float_stats.get("explicit_hub_top1_share", [])),
+            "confidence_ema_enabled": bool(confidence_ema_enabled),
+            "confidence_ema_ready_rate_epoch": _mean(epoch_float_stats.get("confidence_ema_ready_rate", [])),
+            "confidence_ema_fallback_rate_epoch": _mean(epoch_float_stats.get("confidence_ema_fallback_rate", [])),
+            "confidence_ema_update_count_mean_epoch": _mean(epoch_float_stats.get("confidence_ema_update_count_mean", [])),
+            "confidence_ema_local_explained_mean_epoch": _mean(epoch_float_stats.get("confidence_ema_local_explained_mean", [])),
+            "confidence_ema_gate_explained_mean_epoch": _mean(epoch_float_stats.get("confidence_ema_gate_explained_mean", [])),
+            "confidence_ema_abs_local_minus_ema_mean_epoch": _mean(epoch_float_stats.get("confidence_ema_abs_local_minus_ema_mean", [])),
             "class_weight_mean_epoch": _mean(epoch_float_stats.get("class_weight_mean", [])),
             "class_weight_min_epoch": _mean(epoch_float_stats.get("class_weight_min", [])),
             "class_weight_p10_epoch": _mean(epoch_float_stats.get("class_weight_p10", [])),
@@ -967,6 +1127,20 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
         }
         _append_jsonl(runtime_metrics_path, epoch_summary)
         _append_jsonl(protocol_metrics_path, epoch_summary)
+        if confidence_ema_enabled:
+            confidence_ema_epoch_rows.append({
+                "epoch": int(epoch_idx) + 1,
+                "confidence_ema_ready_rate_epoch": epoch_summary.get("confidence_ema_ready_rate_epoch", 0.0),
+                "confidence_ema_fallback_rate_epoch": epoch_summary.get("confidence_ema_fallback_rate_epoch", 0.0),
+                "confidence_ema_update_count_mean_epoch": epoch_summary.get("confidence_ema_update_count_mean_epoch", 0.0),
+                "confidence_ema_local_explained_mean_epoch": epoch_summary.get("confidence_ema_local_explained_mean_epoch", 0.0),
+                "confidence_ema_gate_explained_mean_epoch": epoch_summary.get("confidence_ema_gate_explained_mean_epoch", 0.0),
+                "confidence_ema_abs_local_minus_ema_mean_epoch": epoch_summary.get("confidence_ema_abs_local_minus_ema_mean_epoch", 0.0),
+                "residual_weight_mean_epoch": epoch_summary.get("residual_weight_mean_epoch", 0.0),
+                "residual_weight_p10_mean_epoch": epoch_summary.get("residual_weight_p10_mean_epoch", 0.0),
+                "residual_weight_p50_mean_epoch": epoch_summary.get("residual_weight_p50_mean_epoch", 0.0),
+                "residual_weight_p90_mean_epoch": epoch_summary.get("residual_weight_p90_mean_epoch", 0.0),
+            })
 
         if absorber_logging_enabled:
             all_absorber_ids = set(absorber_ema.keys()) | set(absorber_epoch_support.keys()) | set(absorber_epoch_mass.keys()) | set(absorber_epoch_top1.keys())
@@ -1031,6 +1205,7 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
         "label_source": "full_Y_base",
         "trajectory_source_branch": "gt_upper_bound",
         "global_step": int(global_step),
+        "confidence_ema_state": confidence_ema_state.state_dict() if confidence_ema_state is not None else None,
     }, ckpt_path)
 
     response_rows = _build_response_rows(
@@ -1045,6 +1220,32 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
         y_base_by_clip=clip_y_base,
     )
     _write_jsonl(train_dir / "responsibility_records.jsonl", response_rows)
+
+    confidence_ema_outputs: Dict[str, str] = {}
+    if confidence_ema_state is not None and confidence_ema_logging_enabled:
+        ema_epoch_fields = [
+            "epoch",
+            "confidence_ema_ready_rate_epoch",
+            "confidence_ema_fallback_rate_epoch",
+            "confidence_ema_update_count_mean_epoch",
+            "confidence_ema_local_explained_mean_epoch",
+            "confidence_ema_gate_explained_mean_epoch",
+            "confidence_ema_abs_local_minus_ema_mean_epoch",
+            "residual_weight_mean_epoch",
+            "residual_weight_p10_mean_epoch",
+            "residual_weight_p50_mean_epoch",
+            "residual_weight_p90_mean_epoch",
+        ]
+        _write_csv_rows(train_dir / "confidence_ema_stats_by_epoch.csv", confidence_ema_epoch_rows, ema_epoch_fields)
+        _write_csv_rows(
+            train_dir / "confidence_ema_final_snapshot.csv",
+            confidence_ema_state.final_rows(key_by_index=confidence_ema_key_by_index),
+            ["ema_index", "trajectory_key", "explained_ema", "update_count"],
+        )
+        confidence_ema_outputs = {
+            "confidence_ema_stats_by_epoch": str((Path("train") / "prealign" / "confidence_ema_stats_by_epoch.csv").as_posix()),
+            "confidence_ema_final_snapshot": str((Path("train") / "prealign" / "confidence_ema_final_snapshot.csv").as_posix()),
+        }
 
     absorber_outputs: Dict[str, str] = {}
     if absorber_logging_enabled:
@@ -1147,6 +1348,14 @@ def train_clean(args: argparse.Namespace) -> Dict[str, Any]:
             "top_absorbers_k": int(args.top_absorbers_k),
             "class_weight_stats_by_epoch": str((Path("train") / "prealign" / "class_weight_stats_by_epoch.csv").as_posix()) if class_weight_stats_rows else None,
             "absorber_outputs": absorber_outputs,
+            "enable_confidence_ema": bool(confidence_ema_enabled),
+            "confidence_ema_beta": float(getattr(args, "confidence_ema_beta", 0.9)),
+            "confidence_ema_warmup_epochs": int(getattr(args, "confidence_ema_warmup_epochs", 3)),
+            "confidence_ema_min_updates": int(getattr(args, "confidence_ema_min_updates", 3)),
+            "confidence_ema_signal": str(getattr(args, "confidence_ema_signal", "local_explained")),
+            "confidence_ema_delayed_use": bool(getattr(args, "confidence_ema_delayed_use", True)),
+            "enable_confidence_ema_logging": bool(confidence_ema_logging_enabled),
+            "confidence_ema_outputs": confidence_ema_outputs,
         } if str(args.protocol) == "soft_routing" else None,
     }
     _write_json(train_dir / "stage_summary.json", stage_summary)
@@ -1229,6 +1438,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--absorber_ema_decay", type=float, default=0.95)
     p.add_argument("--top_absorbers_k", type=int, default=50)
     p.add_argument("--soft_floor_scope", default="residual", choices=("none", "all", "residual", "resolved"))
+    p.add_argument("--enable_confidence_ema", action="store_true", help="Enable delayed-use per-trajectory EMA for soft-routing row gating.")
+    p.add_argument("--confidence_ema_beta", type=float, default=0.9)
+    p.add_argument("--confidence_ema_warmup_epochs", type=int, default=3)
+    p.add_argument("--confidence_ema_min_updates", type=int, default=3)
+    p.add_argument("--confidence_ema_signal", default="local_explained", choices=("local_explained",), help="EMA signal. First version intentionally supports only the calibrated nohub local_explained signal.")
+    p.add_argument("--confidence_ema_delayed_use", action="store_true", default=True, help="Use pre-update EMA for current step and update EMA after gate creation.")
+    p.add_argument("--disable_confidence_ema_delayed_use", dest="confidence_ema_delayed_use", action="store_false")
+    p.add_argument("--enable_confidence_ema_logging", action="store_true")
     return p.parse_args()
 
 
