@@ -243,7 +243,10 @@ def _extract_iou(row: Mapping[str, Any]) -> Optional[float]:
     for k in ("trajectory_record", "carrier_record", "sidecar", "gt_sidecar", "best_gt", "matched_gt", "match", "iou_match"):
         if isinstance(row.get(k), Mapping):
             roots.append(row[k])
-    keys = ("matched_gt_iou", "best_gt_iou", "best_iou", "iou", "max_iou", "gt_iou")
+    keys = (
+        "match_iou_video", "matched_gt_iou", "best_gt_iou", "best_iou", "iou",
+        "max_iou", "gt_iou", "video_iou", "match_iou", "gt_match_iou",
+    )
     for root in roots:
         if not isinstance(root, Mapping):
             continue
@@ -253,6 +256,35 @@ def _extract_iou(row: Mapping[str, Any]) -> Optional[float]:
                 return float(v)
     return None
 
+
+
+
+def _extract_audit_usable(row: Mapping[str, Any]) -> Optional[bool]:
+    roots: List[Any] = [row]
+    for k in (
+        "trajectory_record", "carrier_record", "sidecar", "gt_sidecar",
+        "best_gt", "matched_gt", "match", "iou_match",
+    ):
+        if isinstance(row.get(k), Mapping):
+            roots.append(row[k])
+    keys = ("audit_usable", "is_audit_usable", "usable", "gt_match_usable", "match_usable")
+    for root in roots:
+        if not isinstance(root, Mapping):
+            continue
+        for k in keys:
+            if k not in root:
+                continue
+            v = root.get(k)
+            if isinstance(v, bool):
+                return bool(v)
+            if isinstance(v, (int, float)):
+                return bool(v)
+            sv = str(v).strip().lower()
+            if sv in {"1", "true", "yes", "y", "on"}:
+                return True
+            if sv in {"0", "false", "no", "n", "off"}:
+                return False
+    return None
 
 def _extract_tid(row: Mapping[str, Any]) -> str:
     for k in ("trajectory_id", "trajectory_key", "join_key", "track_id", "id"):
@@ -303,8 +335,25 @@ def _load_sidecar_map(paths: Sequence[Path]) -> Tuple[Dict[str, Dict[str, Any]],
                             tid = _extract_tid(row)
                             rid = _extract_gt_raw_id(row)
                             if tid and rid is not None:
-                                side[tid] = {"gt_raw_id": int(rid), "best_iou": _extract_iou(row), "source": str(path)}
+                                audit_usable = _extract_audit_usable(row)
+                                best_iou = _extract_iou(row)
+                                side[tid] = {
+                                    "gt_raw_id": int(rid),
+                                    "best_iou": best_iou,
+                                    "audit_usable": audit_usable,
+                                    "source": str(path),
+                                    "match_policy_id": row.get("match_policy_id"),
+                                    "match_iou_threshold": row.get("match_iou_threshold"),
+                                }
                                 counters["rows_loaded"] += 1
+                                if audit_usable is True:
+                                    counters["audit_usable_true"] += 1
+                                elif audit_usable is False:
+                                    counters["audit_usable_false"] += 1
+                                else:
+                                    counters["audit_usable_missing"] += 1
+                                if best_iou is not None:
+                                    counters["rows_with_iou"] += 1
                     continue
                 for line in h:
                     line = line.strip()
@@ -320,8 +369,25 @@ def _load_sidecar_map(paths: Sequence[Path]) -> Tuple[Dict[str, Dict[str, Any]],
                     tid = _extract_tid(row)
                     rid = _extract_gt_raw_id(row)
                     if tid and rid is not None:
-                        side[tid] = {"gt_raw_id": int(rid), "best_iou": _extract_iou(row), "source": str(path)}
+                        audit_usable = _extract_audit_usable(row)
+                        best_iou = _extract_iou(row)
+                        side[tid] = {
+                            "gt_raw_id": int(rid),
+                            "best_iou": best_iou,
+                            "audit_usable": audit_usable,
+                            "source": str(path),
+                            "match_policy_id": row.get("match_policy_id"),
+                            "match_iou_threshold": row.get("match_iou_threshold"),
+                        }
                         counters["rows_loaded"] += 1
+                        if audit_usable is True:
+                            counters["audit_usable_true"] += 1
+                        elif audit_usable is False:
+                            counters["audit_usable_false"] += 1
+                        else:
+                            counters["audit_usable_missing"] += 1
+                        if best_iou is not None:
+                            counters["rows_with_iou"] += 1
         except Exception as e:
             counters[f"file_error::{path.name}"] += 1
             counters[f"file_error_msg::{str(e)[:80]}"] += 1
@@ -385,6 +451,8 @@ def _load_examples_with_matches(args: argparse.Namespace, output_root_for_assets
     samples: List[Dict[str, Any]] = []
     gt_by_tid: Dict[str, int] = {}
     iou_by_tid: Dict[str, float] = {}
+    audit_by_tid: Dict[str, bool] = {}
+    side_source_by_tid: Dict[str, str] = {}
     counters = Counter()
     for s in raw_samples:
         if not bool(s.get("sample_valid", False)):
@@ -403,13 +471,25 @@ def _load_examples_with_matches(args: argparse.Namespace, output_root_for_assets
         tid = _extract_tid(row)
         rid = _extract_gt_raw_id(row)
         iou = _extract_iou(row)
-        if rid is None and tid in side_map:
-            rid = _as_int(side_map[tid].get("gt_raw_id"))
-            iou = _as_float(side_map[tid].get("best_iou")) if iou is None else iou
+        audit_usable = _extract_audit_usable(row)
+        if tid in side_map:
+            side = side_map[tid]
+            if rid is None:
+                rid = _as_int(side.get("gt_raw_id"))
+            if iou is None:
+                iou = _as_float(side.get("best_iou"))
+            if audit_usable is None:
+                au = side.get("audit_usable")
+                audit_usable = bool(au) if isinstance(au, bool) else None
+            src = side.get("source")
+            if src:
+                side_source_by_tid[tid] = str(src)
         if rid is not None:
             gt_by_tid[tid] = int(rid)
             if iou is not None:
                 iou_by_tid[tid] = float(iou)
+            if audit_usable is not None:
+                audit_by_tid[tid] = bool(audit_usable)
         samples.append(row)
     prepared = _prepare_prealign_examples(samples, output_root=output_root_for_assets, dataset_name=str(args.dataset_name), trajectory_source_branch=branch)
     examples = list(prepared.get("examples", []))
@@ -417,6 +497,8 @@ def _load_examples_with_matches(args: argparse.Namespace, output_root_for_assets
         tid = _extract_tid(ex)
         ex["matched_gt_raw_id"] = gt_by_tid.get(tid)
         ex["matched_gt_iou"] = iou_by_tid.get(tid)
+        ex["matched_gt_audit_usable"] = audit_by_tid.get(tid)
+        ex["matched_gt_sidecar_source"] = side_source_by_tid.get(tid)
     meta = {
         "trajectory_source_branch": branch,
         "materialized_stats": materialized.get("stats", {}),
@@ -477,6 +559,25 @@ def _family_from_cert(rr: int, cert: str) -> str:
     return "unresolved"
 
 
+
+
+def _summarize_float_list(vals: Sequence[float], prefix: str) -> Dict[str, Any]:
+    arr = np.asarray([float(v) for v in vals if v is not None and math.isfinite(float(v))], dtype=np.float32)
+    if arr.size == 0:
+        return {
+            f"{prefix}_count": 0, f"{prefix}_mean": None, f"{prefix}_min": None,
+            f"{prefix}_p10": None, f"{prefix}_p50": None, f"{prefix}_p90": None, f"{prefix}_max": None,
+        }
+    return {
+        f"{prefix}_count": int(arr.size),
+        f"{prefix}_mean": float(np.mean(arr)),
+        f"{prefix}_min": float(np.min(arr)),
+        f"{prefix}_p10": float(np.percentile(arr, 10)),
+        f"{prefix}_p50": float(np.percentile(arr, 50)),
+        f"{prefix}_p90": float(np.percentile(arr, 90)),
+        f"{prefix}_max": float(np.max(arr)),
+    }
+
 def _evaluate_checkpoint(
     *,
     checkpoint_name: str,
@@ -489,6 +590,8 @@ def _evaluate_checkpoint(
     class_to_cert: Mapping[int, str],
     weak_vocab: Set[int],
     device: torch.device,
+    gt_match_policy: str = "all",
+    min_match_iou: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     raw_to_idx = {int(r): i for i, r in enumerate(text_vocab_ids)}
     projector, temperature, ckpt = _load_checkpoint(checkpoint_path, device)
@@ -524,10 +627,21 @@ def _evaluate_checkpoint(
                 if gt_raw is None:
                     skipped["unmatched_no_gt_raw_id"] += 1
                     continue
+                audit_usable = ex.get("matched_gt_audit_usable")
+                if gt_match_policy == "audit_usable" and audit_usable is not True:
+                    skipped["matched_gt_not_audit_usable"] += 1
+                    continue
+                iou = _as_float(ex.get("matched_gt_iou"))
+                if min_match_iou is not None:
+                    if iou is None:
+                        skipped["matched_gt_missing_iou_for_min_iou_policy"] += 1
+                        continue
+                    if float(iou) < float(min_match_iou):
+                        skipped["matched_gt_iou_below_threshold"] += 1
+                        continue
                 if int(gt_raw) not in candidates:
                     skipped["matched_gt_not_in_y_base"] += 1
                     continue
-                iou = _as_float(ex.get("matched_gt_iou"))
                 if iou is not None:
                     matched_ious.append(float(iou))
                 gt_pos = candidates.index(int(gt_raw))
@@ -548,6 +662,15 @@ def _evaluate_checkpoint(
                 grouped[("certificate_family", family)].add(**vals)
                 grouped[("base_observed_unobserved", base_group)].add(**vals)
                 grouped[("person_conditioned", person_cond)].add(**vals)
+                grouped[("match_audit_usable", str(ex.get("matched_gt_audit_usable")))].add(**vals)
+                if iou is not None:
+                    if float(iou) >= 0.75:
+                        iou_bin = "iou_ge_075"
+                    elif float(iou) >= 0.5:
+                        iou_bin = "iou_050_075"
+                    else:
+                        iou_bin = "iou_lt_050"
+                    grouped[("match_iou_bin", iou_bin)].add(**vals)
                 per_class[int(gt_raw)].add(**vals)
                 per_class_meta.setdefault(int(gt_raw), {
                     "raw_id": int(gt_raw), "resolved_round": str(rr) if rr != -99 else "unresolved",
@@ -575,8 +698,11 @@ def _evaluate_checkpoint(
         "temperature": float(temperature.detach().cpu().item()),
         "checkpoint_protocol": ckpt.get("protocol", ""),
         "checkpoint_trajectory_source_branch": ckpt.get("trajectory_source_branch", ""),
+        **_summarize_float_list(matched_ious, "matched_iou"),
         "mean_matched_iou": float(np.mean(np.asarray(matched_ious, dtype=np.float32))) if matched_ious else None,
         "matched_iou_count": int(len(matched_ious)),
+        "gt_match_policy": str(gt_match_policy),
+        "min_match_iou": min_match_iou,
     }
     return summary, rows, pc_rows
 
@@ -600,6 +726,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--residual_variant", default="person_aware")
     p.add_argument("--trajectory_source_branch", default="mainline", choices=("mainline", "videocutler"))
     p.add_argument("--sidecar_jsonl", action="append", default=[])
+    p.add_argument("--gt_match_policy", default="all", choices=("all", "audit_usable"),
+                   help="Post-hoc GT sidecar filtering policy. 'audit_usable' keeps only sidecar rows marked audit_usable=true.")
+    p.add_argument("--min_match_iou", type=float, default=None,
+                   help="Optional additional post-hoc sidecar IoU threshold, e.g. 0.5. Requires sidecar IoU such as match_iou_video.")
     p.add_argument("--checkpoint", action="append", type=parse_checkpoint_arg, required=True)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--seed", type=int, default=3407)
@@ -626,6 +756,7 @@ def main() -> int:
             checkpoint_name=name, checkpoint_path=ckpt, examples=examples, clip_y_base=clip_y_base,
             text_vocab_ids=text_vocab_ids, text_vocab_matrix=text_vocab_matrix,
             class_to_round=class_to_round, class_to_cert=class_to_cert, weak_vocab=weak_vocab, device=device,
+            gt_match_policy=str(args.gt_match_policy), min_match_iou=args.min_match_iou,
         )
         all_summary.append(summary)
         all_rows.extend(rows)
@@ -633,6 +764,7 @@ def main() -> int:
     _write_csv(out / "summary_by_group.csv", all_rows)
     overall = [r for r in all_rows if r.get("group_name") == "overall"]
     _write_csv(out / "summary_by_run.csv", overall)
+    _write_csv(out / "sidecar_policy_summary.csv", all_summary)
     _write_csv(out / "per_class_attribution.csv", all_pc)
     deltas: List[Dict[str, Any]] = []
     if overall:
@@ -682,7 +814,9 @@ def main() -> int:
         "base_count": len(base_ids),
         "weak_vocab_count": len(weak_vocab),
         "schedule_resolved_count": len(class_to_round),
-        "interpretation_hint": "Compare vc_nohub vs vc_baseline on summary_by_run.csv; denominator is matched_eval_gt_count only.",
+        "gt_match_policy": str(args.gt_match_policy),
+        "min_match_iou": args.min_match_iou,
+        "interpretation_hint": "Compare vc_nohub vs vc_baseline on summary_by_run.csv; denominator is matched_eval_gt_count only after sidecar GT policy filters.",
     }
     _write_json(out / "summary.json", payload)
     takeover = out / "VIDEOCUTLER_FULL_Y_ATTRIBUTION_COMPARE_TAKEOVER.md"
@@ -692,8 +826,11 @@ def main() -> int:
         f"Output: `{out}`\n\n"
         f"Prepared trajectories: `{total_prepared}`\n\n"
         f"Matched/evaluable GT rows: `{processed}`\n\n"
+        f"GT match policy: `{args.gt_match_policy}`\n\n"
+        f"Min match IoU: `{args.min_match_iou}`\n\n"
         "Core outputs:\n"
         "- summary.json\n- summary_by_run.csv\n- summary_by_group.csv\n"
+        "- sidecar_policy_summary.csv\n"
         "- summary_delta_vs_first.csv\n- per_class_attribution.csv\n- per_class_delta_vs_first.csv\n",
         encoding="utf-8",
     )
