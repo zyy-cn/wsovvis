@@ -370,9 +370,9 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
 
     # _prepare_data is reused from the A8 coverage-assignment audit path.
     # That helper expects args.output_dir for optional asset-root resolution.
-    # In this training entrypoint, assets must resolve from run_root, while
-    # training artifacts are written to output_root. Therefore keep output_dir
-    # empty unless explicitly supplied by a future caller.
+    # In this training entrypoint, assets resolve from run_root while training
+    # artifacts are written to output_root. Keep output_dir empty unless a
+    # future caller explicitly sets it.
     if not hasattr(args, "output_dir"):
         args.output_dir = ""
     data = _prepare_data(args)
