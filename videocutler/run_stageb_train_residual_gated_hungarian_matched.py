@@ -368,6 +368,13 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
     if not str(args.split_json).strip():
         args.split_json = str(Path(args.repo_root) / "package" / "reference" / "lvvis_official_base_novel_split.json")
 
+    # _prepare_data is reused from the A8 coverage-assignment audit path.
+    # That helper expects args.output_dir for optional asset-root resolution.
+    # In this training entrypoint, assets must resolve from run_root, while
+    # training artifacts are written to output_root. Therefore keep output_dir
+    # empty unless explicitly supplied by a future caller.
+    if not hasattr(args, "output_dir"):
+        args.output_dir = ""
     data = _prepare_data(args)
     example_by_tid = _example_by_tid(data)
     matched_csv = Path(args.matched_pairs_csv).expanduser().resolve() if str(args.matched_pairs_csv).strip() else _default_matched_pairs_path(run_root, str(args.dataset_name))
