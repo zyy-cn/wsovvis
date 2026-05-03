@@ -17,6 +17,8 @@ Modes:
   * soft_preserve_proto: revised A3 mode, using down-weighted hard anchors,
     soft CE as the main rescue signal, prototype calibration at low weight,
     and preservation_anchor rows to reduce old-nohub-correct forgetting.
+  * soft_preserve_only: A4 mode. Uses soft_ce + preservation_anchor only.
+    Hard seed rows are not consumed as hard CE and prototype rows are not trained.
 
 The script is GPU-friendly: it projects the full text bank once per train/eval
 batch and evaluates rows in vectorized chunks. It avoids row-wise full-vocab
@@ -238,6 +240,9 @@ def _load_manifest_rows(path: Path, *, mode: str, example_by_tid: Mapping[str, M
             continue
         if mode == "soft_preserve_proto" and loss_family not in {"hard_ce", "soft_ce", "prototype_calibration", "preservation_anchor"}:
             counters["skip_unrecognized_loss_family"] += 1
+            continue
+        if mode == "soft_preserve_only" and loss_family not in {"soft_ce", "preservation_anchor"}:
+            counters["skip_not_soft_preserve_only"] += 1
             continue
         tid = str(row.get("trajectory_id", ""))
         rid = _as_int(row.get("gt_raw_id"))
@@ -803,6 +808,7 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
             "gpu_friendly": True,
             "rowwise_large_matrix_compute": False,
             "a3_revised_objective": str(args.mode) == "soft_preserve_proto",
+            "a4_soft_preserve_only_objective": str(args.mode) == "soft_preserve_only",
             "hard_ce_loss_weight": float(args.hard_ce_loss_weight),
             "soft_ce_loss_weight": float(args.soft_ce_loss_weight),
             "prototype_loss_weight": float(args.prototype_loss_weight),
@@ -845,7 +851,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Residual-gated GT-clean balanced training pilot")
     p.add_argument("--run_root", required=True)
     p.add_argument("--dataset_name", default="lvvis_train_base")
-    p.add_argument("--mode", required=True, choices=("eval_only", "hard_ce", "hard_soft_proto", "soft_preserve_proto"))
+    p.add_argument("--mode", required=True, choices=("eval_only", "hard_ce", "hard_soft_proto", "soft_preserve_proto", "soft_preserve_only"))
     p.add_argument("--output_root", default="")
     p.add_argument("--manifest_csv", default="")
     p.add_argument("--row_gap_csv", default="")
