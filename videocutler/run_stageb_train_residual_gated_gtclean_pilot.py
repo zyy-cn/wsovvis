@@ -14,6 +14,9 @@ Modes:
   * eval_only: materialize/evaluate only; no optimizer step.
   * hard_ce: train only hard_ce manifest rows.
   * hard_soft_proto: train hard_ce + soft_ce + prototype_calibration rows.
+  * soft_preserve_proto: revised A3 mode, using down-weighted hard anchors,
+    soft CE as the main rescue signal, prototype calibration at low weight,
+    and preservation_anchor rows to reduce old-nohub-correct forgetting.
 
 The script is GPU-friendly: it projects the full text bank once per train/eval
 batch and evaluates rows in vectorized chunks. It avoids row-wise full-vocab
@@ -233,6 +236,9 @@ def _load_manifest_rows(path: Path, *, mode: str, example_by_tid: Mapping[str, M
         if mode == "hard_soft_proto" and loss_family not in {"hard_ce", "soft_ce", "prototype_calibration"}:
             counters["skip_unrecognized_loss_family"] += 1
             continue
+        if mode == "soft_preserve_proto" and loss_family not in {"hard_ce", "soft_ce", "prototype_calibration", "preservation_anchor"}:
+            counters["skip_unrecognized_loss_family"] += 1
+            continue
         tid = str(row.get("trajectory_id", ""))
         rid = _as_int(row.get("gt_raw_id"))
         if not tid or rid is None:
@@ -394,6 +400,11 @@ def _loss_on_batch(
     device: torch.device,
     soft_label_smoothing: float,
     proto_loss_weight: float,
+    hard_ce_loss_weight: float,
+    soft_ce_loss_weight: float,
+    preservation_loss_weight: float,
+    preservation_margin: float,
+    preservation_margin_weight: float,
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     if not rows:
         raise ValueError("empty training batch")
@@ -409,7 +420,7 @@ def _loss_on_batch(
         idx = torch.tensor([i for i, x in enumerate(loss_fams) if x == "hard_ce"], device=device, dtype=torch.long)
         ce = F.cross_entropy(logits[idx], targets[idx], reduction="none")
         w = weights[idx]
-        loss_terms.append((ce * w).sum() / torch.clamp(w.sum(), min=1.0))
+        loss_terms.append(float(hard_ce_loss_weight) * (ce * w).sum() / torch.clamp(w.sum(), min=1.0))
         stats["hard_ce_rows"] = int(idx.numel())
     if any(x == "soft_ce" for x in loss_fams):
         idx = torch.tensor([i for i, x in enumerate(loss_fams) if x == "soft_ce"], device=device, dtype=torch.long)
@@ -420,8 +431,23 @@ def _loss_on_batch(
         target_dist.scatter_(1, targets[idx].view(-1, 1), 1.0 - eps)
         soft_loss = -(target_dist * log_probs).sum(dim=1)
         w = weights[idx]
-        loss_terms.append((soft_loss * w).sum() / torch.clamp(w.sum(), min=1.0))
+        loss_terms.append(float(soft_ce_loss_weight) * (soft_loss * w).sum() / torch.clamp(w.sum(), min=1.0))
         stats["soft_ce_rows"] = int(idx.numel())
+    if any(x == "preservation_anchor" for x in loss_fams):
+        idx = torch.tensor([i for i, x in enumerate(loss_fams) if x == "preservation_anchor"], device=device, dtype=torch.long)
+        ce = F.cross_entropy(logits[idx], targets[idx], reduction="none")
+        w = weights[idx]
+        preserve_loss = (ce * w).sum() / torch.clamp(w.sum(), min=1.0)
+        if float(preservation_margin_weight) > 0:
+            logits_p = logits[idx]
+            gt_vals = logits_p.gather(1, targets[idx].view(-1, 1)).squeeze(1)
+            neg_logits = logits_p.clone()
+            neg_logits.scatter_(1, targets[idx].view(-1, 1), float("-inf"))
+            max_neg = torch.max(neg_logits, dim=1).values
+            margin_loss = F.relu(float(preservation_margin) - (gt_vals - max_neg))
+            preserve_loss = preserve_loss + float(preservation_margin_weight) * ((margin_loss * w).sum() / torch.clamp(w.sum(), min=1.0))
+        loss_terms.append(float(preservation_loss_weight) * preserve_loss)
+        stats["preservation_anchor_rows"] = int(idx.numel())
     if any(x == "prototype_calibration" for x in loss_fams):
         idx = torch.tensor([i for i, x in enumerate(loss_fams) if x == "prototype_calibration"], device=device, dtype=torch.long)
         proto = text_proj_base[targets[idx]]
@@ -669,6 +695,11 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
                     device=device,
                     soft_label_smoothing=float(args.soft_label_smoothing),
                     proto_loss_weight=float(args.prototype_loss_weight),
+                    hard_ce_loss_weight=float(args.hard_ce_loss_weight),
+                    soft_ce_loss_weight=float(args.soft_ce_loss_weight),
+                    preservation_loss_weight=float(args.preservation_loss_weight),
+                    preservation_margin=float(args.preservation_margin),
+                    preservation_margin_weight=float(args.preservation_margin_weight),
                 )
                 loss.backward()
                 if float(args.grad_clip_norm) > 0:
@@ -771,6 +802,11 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
             "does_not_modify_control_plane": True,
             "gpu_friendly": True,
             "rowwise_large_matrix_compute": False,
+            "a3_revised_objective": str(args.mode) == "soft_preserve_proto",
+            "hard_ce_loss_weight": float(args.hard_ce_loss_weight),
+            "soft_ce_loss_weight": float(args.soft_ce_loss_weight),
+            "prototype_loss_weight": float(args.prototype_loss_weight),
+            "preservation_loss_weight": float(args.preservation_loss_weight),
         },
     }
     _write_json(output_root / "final_summary.json", final_summary)
@@ -809,7 +845,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Residual-gated GT-clean balanced training pilot")
     p.add_argument("--run_root", required=True)
     p.add_argument("--dataset_name", default="lvvis_train_base")
-    p.add_argument("--mode", required=True, choices=("eval_only", "hard_ce", "hard_soft_proto"))
+    p.add_argument("--mode", required=True, choices=("eval_only", "hard_ce", "hard_soft_proto", "soft_preserve_proto"))
     p.add_argument("--output_root", default="")
     p.add_argument("--manifest_csv", default="")
     p.add_argument("--row_gap_csv", default="")
@@ -828,6 +864,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--t_dis_init", type=float, default=0.07)
     p.add_argument("--soft_label_smoothing", type=float, default=0.2)
     p.add_argument("--prototype_loss_weight", type=float, default=0.25)
+    p.add_argument("--hard_ce_loss_weight", type=float, default=1.0, help="Global multiplier for hard_ce rows. A3 should use a lower value such as 0.25.")
+    p.add_argument("--soft_ce_loss_weight", type=float, default=1.0, help="Global multiplier for soft_ce rows. A3 may use 1.0-1.5.")
+    p.add_argument("--preservation_loss_weight", type=float, default=0.25, help="Global multiplier for preservation_anchor rows.")
+    p.add_argument("--preservation_margin", type=float, default=0.05, help="Optional margin target for preservation_anchor rows.")
+    p.add_argument("--preservation_margin_weight", type=float, default=0.25, help="Weight of margin part inside preservation loss.")
     p.add_argument("--grad_clip_norm", type=float, default=1.0)
     p.add_argument("--max_eval_rows", type=int, default=0, help="0 means evaluate all joined row-gap rows.")
     p.add_argument("--smoke", action="store_true")
