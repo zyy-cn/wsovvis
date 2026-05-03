@@ -173,6 +173,32 @@ def filter_label_variant(rows: List[Dict[str, str]], variant: str) -> List[Dict[
     return out
 
 
+def filter_scorer_variant(rows: List[Dict[str, str]], variant: str) -> List[Dict[str, str]]:
+    """Keep the requested variant if present, then deduplicate one row per raw id.
+
+    Older scorer-join tables may contain both strict/person-aware variants, which
+    doubles class counts (e.g. 1006 resolved rows instead of 503).  If no variant
+    column exists, this still deduplicates by raw id for backwards compatibility.
+    """
+    vals = {r.get("variant", "") for r in rows if r.get("variant", "")}
+    if vals and variant in vals:
+        rows = [r for r in rows if r.get("variant", "") == variant]
+    elif vals and variant not in vals:
+        return []
+    out = []
+    seen = set()
+    for r in rows:
+        rid = raw_id(r)
+        if not rid or rid in seen:
+            continue
+        split = r.get("split_type", r.get("target_split", r.get("split", "base")))
+        if split and split != "base":
+            continue
+        seen.add(rid)
+        out.append(r)
+    return out
+
+
 def summarize_label(rows: List[Dict[str, str]]) -> Dict[str, Any]:
     clip_col = "clip_count" if rows and "clip_count" in rows[0] else "base_clip_count"
     resolved_col = "resolved" if rows and "resolved" in rows[0] else "is_resolved"
@@ -282,7 +308,7 @@ def main() -> None:
     cands = candidate_paths(run_root, args.dataset_name)
     label_path, inv_label = resolve_path(args.label_csv, cands["label_csv"], "label_csv")
     scorer_path, inv_scorer = resolve_path(args.scorer_join_csv, cands["scorer_join_csv"], "scorer_join_csv")
-    oracle_path, inv_oracle = resolve_path(args.oracle_gap_csv, cands["oracle_gap_csv"], "oracle_gap_csv")
+    oracle_path, inv_oracle = resolve_path(args.oracle_gap_csv, cands["oracle_gap_csv"], "oracle_gap_csv", optional=True)
     run_summary_path, inv_run = resolve_path(args.oracle_run_summary_csv, cands["oracle_run_summary_csv"], "oracle_run_summary_csv", optional=True)
 
     inventory = {
@@ -311,7 +337,7 @@ def main() -> None:
             approx_check("label_unresolved_count", label_summary.get("unresolved_count"), 22, 0.5, not args.relaxed),
         ])
     if scorer_path:
-        scorer_rows = read_csv(scorer_path)
+        scorer_rows = filter_scorer_variant(read_csv(scorer_path), args.variant)
         scorer_summary = summarize_scorer(scorer_rows)
         gate_checks.extend([
             approx_check("rank1_ge_0.5_count", scorer_summary.get("rank1_ge_0.5_count"), 176, 1.5, not args.relaxed),

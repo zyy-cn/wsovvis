@@ -170,6 +170,31 @@ def filter_label(rows: List[Dict[str, str]], variant: str) -> List[Dict[str, str
     return out
 
 
+def filter_scorer_variant(rows: List[Dict[str, str]], variant: str) -> List[Dict[str, str]]:
+    """Keep requested variant when present and deduplicate one row per raw id.
+
+    This prevents duplicated class policies when scorer join tables contain both
+    strict-anchor and person-aware rows.
+    """
+    vals = {r.get("variant", "") for r in rows if r.get("variant", "")}
+    if vals and variant in vals:
+        rows = [r for r in rows if r.get("variant", "") == variant]
+    elif vals and variant not in vals:
+        return []
+    out = []
+    seen = set()
+    for r in rows:
+        rid = raw_id(r)
+        if not rid or rid in seen:
+            continue
+        split = r.get("split_type", r.get("target_split", r.get("split", "base")))
+        if split and split != "base":
+            continue
+        seen.add(rid)
+        out.append(r)
+    return out
+
+
 def by_raw(rows: List[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
     out = {}
     for r in rows:
@@ -389,17 +414,17 @@ def main() -> None:
     cands = candidate_paths(run_root, args.dataset_name)
     label_path, inv_label = resolve_path(args.label_csv, cands["label_csv"], "label_csv")
     scorer_path, inv_scorer = resolve_path(args.scorer_join_csv, cands["scorer_join_csv"], "scorer_join_csv")
-    gap_path, inv_gap = resolve_path(args.oracle_gap_csv, cands["oracle_gap_csv"], "oracle_gap_csv")
+    gap_path, inv_gap = resolve_path(args.oracle_gap_csv, cands["oracle_gap_csv"], "oracle_gap_csv", optional=True)
     inventory = {"artifacts": [inv_label, inv_scorer, inv_gap]}
-    missing = [x for x in inventory["artifacts"] if x["status"] != "FOUND"]
+    missing = [x for x in inventory["artifacts"] if x["status"] != "FOUND" and not x.get("optional")]
     if missing:
         write_json(out_dir / "pseudo_pool_summary.json", {"status": "FAIL_MISSING_REQUIRED_ARTIFACT", "inventory": inventory})
         print(json.dumps({"status": "FAIL_MISSING_REQUIRED_ARTIFACT", "inventory": inventory}, ensure_ascii=False, indent=2))
         raise SystemExit(2)
 
     label_rows = filter_label(read_csv(label_path), args.variant)  # type: ignore[arg-type]
-    scorer_rows = read_csv(scorer_path)  # type: ignore[arg-type]
-    gap_rows = read_csv(gap_path)  # type: ignore[arg-type]
+    scorer_rows = filter_scorer_variant(read_csv(scorer_path), args.variant)  # type: ignore[arg-type]
+    gap_rows = read_csv(gap_path) if gap_path else []
     rows = merge_rows(label_rows, scorer_rows, gap_rows, args)
     policy_by_raw = {str(r["raw_id"]): r for r in rows}
 

@@ -109,6 +109,17 @@ def summarize(rows: List[Dict[str,Any]]) -> Dict[str,Any]:
     return out
 
 
+def fail_missing_input(out_dir: Path, status: str, missing_path: str, message: str) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = {"status": status, "missing_path": missing_path, "message": message}
+    write_json(out_dir / "training_audit_summary.json", summary)
+    (out_dir / "RESIDUAL_GATED_TRAINING_AUDIT_TAKEOVER.md").write_text(
+        f"# Residual-Gated Training Audit\n\n- status: {status}\n- missing_path: `{missing_path}`\n- message: {message}\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 def main() -> None:
     ap=argparse.ArgumentParser()
     ap.add_argument("--policy_csv", required=True, help="class_training_policy.csv from pseudo-pool planner")
@@ -117,8 +128,17 @@ def main() -> None:
     ap.add_argument("--min_rank1_ge_0_5_gain", type=int, default=20)
     ap.add_argument("--min_collapse_reduction", type=int, default=20)
     args=ap.parse_args()
-    policy=read_csv(Path(args.policy_csv))
-    after=read_csv(Path(args.after_by_class_csv))
+    out_dir=Path(args.out_dir)
+    policy_path = Path(args.policy_csv)
+    after_path = Path(args.after_by_class_csv)
+    if not policy_path.is_file():
+        fail_missing_input(out_dir, "FAIL_MISSING_POLICY_CSV", str(policy_path), "Run residual_gated_pseudo_pool first, or pass a valid --policy_csv.")
+        raise SystemExit(2)
+    if not after_path.is_file():
+        fail_missing_input(out_dir, "FAIL_MISSING_AFTER_BY_CLASS_CSV", str(after_path), "This audit is only for after a future training run; pass the produced by-class rank summary CSV.")
+        raise SystemExit(2)
+    policy=read_csv(policy_path)
+    after=read_csv(after_path)
     after_by=by_raw(after)
     joined=[]
     for p in policy:
@@ -145,7 +165,6 @@ def main() -> None:
             "delta_bucket": bucket(delta, before, after_v),
             "has_after_result": has_after,
         })
-    out_dir=Path(args.out_dir)
     write_csv(out_dir/"residual_gated_training_delta_by_class.csv", joined)
     by_policy={k:summarize(v) for k,v in defaultdict(list, {}).items()}
     tmp=defaultdict(list)
