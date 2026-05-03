@@ -310,17 +310,90 @@ def _compute_t_dis(theta_t: torch.nn.Parameter) -> torch.Tensor:
 
 
 
+def _infer_text_projector_config_from_state_dict(state_dict: Mapping[str, Any]) -> Dict[str, Any]:
+    """Infer the historical text projector config from an exact saved state dict."""
+    if not isinstance(state_dict, Mapping) or not state_dict:
+        raise RuntimeError("cannot infer text_projector_config from empty or invalid state_dict")
+    keys = set(str(k) for k in state_dict.keys())
+    linear_keys = {"net.1.weight", "net.1.bias", "net.3.weight", "net.3.bias"}
+    layernorm_keys = {"net.0.weight", "net.0.bias"}
+    if not linear_keys.issubset(keys):
+        raise RuntimeError(
+            "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+            "and its parameter layout does not match the historical projector"
+        )
+    if not layernorm_keys.issubset(keys):
+        raise RuntimeError(
+            "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+            "and missing layernorm weights prevent exact config inference"
+        )
+    allowed_keys = linear_keys | layernorm_keys
+    extra_keys = sorted(k for k in keys if k not in allowed_keys)
+    if extra_keys:
+        raise RuntimeError(
+            "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+            f"and unsupported extra projector parameters prevent exact inference: {extra_keys[:8]}"
+        )
+    ln_weight = state_dict["net.0.weight"]
+    ln_bias = state_dict["net.0.bias"]
+    linear1_weight = state_dict["net.1.weight"]
+    linear1_bias = state_dict["net.1.bias"]
+    linear2_weight = state_dict["net.3.weight"]
+    linear2_bias = state_dict["net.3.bias"]
+    for name, tensor in (
+        ("net.0.weight", ln_weight),
+        ("net.0.bias", ln_bias),
+        ("net.1.weight", linear1_weight),
+        ("net.1.bias", linear1_bias),
+        ("net.3.weight", linear2_weight),
+        ("net.3.bias", linear2_bias),
+    ):
+        if not hasattr(tensor, "shape"):
+            raise RuntimeError(
+                "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+                f"and projector parameter {name} is not tensor-like"
+            )
+    input_dim = int(linear1_weight.shape[1])
+    hidden_dim = int(linear1_weight.shape[0])
+    output_dim = int(linear2_weight.shape[0])
+    if tuple(ln_weight.shape) != (input_dim,) or tuple(ln_bias.shape) != (input_dim,):
+        raise RuntimeError(
+            "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+            "and layernorm shapes are incompatible with the inferred input_dim"
+        )
+    if tuple(linear1_bias.shape) != (hidden_dim,):
+        raise RuntimeError(
+            "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+            "and hidden bias shape is incompatible with the inferred hidden_dim"
+        )
+    if tuple(linear2_weight.shape) != (output_dim, hidden_dim) or tuple(linear2_bias.shape) != (output_dim,):
+        raise RuntimeError(
+            "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+            "and output layer shapes are incompatible with the inferred dimensions"
+        )
+    return {
+        "input_dim": input_dim,
+        "hidden_dim": hidden_dim,
+        "output_dim": output_dim,
+        "dropout": 0.0,
+        "use_layernorm": True,
+        "config_source": "inferred_from_text_projector_state_dict",
+    }
+
+
 def _load_projector_from_checkpoint(
     checkpoint_path: Path,
     *,
     device: torch.device,
 ) -> Tuple[Projector, torch.nn.Parameter, torch.nn.Parameter, Dict[str, Any]]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    if 'text_projector_state_dict' not in checkpoint or 'text_projector_config' not in checkpoint:
+    if 'text_projector_state_dict' not in checkpoint:
         raise RuntimeError(
             f'incompatible checkpoint at {checkpoint_path}: expected text_projector_state_dict/text_projector_config under the new authority'
         )
     config_payload = dict(checkpoint.get('text_projector_config', {}))
+    if not config_payload:
+        config_payload = _infer_text_projector_config_from_state_dict(checkpoint['text_projector_state_dict'])
     projector = Projector(
         ProjectorConfig(
             input_dim=int(config_payload.get('input_dim', 512)),
