@@ -438,6 +438,7 @@ def main() -> int:
             "selected_loss_hard_ce",
             "selected_loss_soft_ce",
             "selected_loss_prototype_calibration",
+            "selected_loss_preservation_anchor",
             "old_nohub_error_other_positive_confusion",
             "old_base_error_other_positive_confusion",
             "seed_type_deferred",

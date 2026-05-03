@@ -20,6 +20,8 @@ Modes:
   * soft_preserve_only: A4 mode. Uses soft_ce + preservation_anchor only.
   * soft_preserve_lock: A5 mode. Same row families as A4, but intended for stronger preservation/top1 margin-lock settings.
     Hard seed rows are not consumed as hard CE and prototype rows are not trained.
+  * soft_preserve_selective: A6 mode. Same loss families as A4/A5, but intended for a
+    selective high-risk preservation manifest so soft CE remains the dominant rescue signal.
 
 The script is GPU-friendly: it projects the full text bank once per train/eval
 batch and evaluates rows in vectorized chunks. It avoids row-wise full-vocab
@@ -247,6 +249,9 @@ def _load_manifest_rows(path: Path, *, mode: str, example_by_tid: Mapping[str, M
             continue
         if mode == "soft_preserve_lock" and loss_family not in {"soft_ce", "preservation_anchor"}:
             counters["skip_not_soft_preserve_lock"] += 1
+            continue
+        if mode == "soft_preserve_selective" and loss_family not in {"soft_ce", "preservation_anchor"}:
+            counters["skip_not_soft_preserve_selective"] += 1
             continue
         tid = str(row.get("trajectory_id", ""))
         rid = _as_int(row.get("gt_raw_id"))
@@ -814,6 +819,7 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
             "a3_revised_objective": str(args.mode) == "soft_preserve_proto",
             "a4_soft_preserve_only_objective": str(args.mode) == "soft_preserve_only",
             "a5_soft_preserve_lock_objective": str(args.mode) == "soft_preserve_lock",
+            "a6_soft_preserve_selective_objective": str(args.mode) == "soft_preserve_selective",
             "hard_ce_loss_weight": float(args.hard_ce_loss_weight),
             "soft_ce_loss_weight": float(args.soft_ce_loss_weight),
             "prototype_loss_weight": float(args.prototype_loss_weight),
@@ -856,7 +862,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Residual-gated GT-clean balanced training pilot")
     p.add_argument("--run_root", required=True)
     p.add_argument("--dataset_name", default="lvvis_train_base")
-    p.add_argument("--mode", required=True, choices=("eval_only", "hard_ce", "hard_soft_proto", "soft_preserve_proto", "soft_preserve_only", "soft_preserve_lock"))
+    p.add_argument("--mode", required=True, choices=("eval_only", "hard_ce", "hard_soft_proto", "soft_preserve_proto", "soft_preserve_only", "soft_preserve_lock", "soft_preserve_selective"))
     p.add_argument("--output_root", default="")
     p.add_argument("--manifest_csv", default="")
     p.add_argument("--row_gap_csv", default="")
