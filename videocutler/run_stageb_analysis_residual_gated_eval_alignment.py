@@ -217,7 +217,8 @@ def _aggregate_seed_and_manifest(
         d["certificate_type"] = d["certificate_type"] or r.get("certificate_type", "")
         d["clip_count"] = d["clip_count"] or r.get("clip_count", "")
         d["instance_count"] = d["instance_count"] or r.get("instance_count", "")
-        row_meta[_row_key(r)].update({
+        row_key = _row_key(r)
+        row_meta.setdefault(row_key, {}).update({
             "seed_type": st,
             "seed_policy": r.get("policy", ""),
             "seed_certificate_type": r.get("certificate_type", ""),
@@ -243,7 +244,10 @@ def _aggregate_seed_and_manifest(
         d["clip_count"] = d["clip_count"] or r.get("clip_count", "")
         d["instance_count"] = d["instance_count"] or r.get("instance_count", "")
         key = _row_key(r)
-        row_meta[key].update({
+        meta = row_meta.setdefault(key, {})
+        if not meta.get("seed_type"):
+            meta["seed_type"] = "missing_from_seed_pool"
+        meta.update({
             "manifest_selected": True,
             "manifest_loss_family": lf,
             "manifest_sample_weight": r.get("sample_weight", ""),
