@@ -111,7 +111,6 @@ def _summarize(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
             "mean_rank": None,
             "median_rank": None,
         }
-    s = sorted(ranks)
     return {
         "group": "target_visible_525_candidate_visible_525",
         "count": n,
@@ -127,7 +126,7 @@ def _summarize(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description="Canonical A8 visible-525 GT trajectory rank@K audit")
     p.add_argument("--dataset_name", required=True)
     p.add_argument("--output_root", required=True)
     p.add_argument("--checkpoint_path", required=True)
@@ -267,6 +266,11 @@ def main() -> int:
         "source_meta": source_meta,
         "vector_counters": dict(vector_counters),
         "summary_by_group": summary_rows,
+        "primary_metric": {
+            "name": "canonical_visible525_rank@1",
+            "value": summary_row.get("rank@1"),
+            "scope": "target=train_visible_525,candidate=train_visible_525,source=GT trajectory",
+        },
         "artifacts": {
             "per_row_csv": str(output_root / "visible525_candidate_rankk_per_row.csv"),
             "summary_by_group_csv": str(output_root / "visible525_candidate_rankk_summary_by_group.csv"),
