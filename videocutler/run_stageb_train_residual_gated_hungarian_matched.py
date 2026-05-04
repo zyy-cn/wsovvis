@@ -125,6 +125,9 @@ def _save_training_checkpoint(
     epoch: int,
     global_step: int,
     matched_pairs_csv: Path,
+    assignment_mode: str = "fixed",
+    dynamic_row_source: str = "matched_rows",
+    dynamic_candidate_source: str = "full_y",
 ) -> None:
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -135,6 +138,9 @@ def _save_training_checkpoint(
             "epoch": int(epoch),
             "global_step": int(global_step),
             "matched_pairs_csv": str(matched_pairs_csv),
+            "assignment_mode": str(assignment_mode),
+            "dynamic_row_source": str(dynamic_row_source),
+            "dynamic_candidate_source": str(dynamic_candidate_source),
         },
         checkpoint_path,
     )
@@ -250,6 +256,184 @@ def _loss_for_clip(
         pred = torch.argmax(logits, dim=1)
         pseudo_acc = float((pred == target).float().mean().detach().cpu().item())
     return loss, {"rows": len(kept_rows), "clip_id": clip_id, "pseudo_top1_acc": pseudo_acc}
+
+
+
+
+def _loss_for_clip_assignment_mode(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    data: Any,
+    example_by_tid: Mapping[str, Mapping[str, Any]],
+    text_proj_all: torch.Tensor,
+    theta_t: torch.nn.Parameter,
+    device: torch.device,
+    loss_name: str,
+    assignment_mode: str = "fixed",
+    dynamic_row_source: str = "matched_rows",
+    dynamic_candidate_source: str = "full_y",
+    dynamic_hub_raw_ids: str = "63,135,173,527,577,580,773,868,931,936,970,1044,1112,1114",
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    """Clip-level loss with fixed or per-iteration dynamic Hungarian assignment.
+
+    fixed:
+      Uses rows[*][matched_raw_id] from the offline Hungarian CSV, preserving the
+      original A8.2 semantics exactly.
+
+    dynamic:
+      Recomputes a hard one-to-one Hungarian assignment from the current logits
+      for this clip. The assignment is a stop-gradient hard E-step. Row-level GT,
+      NoHub correctness, and oracle fields are not used.
+
+      dynamic_row_source=matched_rows uses the same trajectory universe as the
+      fixed baseline for a controlled comparison.
+      dynamic_row_source=all_clip_trajectories uses every materialized trajectory
+      in data.by_clip[clip_id], which is the true per-clip dynamic-Hungarian mode.
+    """
+    clip_id = int(rows[0]["clip_id"])
+    assignment_mode = str(assignment_mode or "fixed").strip().lower()
+    dynamic_row_source = str(dynamic_row_source or "matched_rows").strip().lower()
+    dynamic_candidate_source = str(dynamic_candidate_source or "full_y").strip().lower()
+    if dynamic_candidate_source != "full_y":
+        raise ValueError(f"unsupported dynamic_candidate_source={dynamic_candidate_source!r}; only full_y is implemented")
+
+    y_ids = sorted(int(x) for x in data.clip_y_base.get(int(clip_id), set()) if int(x) in data.raw_to_text_idx)
+    if not y_ids:
+        raise RuntimeError(f"clip {clip_id} has empty full-Y after text-bank filter")
+    y_col = {int(rid): j for j, rid in enumerate(y_ids)}
+
+    fixed_raw_by_tid: Dict[str, int] = {}
+    for r in rows:
+        tid = str(r.get("trajectory_id", ""))
+        rid = _as_int(r.get("matched_raw_id"))
+        if tid and rid is not None and int(rid) in y_col:
+            fixed_raw_by_tid[tid] = int(rid)
+
+    if assignment_mode == "fixed":
+        source_rows = list(rows)
+    elif assignment_mode == "dynamic":
+        if dynamic_row_source == "matched_rows":
+            source_rows = list(rows)
+        elif dynamic_row_source == "all_clip_trajectories":
+            source_rows = [dict(ex) for ex in data.by_clip.get(int(clip_id), [])]
+        else:
+            raise ValueError(f"unsupported dynamic_row_source={dynamic_row_source!r}; expected matched_rows|all_clip_trajectories")
+    else:
+        raise ValueError(f"unsupported assignment_mode={assignment_mode!r}; expected fixed|dynamic")
+
+    z_vecs: List[torch.Tensor] = []
+    source_tids: List[str] = []
+    fixed_targets: List[int] = []
+    kept_rows: List[Mapping[str, Any]] = []
+    for r in source_rows:
+        tid = str(r.get("trajectory_id", ""))
+        if not tid:
+            continue
+        if assignment_mode == "fixed" and tid not in fixed_raw_by_tid:
+            continue
+        ex = r if "carrier_vec" in r else example_by_tid.get(tid)
+        if ex is None or "carrier_vec" not in ex:
+            continue
+        rid = fixed_raw_by_tid.get(tid)
+        fixed_targets.append(y_col[int(rid)] if rid is not None and int(rid) in y_col else -1)
+        z_vecs.append(torch.from_numpy(np.asarray(ex["carrier_vec"], dtype=np.float32)))
+        source_tids.append(tid)
+        kept_rows.append(r)
+
+    if not z_vecs:
+        raise RuntimeError(f"no trainable rows remained in clip {clip_id} for assignment_mode={assignment_mode} row_source={dynamic_row_source}")
+
+    Z = torch.stack(z_vecs, dim=0).to(device=device, dtype=torch.float32)
+    Z = F.normalize(Z, p=2.0, dim=-1)
+    text_idx = torch.tensor([int(data.raw_to_text_idx[int(rid)]) for rid in y_ids], device=device, dtype=torch.long)
+    T = text_proj_all[text_idx]
+    logits_all = torch.matmul(Z, T.t()) / _compute_t_dis(theta_t)
+
+    stats_extra: Dict[str, Any] = {
+        "assignment_mode": assignment_mode,
+        "dynamic_row_source": dynamic_row_source,
+        "dynamic_candidate_source": dynamic_candidate_source,
+        "dynamic_universe_rows": int(len(kept_rows)),
+        "dynamic_candidate_count": int(len(y_ids)),
+        "dynamic_matched_pair_count": 0,
+        "dynamic_unmatched_row_count": 0,
+        "dynamic_fixed_comparable_count": 0,
+        "dynamic_assignment_changed_rate_vs_fixed": 0.0,
+        "dynamic_assignment_hub_rate": 0.0,
+        "dynamic_person_assignment_rate": 0.0,
+        "dynamic_trousers_assignment_rate": 0.0,
+        "dynamic_hat_assignment_rate": 0.0,
+        "dynamic_jean_assignment_rate": 0.0,
+        "dynamic_mean_assignment_score": 0.0,
+        "dynamic_mean_assignment_margin": 0.0,
+    }
+
+    if assignment_mode == "fixed":
+        if any(int(t) < 0 for t in fixed_targets):
+            raise RuntimeError(f"fixed mode found rows without fixed targets in clip {clip_id}")
+        logits = logits_all
+        target = torch.tensor(fixed_targets, device=device, dtype=torch.long)
+    else:
+        try:
+            from scipy.optimize import linear_sum_assignment
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("dynamic Hungarian requires scipy.optimize.linear_sum_assignment") from exc
+        cost = (-logits_all.detach()).float().cpu().numpy()
+        row_ind_np, col_ind_np = linear_sum_assignment(cost)
+        if len(row_ind_np) <= 0:
+            raise RuntimeError(f"Hungarian returned zero matches for clip {clip_id}")
+        row_ind = torch.tensor(row_ind_np, device=device, dtype=torch.long)
+        col_ind = torch.tensor(col_ind_np, device=device, dtype=torch.long)
+        logits = logits_all.index_select(0, row_ind)
+        target = col_ind
+        with torch.no_grad():
+            assigned_raw_ids = [int(y_ids[int(j)]) for j in col_ind.detach().cpu().tolist()]
+            selected_fixed_cols = [int(fixed_targets[int(i)]) for i in row_ind.detach().cpu().tolist()]
+            comparable_pairs = [(a, int(y_ids[fc])) for a, fc in zip(assigned_raw_ids, selected_fixed_cols) if int(fc) >= 0]
+            changed = [1 for a, b in comparable_pairs if int(a) != int(b)]
+            comparable_n = max(len(comparable_pairs), 1)
+            hub_ids = {str(int(float(x))) for x in str(dynamic_hub_raw_ids or "").replace(";", ",").split(",") if str(x).strip()}
+            assigned_str = [str(int(x)) for x in assigned_raw_ids]
+            assigned_scores = logits_all[row_ind, col_ind]
+            masked = logits_all.index_select(0, row_ind).clone()
+            if masked.shape[1] > 1:
+                masked[torch.arange(masked.shape[0], device=device), col_ind] = -torch.inf
+                best_other = masked.max(dim=1).values
+                margins = assigned_scores - best_other
+            else:
+                margins = assigned_scores * 0.0
+            denom = max(len(assigned_raw_ids), 1)
+            stats_extra.update({
+                "dynamic_matched_pair_count": int(len(assigned_raw_ids)),
+                "dynamic_unmatched_row_count": int(len(kept_rows) - len(assigned_raw_ids)),
+                "dynamic_fixed_comparable_count": int(len(comparable_pairs)),
+                "dynamic_assignment_changed_rate_vs_fixed": float(len(changed) / comparable_n),
+                "dynamic_assignment_hub_rate": float(sum(1 for x in assigned_str if x in hub_ids) / denom),
+                "dynamic_person_assignment_rate": float(sum(1 for x in assigned_str if x == "773") / denom),
+                "dynamic_trousers_assignment_rate": float(sum(1 for x in assigned_str if x == "1112") / denom),
+                "dynamic_hat_assignment_rate": float(sum(1 for x in assigned_str if x == "527") / denom),
+                "dynamic_jean_assignment_rate": float(sum(1 for x in assigned_str if x == "577") / denom),
+                "dynamic_mean_assignment_score": float(assigned_scores.mean().detach().cpu().item()),
+                "dynamic_mean_assignment_margin": float(margins.mean().detach().cpu().item()),
+            })
+
+    if str(loss_name) == "ce":
+        loss = F.cross_entropy(logits, target, reduction="mean")
+    elif str(loss_name) == "infonce":
+        pos = logits.gather(1, target.view(-1, 1)).squeeze(1)
+        loss = -(pos - torch.logsumexp(logits, dim=1)).mean()
+    else:
+        raise ValueError(f"unsupported loss: {loss_name}")
+    with torch.no_grad():
+        pred = torch.argmax(logits, dim=1)
+        pseudo_acc = float((pred == target).float().mean().detach().cpu().item())
+        stats = {
+            "rows": int(logits.shape[0]),
+            "clip_id": clip_id,
+            "pseudo_top1_acc": pseudo_acc,
+            **stats_extra,
+        }
+    return loss, stats
 
 
 def _load_eval_rows(row_gap_csv: Path, data: Any, max_rows: int, seed: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -436,7 +620,8 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
     setup = {
         "timestamp": _now(), "loss": str(args.loss), "run_root": str(run_root), "output_root": str(out_root), "matched_pairs_csv": str(matched_csv), "row_gap_csv": str(row_gap_csv),
         "device": str(device), "epochs": int(args.epochs), "learning_rate": float(args.learning_rate), "seed": int(args.seed),
-        "policy": {"uses_row_level_gt_for_training": False, "uses_nohub_correctness_for_training": False, "uses_dummy_or_slack": False, "uses_extra_support": False, "loss_only_arm": str(args.loss)},
+        "assignment_mode": str(args.assignment_mode), "dynamic_row_source": str(args.dynamic_row_source), "dynamic_candidate_source": str(args.dynamic_candidate_source),
+        "policy": {"uses_row_level_gt_for_training": False, "uses_nohub_correctness_for_training": False, "uses_dummy_or_slack": False, "uses_extra_support": False, "loss_only_arm": str(args.loss), "assignment_source": str(args.assignment_mode)},
         "checkpoint": checkpoint_summary, "materialization_summary": data.materialization_summary, "train_row_summary": train_row_summary, "eval_row_summary": eval_summary,
     }
     _write_json(out_root / "a8_hungarian_train_setup.json", setup)
@@ -457,11 +642,32 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
         epoch_losses: List[float] = []
         epoch_rows = 0
         epoch_accs: List[float] = []
+        epoch_dynamic_changed_rates: List[float] = []
+        epoch_dynamic_hub_rates: List[float] = []
+        epoch_dynamic_person_rates: List[float] = []
+        epoch_dynamic_trousers_rates: List[float] = []
+        epoch_dynamic_hat_rates: List[float] = []
+        epoch_dynamic_jean_rates: List[float] = []
+        epoch_dynamic_margins: List[float] = []
+        epoch_dynamic_comparable_counts: List[float] = []
+        epoch_dynamic_universe_rows: List[float] = []
         for clip_id in clip_ids:
             rows = train_by_clip[clip_id]
             optimizer.zero_grad(set_to_none=True)
             text_proj_all = _project_text(projector, text_tensor)
-            loss, stats = _loss_for_clip(rows=rows, data=data, example_by_tid=example_by_tid, text_proj_all=text_proj_all, theta_t=theta_t, device=device, loss_name=str(args.loss))
+            loss, stats = _loss_for_clip_assignment_mode(
+                rows=rows,
+                data=data,
+                example_by_tid=example_by_tid,
+                text_proj_all=text_proj_all,
+                theta_t=theta_t,
+                device=device,
+                loss_name=str(args.loss),
+                assignment_mode=str(args.assignment_mode),
+                dynamic_row_source=str(args.dynamic_row_source),
+                dynamic_candidate_source=str(args.dynamic_candidate_source),
+                dynamic_hub_raw_ids=str(args.dynamic_hub_raw_ids),
+            )
             loss.backward()
             if float(args.grad_clip_norm) > 0:
                 torch.nn.utils.clip_grad_norm_([*projector.parameters(), theta_t], max_norm=float(args.grad_clip_norm))
@@ -469,9 +675,32 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
             global_step += 1
             lv = float(loss.detach().cpu().item())
             epoch_losses.append(lv); all_losses.append(lv); epoch_rows += int(stats["rows"]); epoch_accs.append(float(stats["pseudo_top1_acc"]))
+            epoch_dynamic_changed_rates.append(float(stats.get("dynamic_assignment_changed_rate_vs_fixed", 0.0)))
+            epoch_dynamic_hub_rates.append(float(stats.get("dynamic_assignment_hub_rate", 0.0)))
+            epoch_dynamic_person_rates.append(float(stats.get("dynamic_person_assignment_rate", 0.0)))
+            epoch_dynamic_trousers_rates.append(float(stats.get("dynamic_trousers_assignment_rate", 0.0)))
+            epoch_dynamic_hat_rates.append(float(stats.get("dynamic_hat_assignment_rate", 0.0)))
+            epoch_dynamic_jean_rates.append(float(stats.get("dynamic_jean_assignment_rate", 0.0)))
+            epoch_dynamic_margins.append(float(stats.get("dynamic_mean_assignment_margin", 0.0)))
+            epoch_dynamic_comparable_counts.append(float(stats.get("dynamic_fixed_comparable_count", 0)))
+            epoch_dynamic_universe_rows.append(float(stats.get("dynamic_universe_rows", 0)))
             if int(args.log_every_steps) > 0 and global_step % int(args.log_every_steps) == 0:
                 _append_jsonl(log_path, {"timestamp": _now(), "epoch": int(epoch)+1, "global_step": global_step, "loss": lv, **stats})
         epoch_row = {"timestamp": _now(), "row_type": "epoch_summary", "epoch": int(epoch)+1, "loss_mean": _mean(epoch_losses), "loss_last": epoch_losses[-1] if epoch_losses else 0.0, "pseudo_top1_acc_mean": _mean(epoch_accs), "epoch_rows": epoch_rows, "epoch_clips": len(clip_ids)}
+        epoch_row.update({
+            "assignment_mode": str(args.assignment_mode),
+            "dynamic_row_source": str(args.dynamic_row_source),
+            "dynamic_candidate_source": str(args.dynamic_candidate_source),
+            "dynamic_assignment_changed_rate_vs_fixed_mean": _mean(epoch_dynamic_changed_rates),
+            "dynamic_assignment_hub_rate_mean": _mean(epoch_dynamic_hub_rates),
+            "dynamic_person_assignment_rate_mean": _mean(epoch_dynamic_person_rates),
+            "dynamic_trousers_assignment_rate_mean": _mean(epoch_dynamic_trousers_rates),
+            "dynamic_hat_assignment_rate_mean": _mean(epoch_dynamic_hat_rates),
+            "dynamic_jean_assignment_rate_mean": _mean(epoch_dynamic_jean_rates),
+            "dynamic_mean_assignment_margin": _mean(epoch_dynamic_margins),
+            "dynamic_fixed_comparable_count_mean": _mean(epoch_dynamic_comparable_counts),
+            "dynamic_universe_rows_mean": _mean(epoch_dynamic_universe_rows),
+        })
         _append_jsonl(log_path, epoch_row)
         epoch_metric_row = dict(epoch_row)
         if int(args.eval_every_epochs) > 0 and ((int(epoch) + 1) % int(args.eval_every_epochs) == 0):
@@ -503,6 +732,9 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
                 epoch=int(epoch) + 1,
                 global_step=global_step,
                 matched_pairs_csv=matched_csv,
+                assignment_mode=str(args.assignment_mode),
+                dynamic_row_source=str(args.dynamic_row_source),
+                dynamic_candidate_source=str(args.dynamic_candidate_source),
             )
         epoch_metric_rows.append(epoch_metric_row)
         if bool(args.print_epoch_summary): print(json.dumps(epoch_row, ensure_ascii=False))
@@ -518,17 +750,20 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
         epoch=int(args.epochs),
         global_step=global_step,
         matched_pairs_csv=matched_csv,
+        assignment_mode=str(args.assignment_mode),
+        dynamic_row_source=str(args.dynamic_row_source),
+        dynamic_candidate_source=str(args.dynamic_candidate_source),
     )
     if bool(args.write_epoch_metrics):
         _write_csv(train_dir / "epoch_metrics.csv", epoch_metric_rows)
 
     final = {
-        "status": "PASS", "timestamp": _now(), "loss": str(args.loss), "output_root": str(out_root), "train_summary": {"epochs": int(args.epochs), "global_step": global_step, "loss_mean": _mean(all_losses), "loss_last": all_losses[-1] if all_losses else 0.0, "train_row_count": len(train_rows), "train_clip_count": len(clip_ids)},
+        "status": "PASS", "timestamp": _now(), "loss": str(args.loss), "assignment_mode": str(args.assignment_mode), "dynamic_row_source": str(args.dynamic_row_source), "dynamic_candidate_source": str(args.dynamic_candidate_source), "output_root": str(out_root), "train_summary": {"epochs": int(args.epochs), "global_step": global_step, "loss_mean": _mean(all_losses), "loss_last": all_losses[-1] if all_losses else 0.0, "train_row_count": len(train_rows), "train_clip_count": len(clip_ids)},
         "eval_before": before, "eval_after": after, "eval_delta": cmp, "checkpoint": str(ckpt_out), "setup": setup,
     }
     _write_json(out_root / "final_summary.json", final)
     lines = [
-        f"# A8.2 Hungarian Matched Training TAKEOVER ({args.loss})", "", "- status: PASS", f"- loss: {args.loss}", f"- epochs: {args.epochs}", f"- train_rows: {len(train_rows)}", f"- train_clips: {len(clip_ids)}", f"- before micro_top1: {before.get('micro_top1', 0.0):.6f}", f"- after micro_top1: {after.get('micro_top1', 0.0):.6f}", f"- delta micro_top1: {cmp.get('delta_micro_top1', 0.0):.6f}", f"- before macro_rank1: {before.get('macro_rank1', 0.0):.6f}", f"- after macro_rank1: {after.get('macro_rank1', 0.0):.6f}", f"- delta macro_rank1: {cmp.get('delta_macro_rank1', 0.0):.6f}", "", "## Policy", "- Uses fixed Hungarian matched pairs only.", "- No dummy/slack/extra_support.", "- Row-level GT and NoHub correctness are not used for training.",]
+        f"# A8.2 Hungarian Matched Training TAKEOVER ({args.loss})", "", "- status: PASS", f"- loss: {args.loss}", f"- assignment_mode: {args.assignment_mode}", f"- dynamic_row_source: {args.dynamic_row_source}", f"- epochs: {args.epochs}", f"- train_rows: {len(train_rows)}", f"- train_clips: {len(clip_ids)}", f"- before micro_top1: {before.get('micro_top1', 0.0):.6f}", f"- after micro_top1: {after.get('micro_top1', 0.0):.6f}", f"- delta micro_top1: {cmp.get('delta_micro_top1', 0.0):.6f}", f"- before macro_rank1: {before.get('macro_rank1', 0.0):.6f}", f"- after macro_rank1: {after.get('macro_rank1', 0.0):.6f}", f"- delta macro_rank1: {cmp.get('delta_macro_rank1', 0.0):.6f}", "", "## Policy", "- assignment_mode=fixed uses fixed Hungarian matched pairs.", "- assignment_mode=dynamic recomputes per-clip Hungarian from current logits each clip iteration.", "- dynamic_row_source=all_clip_trajectories uses every materialized trajectory in the clip.", "- No dummy/slack/extra_support.", "- Row-level GT and NoHub correctness are not used for training.",]
     (out_root / "A8_HUNGARIAN_TRAINING_TAKEOVER.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps(final, ensure_ascii=False, indent=2, default=str))
     return final
@@ -548,6 +783,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--init_checkpoint", default="auto")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--loss", choices=["ce", "infonce"], default="ce")
+    p.add_argument("--assignment_mode", choices=["fixed", "dynamic"], default="fixed")
+    p.add_argument("--dynamic_row_source", choices=["matched_rows", "all_clip_trajectories"], default="matched_rows")
+    p.add_argument("--dynamic_candidate_source", choices=["full_y"], default="full_y")
+    p.add_argument("--dynamic_hub_raw_ids", default="63,135,173,527,577,580,773,868,931,936,970,1044,1112,1114")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--learning_rate", type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
