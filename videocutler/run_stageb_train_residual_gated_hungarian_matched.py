@@ -116,6 +116,30 @@ def _mean(vals: Sequence[float]) -> float:
     return float(np.mean(np.asarray(list(vals), dtype=np.float64)))
 
 
+def _save_training_checkpoint(
+    checkpoint_path: Path,
+    *,
+    projector: Projector,
+    theta_t: torch.nn.Parameter,
+    loss_name: str,
+    epoch: int,
+    global_step: int,
+    matched_pairs_csv: Path,
+) -> None:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "text_projector_state_dict": projector.state_dict(),
+            "theta_T": float(theta_t.detach().cpu().item()),
+            "loss": str(loss_name),
+            "epoch": int(epoch),
+            "global_step": int(global_step),
+            "matched_pairs_csv": str(matched_pairs_csv),
+        },
+        checkpoint_path,
+    )
+
+
 def _default_matched_pairs_path(run_root: Path, dataset_name: str) -> Path:
     return run_root / "analysis" / "residual_gated_hungarian_matching" / str(dataset_name) / "hungarian_matched_pairs.csv"
 
@@ -308,12 +332,18 @@ def _evaluate_full_y(
                 vals = logits[i]
                 order = np.argsort(-vals)
                 top_col = int(order[0])
+                top2_col = int(order[1]) if len(order) > 1 else top_col
+                gt_score = float(vals[gt_col])
+                top1_score = float(vals[top_col])
+                top2_score = float(vals[top2_col]) if len(order) > 1 else None
                 rank = int(1 + np.sum(vals > vals[gt_col]))
                 top1 = int(y_ids[top_col])
                 top5_cols = set(int(x) for x in order[: min(5, len(order))])
                 top1_hit = int(top1 == gt)
                 top5_hit = int(gt_col in top5_cols)
                 norm_rank = (rank - 1) / max(len(y_ids) - 1, 1)
+                score_margin = float(gt_score - top1_score)
+                wrong_abs_gap = float(max(top1_score - gt_score, 0.0)) if top1_hit == 0 else 0.0
                 ranks.append(rank); norm_ranks.append(float(norm_rank))
                 by_class[str(gt)]["rows"] += 1
                 by_class[str(gt)]["top1"] += top1_hit
@@ -323,6 +353,15 @@ def _evaluate_full_y(
                     "clip_id": r["clip_id"], "trajectory_id": r["trajectory_id"], "gt_raw_id": gt, "gt_class_name": r.get("gt_class_name", ""),
                     "top1_raw_id": top1, "top1_hit": top1_hit, "top5_hit": top5_hit, "gt_rank": rank, "normalized_gt_rank": norm_rank,
                     "clip_y_size": len(y_ids), "weak_nohub_top1_is_gt": r.get("weak_nohub_top1_is_gt", ""), "weak_nohub_error_type": r.get("weak_nohub_error_type", ""),
+                    "score_domain": "full_y_clip_logits_div_t_dis",
+                    "gt_score": gt_score,
+                    "top1_score": top1_score,
+                    "top2_score": top2_score,
+                    "score_margin": score_margin,
+                    "wrong_abs_gap": wrong_abs_gap,
+                    "candidate_count": len(y_ids),
+                    "candidate_raw_ids_json": json.dumps([int(x) for x in y_ids], ensure_ascii=False),
+                    "candidate_scores_json": json.dumps([float(x) for x in vals.tolist()], ensure_ascii=False),
                 })
     by_class_rows: List[Dict[str, Any]] = []
     for rid, c in sorted(by_class.items(), key=lambda x: int(float(x[0]))):
@@ -410,6 +449,7 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
     rng = random.Random(int(args.seed))
     log_path = train_dir / "train_log.jsonl"
     if log_path.exists(): log_path.unlink()
+    epoch_metric_rows: List[Dict[str, Any]] = []
     global_step = 0
     all_losses: List[float] = []
     for epoch in (tqdm(range(int(args.epochs)), desc=f"a8_hungarian_{args.loss}_epochs", dynamic_ncols=True) if bool(args.show_progress) and tqdm is not None else range(int(args.epochs))):
@@ -433,12 +473,54 @@ def _train(args: argparse.Namespace) -> Dict[str, Any]:
                 _append_jsonl(log_path, {"timestamp": _now(), "epoch": int(epoch)+1, "global_step": global_step, "loss": lv, **stats})
         epoch_row = {"timestamp": _now(), "row_type": "epoch_summary", "epoch": int(epoch)+1, "loss_mean": _mean(epoch_losses), "loss_last": epoch_losses[-1] if epoch_losses else 0.0, "pseudo_top1_acc_mean": _mean(epoch_accs), "epoch_rows": epoch_rows, "epoch_clips": len(clip_ids)}
         _append_jsonl(log_path, epoch_row)
+        epoch_metric_row = dict(epoch_row)
+        if int(args.eval_every_epochs) > 0 and ((int(epoch) + 1) % int(args.eval_every_epochs) == 0):
+            epoch_eval = _evaluate_full_y(
+                stage=f"epoch_{int(epoch)+1:03d}",
+                rows=eval_rows,
+                data=data,
+                example_by_tid=example_by_tid,
+                projector=projector,
+                text_tensor=text_tensor,
+                theta_t=theta_t,
+                device=device,
+                out_dir=out_root / "analysis",
+            )
+            epoch_metric_row.update({
+                "eval_micro_top1": float(epoch_eval.get("micro_top1", 0.0)),
+                "eval_micro_top5": float(epoch_eval.get("micro_top5", 0.0)),
+                "eval_mean_rank": float(epoch_eval.get("mean_rank", 0.0)),
+                "eval_mean_normalized_gt_rank": float(epoch_eval.get("mean_normalized_gt_rank", 0.0)),
+                "eval_macro_rank1": float(epoch_eval.get("macro_rank1", 0.0)),
+                "eval_macro_top5": float(epoch_eval.get("macro_top5", 0.0)),
+            })
+        if int(args.save_every_epochs) > 0 and ((int(epoch) + 1) % int(args.save_every_epochs) == 0):
+            _save_training_checkpoint(
+                train_dir / f"a8_hungarian_epoch_{int(epoch)+1:03d}.pth",
+                projector=projector,
+                theta_t=theta_t,
+                loss_name=str(args.loss),
+                epoch=int(epoch) + 1,
+                global_step=global_step,
+                matched_pairs_csv=matched_csv,
+            )
+        epoch_metric_rows.append(epoch_metric_row)
         if bool(args.print_epoch_summary): print(json.dumps(epoch_row, ensure_ascii=False))
 
     after = _evaluate_full_y(stage="after", rows=eval_rows, data=data, example_by_tid=example_by_tid, projector=projector, text_tensor=text_tensor, theta_t=theta_t, device=device, out_dir=out_root / "analysis")
     cmp = _compare_eval(before, after)
     ckpt_out = train_dir / "a8_hungarian_last.pth"
-    torch.save({"text_projector_state_dict": projector.state_dict(), "theta_T": float(theta_t.detach().cpu().item()), "loss": str(args.loss), "epoch": int(args.epochs), "global_step": int(global_step), "matched_pairs_csv": str(matched_csv)}, ckpt_out)
+    _save_training_checkpoint(
+        ckpt_out,
+        projector=projector,
+        theta_t=theta_t,
+        loss_name=str(args.loss),
+        epoch=int(args.epochs),
+        global_step=global_step,
+        matched_pairs_csv=matched_csv,
+    )
+    if bool(args.write_epoch_metrics):
+        _write_csv(train_dir / "epoch_metrics.csv", epoch_metric_rows)
 
     final = {
         "status": "PASS", "timestamp": _now(), "loss": str(args.loss), "output_root": str(out_root), "train_summary": {"epochs": int(args.epochs), "global_step": global_step, "loss_mean": _mean(all_losses), "loss_last": all_losses[-1] if all_losses else 0.0, "train_row_count": len(train_rows), "train_clip_count": len(clip_ids)},
@@ -480,6 +562,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--show_progress", action="store_true", default=True)
     p.add_argument("--print_epoch_summary", action="store_true", default=True)
     p.add_argument("--log_every_steps", type=int, default=200)
+    p.add_argument("--eval_every_epochs", type=int, default=0)
+    p.add_argument("--save_every_epochs", type=int, default=0)
+    p.add_argument("--write_epoch_metrics", action="store_true")
     return p.parse_args()
 
 
