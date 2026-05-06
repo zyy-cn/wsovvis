@@ -32,6 +32,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -65,7 +66,7 @@ from videocutler.run_stageb_analysis_residual_gated_coverage_assignment import (
     _compute_t_dis,
     _inverse_softplus,
     _load_checkpoint_if_requested,
-    _prepare_data,
+    _prepare_data as _prepare_residual_gt_data,
     _write_csv,
     _write_json,
 )
@@ -74,6 +75,142 @@ from videocutler.run_stageb_train_hungarian_prealign import (  # noqa: E402
     _prealign_loss_for_clip,
     _project_text,
 )
+from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import load_text_vocab  # noqa: E402
+from videocutler.ext_stageb_ovvis.algorithms.prealign import _prepare_examples as _prepare_prealign_examples  # noqa: E402
+from videocutler.ext_stageb_ovvis.data.g7_phase1_materialization import (  # noqa: E402
+    Phase1MaterializationConfig,
+    materialize_phase1_training_samples,
+)
+from videocutler.run_stageb_train_gt_full_y_clean import (  # noqa: E402
+    _bootstrap_asset_links,
+    _class_name_map_from_annotation_json,
+    _class_name_map_from_text_records,
+    _load_base_ids,
+    _load_clip_y_base,
+)
+
+
+SUPPORTED_TRAJECTORY_SOURCE_BRANCHES = {"gt_upper_bound", "mainline"}
+
+
+def _prepare_data(args: argparse.Namespace) -> Any:
+    """Load training examples for either GT or VideoCutLER trajectories.
+
+    This local wrapper preserves the old default (gt_upper_bound), but exposes
+    the materialization branch so A8 dynamic Hungarian can be run on the normal
+    VideoCutLER trajectory/carrier assets:
+
+      * gt_upper_bound -> exports_gt/ + carrier_bank_gt/
+      * mainline       -> exports/    + carrier_bank/
+
+    It does not change the weak/full-Y candidate semantics or the Hungarian
+    assignment rule; only the trajectory/carrier source branch changes.
+    """
+    branch = str(getattr(args, "trajectory_source_branch", "gt_upper_bound")).strip() or "gt_upper_bound"
+    if branch not in SUPPORTED_TRAJECTORY_SOURCE_BRANCHES:
+        raise ValueError(f"unsupported trajectory_source_branch={branch!r}; expected one of {sorted(SUPPORTED_TRAJECTORY_SOURCE_BRANCHES)}")
+
+    repo_root = Path(args.repo_root).expanduser().resolve()
+    asset_root = Path(args.asset_root).expanduser().resolve()
+    out_root_for_assets = Path(args.output_dir).expanduser().resolve() if str(getattr(args, "output_dir", "")).strip() else Path(args.run_root).expanduser().resolve()
+    _bootstrap_asset_links(repo_root, asset_root)
+    _bootstrap_asset_links(out_root_for_assets, asset_root)
+
+    base_ids = _load_base_ids(Path(args.split_json).expanduser().resolve())
+    clip_y_base = _load_clip_y_base(Path(args.annotation_json).expanduser().resolve(), base_ids)
+
+    # Use the canonical G7 phase-1 materializer for both branches.  This is the
+    # same branch abstraction used by the normal G7 training code and avoids
+    # hand-assembling paths in this side-path A8 tool.
+    old_cwd = Path.cwd()
+    try:
+        import os
+        os.chdir(repo_root)
+        materialized = materialize_phase1_training_samples(
+            repo_root,
+            Phase1MaterializationConfig(
+                dataset_name=str(args.dataset_name),
+                trajectory_source_branch=str(branch),
+                smoke=bool(args.smoke),
+                smoke_max_trajectories=int(args.smoke_max_trajectories),
+                subset_fraction=args.subset_fraction,
+                subset_seed=int(args.seed),
+            ),
+        )
+    finally:
+        import os
+        os.chdir(old_cwd)
+
+    samples_raw = materialized.get("valid_samples") or materialized.get("samples") or []
+    samples: List[Dict[str, Any]] = []
+    sample_counters = Counter()
+    for sample in samples_raw:
+        if not bool(sample.get("sample_valid", False)):
+            sample_counters["skip_sample_not_valid"] += 1
+            continue
+        clip = _as_int(sample.get("clip_id"))
+        if clip is None:
+            sample_counters["skip_no_clip_id"] += 1
+            continue
+        y_base = sorted(int(x) for x in clip_y_base.get(int(clip), set()))
+        if not y_base:
+            sample_counters["skip_no_y_base"] += 1
+            continue
+        row = dict(sample)
+        row["observed_raw_ids"] = [int(x) for x in y_base]
+        row["clean_label_source"] = "full_Y_base_from_GT_annotations"
+        row["trajectory_source_branch"] = str(branch)
+        samples.append(row)
+
+    prepared = _prepare_prealign_examples(
+        samples,
+        output_root=out_root_for_assets,
+        dataset_name=str(args.dataset_name),
+        trajectory_source_branch=str(branch),
+    )
+    examples = list(prepared.get("examples", []))
+    if not examples:
+        raise RuntimeError(f"no materialized carrier examples were loaded for trajectory_source_branch={branch}")
+
+    by_clip: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for ex in examples:
+        by_clip[int(ex["clip_id"])].append(dict(ex))
+
+    text_ids_raw, text_records, text_matrix = load_text_vocab(out_root_for_assets)
+    text_ids = [int(x) for x in text_ids_raw]
+    raw_to_text_idx = {int(raw_id): idx for idx, raw_id in enumerate(text_ids)}
+    ann_names = _class_name_map_from_annotation_json(Path(args.annotation_json).expanduser().resolve())
+    text_names = _class_name_map_from_text_records(text_records)
+    class_names = dict(text_names)
+    class_names.update({int(k): str(v) for k, v in ann_names.items()})
+
+    materialization_summary = {
+        "trajectory_source_branch": str(branch),
+        "uses_gt_upper_bound_trajectory": bool(branch == "gt_upper_bound"),
+        "uses_videocutler_mainline_trajectory": bool(branch == "mainline"),
+        "materialized_stats": materialized.get("stats", {}),
+        "materialized_resolution": materialized.get("resolution", {}),
+        "sample_counters": dict(sample_counters),
+        "prepare_skipped_reason_histogram": dict(prepared.get("skipped_reason_histogram", {})),
+        "sample_count_after_full_y_base_filter": int(len(samples)),
+        "trainable_example_count": int(len(examples)),
+        "clip_count_after_grouping": int(len(by_clip)),
+        "base_ids_count": int(len(base_ids)),
+        "text_bank_count": int(len(text_ids)),
+    }
+
+    return SimpleNamespace(
+        examples=list(examples),
+        by_clip=dict(by_clip),
+        clip_y_base={int(k): set(int(x) for x in v) for k, v in clip_y_base.items()},
+        base_ids=set(int(x) for x in base_ids),
+        raw_to_text_idx=raw_to_text_idx,
+        text_ids=text_ids,
+        text_records=list(text_records),
+        text_matrix=np.asarray(text_matrix, dtype=np.float32),
+        class_names=class_names,
+        materialization_summary=materialization_summary,
+    )
 
 
 def _now() -> str:
@@ -673,6 +810,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "timestamp": _now(),
         "name": str(args.name),
         "dataset_name": str(args.dataset_name),
+        "trajectory_source_branch": str(args.trajectory_source_branch),
         "repo_root": str(repo_root),
         "asset_root": str(asset_root),
         "run_root": str(run_root),
@@ -708,6 +846,9 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "uses_nohub_correctness_for_training": False,
             "uses_dummy_or_slack": False,
             "uses_extra_support": False,
+            "uses_gt_upper_bound_trajectory": bool(str(args.trajectory_source_branch) == "gt_upper_bound"),
+            "uses_videocutler_mainline_trajectory": bool(str(args.trajectory_source_branch) == "mainline"),
+            "trajectory_source_branch_changes_only_carrier_source": True,
             "uses_local_text_graph_preserve_regularizer": bool(graph_cache.get("enabled", False)) and float(args.lambda_graph_preserve) > 0.0,
             "graph_preserve_uses_row_level_gt": False,
             "graph_preserve_uses_visual_prototype_target": False,
@@ -891,6 +1032,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="A8 joint prealign + train-time dynamic Hungarian training")
     p.add_argument("--run_root", required=True)
     p.add_argument("--dataset_name", default="lvvis_train_base")
+    p.add_argument("--trajectory_source_branch", choices=["gt_upper_bound", "mainline"], default="gt_upper_bound", help="Trajectory/carrier source: gt_upper_bound uses exports_gt/carrier_bank_gt; mainline uses VideoCutLER exports/carrier_bank.")
     p.add_argument("--name", default="D-J1_pre1_dyn1_ep5")
     p.add_argument("--output_root", default="")
     p.add_argument("--repo_root", default="/mnt/sda/zyy/code/wsovvis")
