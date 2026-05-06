@@ -337,7 +337,40 @@ def _matrix_for_ids(proto: Mapping[str, np.ndarray], ids: Sequence[str]) -> np.n
 
 
 def _try_project_text(bundle: Any, text_sub: np.ndarray, device: torch.device) -> Tuple[Optional[np.ndarray], str]:
-    """Best-effort text projection. Returns (projected, status)."""
+    """Best-effort text projection. Returns (projected, status).
+
+    The canonical G8 inference path does not expose projected text by calling the
+    ProjectorBundle itself.  It stores the actual nn.Module at bundle.projector
+    and projects candidate text through _project_candidate_matrix(...).  The
+    first branch below mirrors that canonical scoring path exactly.  The
+    remaining branches are fallback probes for older or future checkpoint bundle
+    shapes.
+    """
+    text_np = np.asarray(text_sub, dtype=np.float32)
+
+    projector = getattr(bundle, "projector", None)
+    if projector is None and isinstance(bundle, Mapping):
+        projector = bundle.get("projector") or bundle.get("text_projector")
+
+    if projector is not None:
+        try:
+            from videocutler.ext_stageb_ovvis.algorithms._g7_semantics import _project_candidate_matrix  # type: ignore
+
+            with torch.no_grad():
+                if hasattr(projector, "eval"):
+                    projector.eval()
+                y = _project_candidate_matrix(projector=projector, candidate_matrix=text_np, device=device)
+                if torch.is_tensor(y):
+                    arr = y.detach().float().cpu().numpy()
+                    if arr.ndim == 2 and arr.shape[0] == text_np.shape[0]:
+                        return _l2_normalize(arr), "available:g8_bridge_canonical_project_candidate_matrix"
+        except Exception as exc:
+            canonical_error = f"canonical_project_candidate_matrix_failed:{type(exc).__name__}:{exc}"
+        else:
+            canonical_error = "canonical_project_candidate_matrix_failed:unknown"
+    else:
+        canonical_error = "missing_bundle_projector"
+
     candidates: List[Tuple[str, Any]] = []
     if callable(bundle):
         candidates.append(("bundle_callable", bundle))
@@ -345,6 +378,8 @@ def _try_project_text(bundle: Any, text_sub: np.ndarray, device: torch.device) -
         candidates.append(("bundle.project_text", getattr(bundle, "project_text")))
     if hasattr(bundle, "text_projector"):
         candidates.append(("bundle.text_projector", getattr(bundle, "text_projector")))
+    if hasattr(bundle, "projector") and callable(getattr(bundle, "projector")):
+        candidates.append(("bundle.projector", getattr(bundle, "projector")))
     if isinstance(bundle, Mapping):
         for key in ["projector", "text_projector", "model", "module", "net"]:
             obj = bundle.get(key)
@@ -356,7 +391,7 @@ def _try_project_text(bundle: Any, text_sub: np.ndarray, device: torch.device) -
                 candidates.append((f"{key}.text_projector", getattr(obj, "text_projector")))
             if callable(obj):
                 candidates.append((key, obj))
-    x = torch.as_tensor(np.asarray(text_sub, dtype=np.float32), device=device)
+    x = torch.as_tensor(text_np, device=device)
     for name, fn in candidates:
         try:
             with torch.no_grad():
@@ -373,11 +408,11 @@ def _try_project_text(bundle: Any, text_sub: np.ndarray, device: torch.device) -
                 if not torch.is_tensor(y):
                     continue
                 arr = y.detach().float().cpu().numpy()
-                if arr.ndim == 2 and arr.shape[0] == text_sub.shape[0]:
-                    return _l2_normalize(arr), f"available:{name}"
+                if arr.ndim == 2 and arr.shape[0] == text_np.shape[0]:
+                    return _l2_normalize(arr), f"available:fallback:{name}"
         except Exception:
             continue
-    return None, "unavailable:no_callable_projector_found_in_bundle"
+    return None, f"unavailable:no_projected_text:{canonical_error}"
 
 
 def _resolve_inputs(args: argparse.Namespace, run_root: Path) -> Dict[str, Path]:
