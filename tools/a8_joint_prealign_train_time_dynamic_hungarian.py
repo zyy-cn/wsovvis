@@ -726,6 +726,63 @@ def _patchsample_aug_seed(global_seed: int, epoch: int, clip_id: int, trajectory
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little") % (2**32 - 1)
 
 
+
+
+def _load_patchsample_cache(cache_dir: Path) -> Dict[str, Any]:
+    """Load an offline patchsample carrier cache without materializing vectors.
+
+    Expected files:
+      * patchsample_manifest.json
+      * patchsample_index.json
+      * patchsample_vectors.fp16.mmap  (shape from manifest)
+      * patchsample_valid.npy          (bool, mmap readable)
+
+    The cache contains per-epoch, per-trajectory sampled carriers.  Training
+    still gates replacement by patchsample_prob and preserves the original
+    clip-wise Hungarian protocol; this cache only replaces expensive online
+    frame_bank sampling with a deterministic table lookup.
+    """
+    cache_dir = Path(cache_dir).expanduser().resolve()
+    manifest_path = cache_dir / "patchsample_manifest.json"
+    index_path = cache_dir / "patchsample_index.json"
+    vectors_path = cache_dir / "patchsample_vectors.fp16.mmap"
+    valid_path = cache_dir / "patchsample_valid.npy"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+    if not index_path.is_file():
+        raise FileNotFoundError(index_path)
+    if not vectors_path.is_file():
+        raise FileNotFoundError(vectors_path)
+    if not valid_path.is_file():
+        raise FileNotFoundError(valid_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    trajectory_ids = [str(x) for x in index.get("trajectory_ids", [])]
+    shape = tuple(int(x) for x in manifest.get("shape", []))
+    if len(shape) != 3:
+        raise RuntimeError(f"invalid patchsample cache shape in {manifest_path}: {shape!r}")
+    if shape[1] != len(trajectory_ids):
+        raise RuntimeError(f"patchsample cache index/shape mismatch: shape={shape}, trajectory_ids={len(trajectory_ids)}")
+    vec = np.memmap(vectors_path, mode="r", dtype=np.float16, shape=shape)
+    valid = np.load(valid_path, mmap_mode="r")
+    if tuple(int(x) for x in valid.shape) != shape[:2]:
+        raise RuntimeError(f"patchsample valid shape mismatch: valid={valid.shape}, expected={shape[:2]}")
+    return {
+        "status": "PASS",
+        "cache_dir": str(cache_dir),
+        "manifest": manifest,
+        "trajectory_ids": trajectory_ids,
+        "index_by_trajectory_id": {tid: i for i, tid in enumerate(trajectory_ids)},
+        "vectors": vec,
+        "valid": valid,
+        "shape": shape,
+        "epochs": int(shape[0]),
+        "trajectory_count": int(shape[1]),
+        "dim": int(shape[2]),
+        "vectors_path": str(vectors_path),
+        "valid_path": str(valid_path),
+    }
+
 def _maybe_patchsample_augment_clip_rows(
     *,
     clip_id: int,
@@ -736,15 +793,14 @@ def _maybe_patchsample_augment_clip_rows(
     frame_bank_dir: Optional[Path],
     frame_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]],
     geom_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]],
+    patchsample_cache: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[Mapping[str, Any]], List[Mapping[str, Any]], Dict[str, Any]]:
     mode = str(getattr(args, "train_carrier_aug_mode", "none")).strip().lower()
     prob = float(getattr(args, "patchsample_prob", 0.0))
     if mode in {"", "none", "off", "false", "0"} or prob <= 0.0:
         return [dict(x) for x in pre_group], [dict(x) for x in dyn_rows], {"train_carrier_aug_enabled": False, "train_carrier_aug_mode": "none"}
-    if mode != "patchsample_mixed":
+    if mode not in {"patchsample_mixed", "patchsample_cached_mixed"}:
         raise ValueError(f"unsupported train_carrier_aug_mode={mode!r}")
-    if frame_bank_dir is None or frame_map is None or geom_map is None:
-        raise RuntimeError("patchsample_mixed requested but frame_bank maps are not loaded")
 
     patch_prob = min(max(prob, 0.0), 1.0)
     token_k = int(getattr(args, "patchsample_tokens_per_view", 64))
@@ -752,19 +808,26 @@ def _maybe_patchsample_augment_clip_rows(
     max_cand = int(getattr(args, "patchsample_max_frame_candidate_tokens", 4096))
     base_seed = int(getattr(args, "patchsample_seed", getattr(args, "seed", 0)))
 
-    # One clip-local payload cache preserves the original clip-wise protocol while
-    # avoiding repeated opens of the same frame_bank .npz payload for trajectories
-    # within the clip.  It is deliberately released before the next clip.
-    payload_cache: Dict[Path, np.lib.npyio.NpzFile] = {}
     replacements: Dict[str, np.ndarray] = {}
     counters: Counter = Counter()
     candidate_means: List[float] = []
-    try:
-        rows_by_tid: Dict[str, Mapping[str, Any]] = {}
-        for r in list(pre_group) + list(dyn_rows):
-            tid = str(r.get("trajectory_id", ""))
-            if tid and tid not in rows_by_tid:
-                rows_by_tid[tid] = r
+
+    rows_by_tid: Dict[str, Mapping[str, Any]] = {}
+    for r in list(pre_group) + list(dyn_rows):
+        tid = str(r.get("trajectory_id", ""))
+        if tid and tid not in rows_by_tid:
+            rows_by_tid[tid] = r
+
+    if mode == "patchsample_cached_mixed":
+        if patchsample_cache is None or not bool(patchsample_cache.get("status") == "PASS"):
+            raise RuntimeError("patchsample_cached_mixed requested but patchsample cache is not loaded")
+        cache_epochs = int(patchsample_cache.get("epochs", 0))
+        if int(epoch) < 1 or int(epoch) > cache_epochs:
+            raise RuntimeError(f"patchsample cache has {cache_epochs} epochs but training requested epoch={epoch}; build a larger cache or reduce --epochs")
+        idx_by_tid = patchsample_cache["index_by_trajectory_id"]
+        vectors = patchsample_cache["vectors"]
+        valid = patchsample_cache["valid"]
+        eidx = int(epoch) - 1
         for tid, row in rows_by_tid.items():
             gate_seed = _patchsample_aug_seed(base_seed, int(epoch), int(clip_id), str(tid))
             gate_rng = np.random.default_rng(gate_seed)
@@ -772,32 +835,67 @@ def _maybe_patchsample_augment_clip_rows(
                 counters["kept_mean_by_probability"] += 1
                 continue
             counters["patchsample_attempted"] += 1
-            vec, st = _sample_patch_carrier_for_row(
-                row=row,
-                frame_bank_dir=frame_bank_dir,
-                frame_map=frame_map,
-                geom_map=geom_map,
-                payload_cache=payload_cache,
-                tokens_per_view=token_k,
-                min_token_weight=min_weight,
-                max_frame_candidate_tokens=max_cand,
-                seed=gate_seed,
-            )
+            tidx = idx_by_tid.get(str(tid))
+            if tidx is None:
+                counters["patchsample_fallback_to_mean"] += 1
+                counters["patchsample_skip_missing_cache_trajectory"] += 1
+                continue
+            if not bool(valid[eidx, int(tidx)]):
+                counters["patchsample_fallback_to_mean"] += 1
+                counters["patchsample_skip_invalid_cache_vector"] += 1
+                continue
+            vec = _normalize_np_vec(np.asarray(vectors[eidx, int(tidx)], dtype=np.float32))
             if vec is None:
                 counters["patchsample_fallback_to_mean"] += 1
-                reason = str(st.get("reason", "unknown")) if isinstance(st, Mapping) else "unknown"
-                counters[f"patchsample_skip_{reason}"] += 1
+                counters["patchsample_skip_zero_norm_cache_vector"] += 1
                 continue
             replacements[str(tid)] = np.asarray(vec, dtype=np.float32)
             counters["patchsample_used"] += 1
-            if isinstance(st, Mapping) and st.get("token_candidate_count_mean_per_frame") is not None:
-                candidate_means.append(float(st.get("token_candidate_count_mean_per_frame", 0.0)))
-    finally:
-        for payload in payload_cache.values():
-            try:
-                payload.close()
-            except Exception:
-                pass
+        payload_cache_scope = "offline_cache_lookup"
+    else:
+        if frame_bank_dir is None or frame_map is None or geom_map is None:
+            raise RuntimeError("patchsample_mixed requested but frame_bank maps are not loaded")
+        # One clip-local payload cache preserves the original clip-wise protocol
+        # while avoiding repeated opens of the same frame_bank .npz payload for
+        # trajectories within the clip. It is deliberately released before the
+        # next clip. This online path is retained for smoke/debug only; full
+        # runs should use patchsample_cached_mixed.
+        payload_cache: Dict[Path, np.lib.npyio.NpzFile] = {}
+        try:
+            for tid, row in rows_by_tid.items():
+                gate_seed = _patchsample_aug_seed(base_seed, int(epoch), int(clip_id), str(tid))
+                gate_rng = np.random.default_rng(gate_seed)
+                if float(gate_rng.random()) >= patch_prob:
+                    counters["kept_mean_by_probability"] += 1
+                    continue
+                counters["patchsample_attempted"] += 1
+                vec, st = _sample_patch_carrier_for_row(
+                    row=row,
+                    frame_bank_dir=frame_bank_dir,
+                    frame_map=frame_map,
+                    geom_map=geom_map,
+                    payload_cache=payload_cache,
+                    tokens_per_view=token_k,
+                    min_token_weight=min_weight,
+                    max_frame_candidate_tokens=max_cand,
+                    seed=gate_seed,
+                )
+                if vec is None:
+                    counters["patchsample_fallback_to_mean"] += 1
+                    reason = str(st.get("reason", "unknown")) if isinstance(st, Mapping) else "unknown"
+                    counters[f"patchsample_skip_{reason}"] += 1
+                    continue
+                replacements[str(tid)] = np.asarray(vec, dtype=np.float32)
+                counters["patchsample_used"] += 1
+                if isinstance(st, Mapping) and st.get("token_candidate_count_mean_per_frame") is not None:
+                    candidate_means.append(float(st.get("token_candidate_count_mean_per_frame", 0.0)))
+        finally:
+            for payload in payload_cache.values():
+                try:
+                    payload.close()
+                except Exception:
+                    pass
+        payload_cache_scope = "clip_local"
 
     def apply(rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
         out: List[Mapping[str, Any]] = []
@@ -806,7 +904,7 @@ def _maybe_patchsample_augment_clip_rows(
             tid = str(rr.get("trajectory_id", ""))
             if tid in replacements:
                 rr["carrier_vec"] = replacements[tid]
-                rr["carrier_aug_source"] = "patchsample_mixed"
+                rr["carrier_aug_source"] = str(mode)
             else:
                 rr["carrier_aug_source"] = "mean_carrier"
             out.append(rr)
@@ -814,7 +912,7 @@ def _maybe_patchsample_augment_clip_rows(
 
     stats = {
         "train_carrier_aug_enabled": True,
-        "train_carrier_aug_mode": "patchsample_mixed",
+        "train_carrier_aug_mode": str(mode),
         "patchsample_prob": float(patch_prob),
         "patchsample_tokens_per_view": int(token_k),
         "patchsample_unique_trajectories": int(len(set([str(r.get("trajectory_id", "")) for r in list(pre_group) + list(dyn_rows) if str(r.get("trajectory_id", ""))]))),
@@ -824,10 +922,9 @@ def _maybe_patchsample_augment_clip_rows(
         "patchsample_kept_mean_by_probability": int(counters.get("kept_mean_by_probability", 0)),
         "patchsample_token_candidate_count_mean_per_frame": float(np.mean(candidate_means)) if candidate_means else 0.0,
         "patchsample_counters": dict(counters),
-        "payload_cache_scope": "clip_local",
+        "payload_cache_scope": payload_cache_scope,
     }
     return apply(pre_group), apply(dyn_rows), stats
-
 
 def _hungarian_maximize(score: np.ndarray) -> Tuple[np.ndarray, np.ndarray, str]:
     """Return row/col assignment for a score matrix.
@@ -1117,12 +1214,32 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
     train_aug_mode = str(args.train_carrier_aug_mode).strip().lower()
-    train_aug_enabled = bool(train_aug_mode == "patchsample_mixed" and float(args.patchsample_prob) > 0.0)
+    train_aug_enabled = bool(train_aug_mode in {"patchsample_mixed", "patchsample_cached_mixed"} and float(args.patchsample_prob) > 0.0)
     frame_bank_dir: Optional[Path] = None
     frame_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]] = None
     geom_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]] = None
+    patchsample_cache: Optional[Mapping[str, Any]] = None
     frame_bank_summary: Dict[str, Any] = {"status": "NOT_USED", "reason": "train_carrier_aug_disabled"}
-    if train_aug_enabled:
+    cache_summary: Dict[str, Any] = {"status": "NOT_USED", "reason": "patchsample cache not requested"}
+    if train_aug_enabled and train_aug_mode == "patchsample_cached_mixed":
+        if not str(getattr(args, "patchsample_cache_dir", "")).strip():
+            raise RuntimeError("--train_carrier_aug_mode patchsample_cached_mixed requires --patchsample_cache_dir")
+        patchsample_cache = _load_patchsample_cache(Path(args.patchsample_cache_dir))
+        if int(patchsample_cache["epochs"]) < int(args.epochs):
+            raise RuntimeError(f"patchsample cache epochs={patchsample_cache['epochs']} < requested training epochs={args.epochs}")
+        cache_summary = {
+            "status": "PASS",
+            "cache_dir": str(patchsample_cache["cache_dir"]),
+            "epochs": int(patchsample_cache["epochs"]),
+            "trajectory_count": int(patchsample_cache["trajectory_count"]),
+            "dim": int(patchsample_cache["dim"]),
+            "shape": list(patchsample_cache["shape"]),
+            "vectors_path": str(patchsample_cache["vectors_path"]),
+            "valid_path": str(patchsample_cache["valid_path"]),
+            "runs_dinov2_encoder": False,
+        }
+        frame_bank_summary = {"status": "NOT_USED", "reason": "offline patchsample cache lookup"}
+    elif train_aug_enabled:
         frame_bank_dir = asset_root / "frame_bank" / str(args.dataset_name)
         frame_map_loaded, geom_map_loaded = _load_frame_maps(frame_bank_dir)
         frame_map = frame_map_loaded
@@ -1161,7 +1278,10 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "patchsample_min_token_weight": float(args.patchsample_min_token_weight),
             "patchsample_max_frame_candidate_tokens": int(args.patchsample_max_frame_candidate_tokens),
             "frame_bank": frame_bank_summary,
-            "uses_frame_bank_patch_token_cache": bool(train_aug_enabled),
+            "offline_cache": cache_summary,
+            "patchsample_cache_dir": str(getattr(args, "patchsample_cache_dir", "")),
+            "uses_frame_bank_patch_token_cache": bool(train_aug_enabled and train_aug_mode == "patchsample_mixed"),
+            "uses_offline_patchsample_cache": bool(train_aug_enabled and train_aug_mode == "patchsample_cached_mixed"),
             "runs_dinov2_encoder": False,
             "changes_inference_protocol": False,
             "preserves_clip_wise_training_protocol": True,
@@ -1202,7 +1322,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "patchsample_aug_preserves_clip_wise_training_protocol": True,
             "patchsample_aug_does_not_random_batch_trajectories": True,
             "patchsample_aug_does_not_cross_clip_hungarian": True,
-            "patchsample_aug_prefetch_unit": "clip_payload_only",
+            "patchsample_aug_prefetch_unit": "offline_cache_lookup" if train_aug_mode == "patchsample_cached_mixed" else "clip_payload_only",
+            "patchsample_aug_uses_offline_cache": bool(train_aug_enabled and train_aug_mode == "patchsample_cached_mixed"),
             "patchsample_aug_runs_dinov2_encoder": False,
         },
     }
@@ -1264,6 +1385,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
                 frame_bank_dir=frame_bank_dir,
                 frame_map=frame_map,
                 geom_map=geom_map,
+                patchsample_cache=patchsample_cache,
             )
             ep_patch_attempted += int(patch_stats.get("patchsample_attempted", 0))
             ep_patch_used += int(patch_stats.get("patchsample_used", 0))
@@ -1443,7 +1565,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--graph_preserve_tau", type=float, default=0.1)
     p.add_argument("--graph_preserve_every_n_steps", type=int, default=1)
     p.add_argument("--graph_preserve_visible_csv", default="", help="Optional base_641_visibility_by_class.csv; used when graph_preserve_scope=visible525.")
-    p.add_argument("--train_carrier_aug_mode", choices=["none", "patchsample_mixed"], default="none", help="Train-side carrier augmentation only; inference remains mean-carrier unless separately changed.")
+    p.add_argument("--train_carrier_aug_mode", choices=["none", "patchsample_mixed", "patchsample_cached_mixed"], default="none", help="Train-side carrier augmentation only; inference remains mean-carrier unless separately changed. patchsample_cached_mixed uses offline cached sampled carriers.")
+    p.add_argument("--patchsample_cache_dir", default="", help="Offline patchsample carrier cache directory produced by tools/a8_build_patchsample_carrier_cache.py; required for patchsample_cached_mixed.")
     p.add_argument("--patchsample_prob", type=float, default=0.0, help="Probability of replacing a trajectory mean carrier with one patch-token sampled carrier during training.")
     p.add_argument("--patchsample_tokens_per_view", type=int, default=64, help="Number of mask-inside patch tokens sampled per augmented carrier.")
     p.add_argument("--patchsample_seed", type=int, default=3407, help="Stable seed used for epoch/clip/trajectory patch sampling.")
