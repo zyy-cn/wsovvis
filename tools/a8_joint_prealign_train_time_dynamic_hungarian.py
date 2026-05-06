@@ -137,6 +137,158 @@ def _save_checkpoint(
     )
 
 
+def _load_train_visible_ids_from_csv(path: Optional[Path]) -> set[int]:
+    """Load the canonical train-visible-525 raw ids when the visibility CSV exists.
+
+    This mirrors tools/a8_visible525_candidate_rankk_audit.py but is intentionally
+    non-fatal for training setup: graph regularization can fall back to the base
+    vocabulary when the visibility audit asset is absent in a new snapshot.
+    """
+    if path is None or not path.is_file():
+        return set()
+    ids: set[int] = set()
+    try:
+        rows = _read_csv(path)
+    except Exception:
+        return set()
+    for r in rows:
+        rid = _as_int(r.get("raw_id"))
+        if rid is None:
+            continue
+        if str(r.get("in_row_gap", "0")).strip() == "1":
+            ids.add(int(rid))
+    return ids
+
+
+def _build_graph_preserve_cache(
+    *,
+    data: Any,
+    text_tensor: torch.Tensor,
+    base_raw_ids: Sequence[int],
+    device: torch.device,
+    mode: str,
+    scope: str,
+    topk: int,
+    tau: float,
+    visible_csv: Optional[Path],
+    seed: int,
+) -> Dict[str, Any]:
+    """Precompute local raw-text graph targets for structure-preserving loss.
+
+    The loss is intentionally a text-prototype-only regularizer: it does not use
+    row-level GT, dynamic Hungarian assignments, or visual prototype targets.  It
+    preserves the local raw CLIP text neighborhood after projection:
+
+      KL(softmax(S_raw[i, N_i]/tau) || softmax(S_proj[i, N_i]/tau)).
+
+    `random_text_topk` keeps the same implementation surface but randomizes the
+    neighborhood set as a control for "just adding a regularizer".
+    """
+    mode = str(mode).strip().lower()
+    if mode in {"", "none", "off", "false", "0"}:
+        return {"enabled": False, "mode": "none", "reason": "graph_preserve_mode_disabled"}
+
+    if mode not in {"raw_text_topk", "random_text_topk"}:
+        raise ValueError(f"unsupported graph_preserve_mode={mode!r}")
+    scope = str(scope).strip().lower()
+    if scope not in {"visible525", "base_vocab"}:
+        raise ValueError(f"unsupported graph_preserve_scope={scope!r}")
+
+    raw_ids: List[int]
+    visible_ids: set[int] = set()
+    visible_csv_status = "NOT_USED"
+    if scope == "visible525":
+        visible_ids = _load_train_visible_ids_from_csv(visible_csv)
+        if len(visible_ids) == 525:
+            raw_ids = [int(rid) for rid in sorted(visible_ids) if int(rid) in data.raw_to_text_idx]
+            visible_csv_status = "PASS"
+        else:
+            # Robust fallback for clean snapshots without prior visibility audit.
+            raw_ids = [int(rid) for rid in sorted(base_raw_ids) if int(rid) in data.raw_to_text_idx]
+            visible_csv_status = f"FALLBACK_TO_BASE_VOCAB_visible_count={len(visible_ids)}"
+    else:
+        raw_ids = [int(rid) for rid in sorted(base_raw_ids) if int(rid) in data.raw_to_text_idx]
+        visible_csv_status = "NOT_USED_BASE_VOCAB_SCOPE"
+
+    raw_ids = [int(rid) for rid in raw_ids if int(rid) in data.raw_to_text_idx]
+    if len(raw_ids) < 3:
+        raise RuntimeError(f"graph preserve scope has too few classes: {len(raw_ids)}")
+    k = min(int(topk), len(raw_ids) - 1)
+    if k <= 0:
+        raise RuntimeError(f"graph_preserve_topk must be positive after clipping, got {topk}")
+
+    text_indices_np = np.asarray([int(data.raw_to_text_idx[int(rid)]) for rid in raw_ids], dtype=np.int64)
+    with torch.no_grad():
+        T = F.normalize(text_tensor.index_select(0, torch.tensor(text_indices_np, device=device, dtype=torch.long)), p=2.0, dim=-1)
+        sim = torch.matmul(T, T.t())
+        sim.fill_diagonal_(-float("inf"))
+        if mode == "raw_text_topk":
+            neighbor_idx = torch.topk(sim, k=int(k), dim=1, largest=True, sorted=True).indices
+        else:
+            rng = np.random.default_rng(int(seed))
+            neigh_rows: List[np.ndarray] = []
+            all_idx = np.arange(len(raw_ids), dtype=np.int64)
+            for i in range(len(raw_ids)):
+                choices = all_idx[all_idx != i]
+                neigh_rows.append(rng.choice(choices, size=int(k), replace=False))
+            neighbor_idx = torch.tensor(np.stack(neigh_rows, axis=0), device=device, dtype=torch.long)
+        raw_neighbor_sim = torch.gather(sim, 1, neighbor_idx)
+        # Random neighbors may include mostly low-similarity pairs; keep the real
+        # raw-sim target distribution over the chosen neighbors for a fair control.
+        target_prob = torch.softmax(raw_neighbor_sim / max(float(tau), 1.0e-6), dim=1).detach()
+
+    return {
+        "enabled": True,
+        "mode": mode,
+        "scope": scope,
+        "resolved_scope": "visible525" if scope == "visible525" and visible_csv_status == "PASS" else "base_vocab",
+        "visible_csv": str(visible_csv) if visible_csv is not None else "",
+        "visible_csv_status": visible_csv_status,
+        "class_count": int(len(raw_ids)),
+        "topk": int(k),
+        "tau": float(tau),
+        "raw_ids_head": [int(x) for x in raw_ids[:20]],
+        "scope_text_indices": torch.tensor(text_indices_np, device=device, dtype=torch.long),
+        "neighbor_idx": neighbor_idx,
+        "target_prob": target_prob,
+    }
+
+
+def _graph_preserve_loss(
+    *,
+    text_proj_all: torch.Tensor,
+    cache: Mapping[str, Any],
+    tau: float,
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    if not bool(cache.get("enabled", False)):
+        zero = text_proj_all.sum() * 0.0
+        return zero, {"graph_preserve_enabled": False, "graph_preserve_loss": 0.0}
+    scope_text_indices = cache["scope_text_indices"]
+    neighbor_idx = cache["neighbor_idx"]
+    target_prob = cache["target_prob"]
+    P = F.normalize(text_proj_all.index_select(0, scope_text_indices), p=2.0, dim=-1)
+    sim_proj = torch.matmul(P, P.t())
+    proj_neighbor_sim = torch.gather(sim_proj, 1, neighbor_idx)
+    log_prob = torch.log_softmax(proj_neighbor_sim / max(float(tau), 1.0e-6), dim=1)
+    tgt = target_prob.to(device=log_prob.device, dtype=log_prob.dtype)
+    cross_entropy = -(tgt * log_prob).sum(dim=1).mean()
+    target_entropy = -(tgt * torch.log(torch.clamp(tgt, min=1.0e-12))).sum(dim=1).mean().detach()
+    loss = cross_entropy - target_entropy
+    with torch.no_grad():
+        stats = {
+            "graph_preserve_enabled": True,
+            "graph_preserve_mode": str(cache.get("mode", "")),
+            "graph_preserve_scope": str(cache.get("resolved_scope", cache.get("scope", ""))),
+            "graph_preserve_class_count": int(cache.get("class_count", 0)),
+            "graph_preserve_topk": int(cache.get("topk", 0)),
+            "graph_preserve_loss": float(loss.detach().cpu().item()),
+            "graph_preserve_cross_entropy": float(cross_entropy.detach().cpu().item()),
+            "graph_preserve_target_entropy": float(target_entropy.detach().cpu().item()),
+            "graph_preserve_proj_neighbor_sim_mean": float(proj_neighbor_sim.detach().mean().cpu().item()),
+        }
+    return loss, stats
+
+
 def _default_clip_universe_csv(run_root: Path, dataset_name: str) -> Path:
     candidates = [
         run_root / "analysis" / "residual_gated_hungarian_matching_baseline_full_y_5ep" / str(dataset_name) / "hungarian_matched_pairs.csv",
@@ -426,6 +578,8 @@ def _run_visible525_eval(
 
 def _write_takeover(out_root: Path, payload: Mapping[str, Any]) -> None:
     primary = payload.get("primary_metric", {}) if isinstance(payload.get("primary_metric", {}), Mapping) else {}
+    setup = payload.get("setup", {}) if isinstance(payload.get("setup", {}), Mapping) else {}
+    graph = setup.get("graph_preserve", {}) if isinstance(setup.get("graph_preserve", {}), Mapping) else {}
     lines = [
         "# A8 Joint Train-Time Dynamic Hungarian TAKEOVER",
         "",
@@ -433,6 +587,7 @@ def _write_takeover(out_root: Path, payload: Mapping[str, Any]) -> None:
         f"- name: {payload.get('name')}",
         f"- checkpoint: {payload.get('checkpoint')}",
         "- training objective: lambda_prealign * current prealign bag loss + lambda_dynamic * train-time dynamic Hungarian loss",
+        f"- graph preserve: mode={graph.get('mode', 'none')}, scope={graph.get('resolved_scope', graph.get('scope', ''))}, topK={graph.get('topk', '')}, lambda={setup.get('lambda_graph_preserve', 0.0)}",
         "- dynamic target source: current logits only; matched_raw_id is not used as target",
         "- primary metric: canonical visible525 rank@1",
         f"- primary value: {primary.get('value', '')}",
@@ -445,6 +600,7 @@ def _write_takeover(out_root: Path, payload: Mapping[str, Any]) -> None:
         "- no rank-margin or hard-negative loss",
         "- no dummy/slack or extra support",
         "- no NoHub correctness labels",
+        "- graph preserve does not use row-level GT or visual prototype targets and does not change Hungarian assignment",
     ]
     (out_root / "A8_JOINT_TRAIN_TIME_DYNAMIC_HUNGARIAN_TAKEOVER.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -499,6 +655,20 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     ckpt = _auto_find_checkpoint(repo_root, str(args.dataset_name)) if init == "auto" else init
     checkpoint_summary = _load_checkpoint_if_requested(projector, theta_t, ckpt, device)
 
+    graph_visible_csv = Path(args.graph_preserve_visible_csv).expanduser().resolve() if str(args.graph_preserve_visible_csv).strip() else _default_visible_csv(run_root)
+    graph_cache = _build_graph_preserve_cache(
+        data=data,
+        text_tensor=text_tensor,
+        base_raw_ids=base_raw_ids,
+        device=device,
+        mode=str(args.graph_preserve_mode),
+        scope=str(args.graph_preserve_scope),
+        topk=int(args.graph_preserve_topk),
+        tau=float(args.graph_preserve_tau),
+        visible_csv=graph_visible_csv,
+        seed=int(args.seed),
+    )
+
     setup = {
         "timestamp": _now(),
         "name": str(args.name),
@@ -513,6 +683,11 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "weight_decay": float(args.weight_decay),
         "lambda_prealign": float(args.lambda_prealign),
         "lambda_dynamic": float(args.lambda_dynamic),
+        "lambda_graph_preserve": float(args.lambda_graph_preserve),
+        "graph_preserve": {
+            k: v for k, v in graph_cache.items()
+            if k not in {"scope_text_indices", "neighbor_idx", "target_prob"}
+        },
         "dynamic_loss": str(args.dynamic_loss),
         "dynamic_row_source": str(args.dynamic_row_source),
         "dynamic_candidate_source": "full_y_base",
@@ -533,6 +708,10 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "uses_nohub_correctness_for_training": False,
             "uses_dummy_or_slack": False,
             "uses_extra_support": False,
+            "uses_local_text_graph_preserve_regularizer": bool(graph_cache.get("enabled", False)) and float(args.lambda_graph_preserve) > 0.0,
+            "graph_preserve_uses_row_level_gt": False,
+            "graph_preserve_uses_visual_prototype_target": False,
+            "graph_preserve_changes_hungarian_assignment": False,
         },
     }
     _write_json(out_root / "setup.json", setup)
@@ -546,6 +725,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     all_total: List[float] = []
     all_pre: List[float] = []
     all_dyn: List[float] = []
+    all_graph: List[float] = []
     epoch_rows: List[Dict[str, Any]] = []
     iterator = tqdm(range(int(args.epochs)), desc=f"a8_dyn_hun_{args.name}", dynamic_ncols=True) if bool(args.show_progress) and tqdm is not None else range(int(args.epochs))
     for epoch in iterator:
@@ -554,6 +734,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         ep_total: List[float] = []
         ep_pre: List[float] = []
         ep_dyn: List[float] = []
+        ep_graph: List[float] = []
         ep_pre_rows = 0
         ep_dyn_rows = 0
         ep_pairs = 0
@@ -600,7 +781,15 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
                 device=device,
                 loss_name=str(args.dynamic_loss),
             )
-            total_loss = float(args.lambda_prealign) * pre_loss + float(args.lambda_dynamic) * dyn_loss
+            if bool(graph_cache.get("enabled", False)) and float(args.lambda_graph_preserve) > 0.0 and int(args.graph_preserve_every_n_steps) > 0 and (global_step % int(args.graph_preserve_every_n_steps) == 0):
+                graph_loss, graph_stats = _graph_preserve_loss(
+                    text_proj_all=text_proj_all,
+                    cache=graph_cache,
+                    tau=float(args.graph_preserve_tau),
+                )
+            else:
+                graph_loss, graph_stats = (text_proj_all.sum() * 0.0), {"graph_preserve_enabled": bool(graph_cache.get("enabled", False)), "graph_preserve_loss": 0.0, "graph_preserve_skipped_this_step": True}
+            total_loss = float(args.lambda_prealign) * pre_loss + float(args.lambda_dynamic) * dyn_loss + float(args.lambda_graph_preserve) * graph_loss
             total_loss.backward()
             if float(args.grad_clip_norm) > 0:
                 torch.nn.utils.clip_grad_norm_([*projector.parameters(), theta_t], max_norm=float(args.grad_clip_norm))
@@ -609,15 +798,16 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             tv = float(total_loss.detach().cpu().item())
             pv = float(pre_loss.detach().cpu().item())
             dv = float(dyn_loss.detach().cpu().item())
-            all_total.append(tv); all_pre.append(pv); all_dyn.append(dv)
-            ep_total.append(tv); ep_pre.append(pv); ep_dyn.append(dv)
+            gv = float(graph_loss.detach().cpu().item())
+            all_total.append(tv); all_pre.append(pv); all_dyn.append(dv); all_graph.append(gv)
+            ep_total.append(tv); ep_pre.append(pv); ep_dyn.append(dv); ep_graph.append(gv)
             ep_pre_rows += int(pre_stats.get("rows", 0)); ep_dyn_rows += int(dyn_stats.get("dynamic_rows", 0)); ep_pairs += int(dyn_stats.get("dynamic_assigned_pairs", 0))
             ep_dyn_margin.append(float(dyn_stats.get("dynamic_selected_margin_mean", 0.0)))
             ep_dyn_person.append(float(dyn_stats.get("dynamic_person_raw773_assignment_rate", 0.0)))
             ep_pre_mass.append(float(pre_stats.get("mass_in_y_mean", 0.0)))
             ep_solver[str(dyn_stats.get("dynamic_assignment_solver", ""))] += 1
             if int(args.log_every_steps) > 0 and global_step % int(args.log_every_steps) == 0:
-                _append_jsonl(log_path, {"timestamp": _now(), "row_type": "step", "epoch": int(epoch) + 1, "global_step": global_step, "loss_total": tv, "loss_prealign": pv, "loss_dynamic": dv, **pre_stats, **dyn_stats})
+                _append_jsonl(log_path, {"timestamp": _now(), "row_type": "step", "epoch": int(epoch) + 1, "global_step": global_step, "loss_total": tv, "loss_prealign": pv, "loss_dynamic": dv, "loss_graph_preserve": gv, **pre_stats, **dyn_stats, **graph_stats})
         epoch_row = {
             "timestamp": _now(),
             "row_type": "epoch_summary",
@@ -626,6 +816,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "loss_total_mean": _mean(ep_total),
             "loss_prealign_mean": _mean(ep_pre),
             "loss_dynamic_mean": _mean(ep_dyn),
+            "loss_graph_preserve_mean": _mean(ep_graph),
             "prealign_mass_in_y_mean": _mean(ep_pre_mass),
             "dynamic_selected_margin_mean": _mean(ep_dyn_margin),
             "dynamic_person_raw773_assignment_rate_mean": _mean(ep_dyn_person),
@@ -684,6 +875,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "loss_total_mean": _mean(all_total),
             "loss_prealign_mean": _mean(all_pre),
             "loss_dynamic_mean": _mean(all_dyn),
+            "loss_graph_preserve_mean": _mean(all_graph),
             "loss_total_last": all_total[-1] if all_total else 0.0,
         },
         "setup": setup,
@@ -711,6 +903,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dynamic_loss", choices=["ce", "infonce"], default="ce")
     p.add_argument("--lambda_prealign", type=float, default=1.0)
     p.add_argument("--lambda_dynamic", type=float, default=1.0)
+    p.add_argument("--lambda_graph_preserve", type=float, default=0.0)
+    p.add_argument("--graph_preserve_mode", choices=["none", "raw_text_topk", "random_text_topk"], default="none")
+    p.add_argument("--graph_preserve_scope", choices=["visible525", "base_vocab"], default="visible525")
+    p.add_argument("--graph_preserve_topk", type=int, default=20)
+    p.add_argument("--graph_preserve_tau", type=float, default=0.1)
+    p.add_argument("--graph_preserve_every_n_steps", type=int, default=1)
+    p.add_argument("--graph_preserve_visible_csv", default="", help="Optional base_641_visibility_by_class.csv; used when graph_preserve_scope=visible525.")
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--learning_rate", type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
