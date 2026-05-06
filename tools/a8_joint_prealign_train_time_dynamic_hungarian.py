@@ -88,6 +88,16 @@ from videocutler.run_stageb_train_gt_full_y_clean import (  # noqa: E402
     _load_base_ids,
     _load_clip_y_base,
 )
+from videocutler.ext_stageb_ovvis.banks.carrier_bank import (  # noqa: E402
+    _coerce_token_feature_matrix,
+    _decode_mask_rle,
+    _mask_to_token_weights,
+    _read_feature_vector_cached,
+    _resize_pad_mask,
+)
+from videocutler.ext_stageb_ovvis.banks.frame_feature_bank import (  # noqa: E402
+    reconstruct_valid_token_mask_from_geometry,
+)
 
 
 SUPPORTED_TRAJECTORY_SOURCE_BRANCHES = {"gt_upper_bound", "mainline"}
@@ -172,6 +182,22 @@ def _prepare_data(args: argparse.Namespace) -> Any:
     if not examples:
         raise RuntimeError(f"no materialized carrier examples were loaded for trajectory_source_branch={branch}")
 
+    # Preserve the original trajectory record for optional train-side
+    # patch-token carrier augmentation.  The canonical prealign preparation only
+    # needs carrier_vec and therefore drops masks/frame indices; patch sampling
+    # must recover them from the phase-1 materialized samples without changing
+    # the weak-label / Hungarian protocol.
+    sample_by_tid: Dict[str, Mapping[str, Any]] = {str(s.get("trajectory_id", "")): s for s in samples if str(s.get("trajectory_id", ""))}
+    restored_trajectory_records = 0
+    for ex in examples:
+        src = sample_by_tid.get(str(ex.get("trajectory_id", "")))
+        if src is None:
+            continue
+        if isinstance(src.get("trajectory_record"), Mapping):
+            ex["trajectory_record"] = dict(src["trajectory_record"])
+            restored_trajectory_records += 1
+        ex["trajectory_source_branch"] = str(branch)
+
     by_clip: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for ex in examples:
         by_clip[int(ex["clip_id"])].append(dict(ex))
@@ -194,6 +220,7 @@ def _prepare_data(args: argparse.Namespace) -> Any:
         "prepare_skipped_reason_histogram": dict(prepared.get("skipped_reason_histogram", {})),
         "sample_count_after_full_y_base_filter": int(len(samples)),
         "trainable_example_count": int(len(examples)),
+        "restored_trajectory_record_count_for_patchsample_aug": int(restored_trajectory_records),
         "clip_count_after_grouping": int(len(by_clip)),
         "base_ids_count": int(len(base_ids)),
         "text_bank_count": int(len(text_ids)),
@@ -519,6 +546,289 @@ def _carrier_tensor(rows: Sequence[Mapping[str, Any]], device: torch.device) -> 
     return F.normalize(z, p=2.0, dim=-1)
 
 
+def _load_frame_maps(frame_bank_dir: Path) -> Tuple[Dict[Tuple[str, int], Dict[str, Any]], Dict[Tuple[str, int], Dict[str, Any]]]:
+    frame_records_path = frame_bank_dir / "frame_records.jsonl"
+    geom_records_path = frame_bank_dir / "frame_geom_records.jsonl"
+    if not frame_records_path.is_file():
+        raise FileNotFoundError(frame_records_path)
+    if not geom_records_path.is_file():
+        raise FileNotFoundError(geom_records_path)
+    frame_map: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    geom_map: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    for row in _iter_jsonl(frame_records_path):
+        frame_map[(str(row.get("clip_id")), int(row.get("frame_index")))] = dict(row)
+    for row in _iter_jsonl(geom_records_path):
+        geom_map[(str(row.get("clip_id")), int(row.get("frame_index")))] = dict(row)
+    return frame_map, geom_map
+
+
+def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                yield dict(obj)
+
+
+def _normalize_np_vec(vec: np.ndarray, eps: float = 1.0e-12) -> Optional[np.ndarray]:
+    arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+    norm = float(np.linalg.norm(arr))
+    if norm <= eps or not np.isfinite(norm):
+        return None
+    return (arr / norm).astype(np.float32)
+
+
+def _frame_patch_candidates_for_aug(
+    *,
+    frame_bank_dir: Path,
+    frame_record: Mapping[str, Any],
+    geom_record: Mapping[str, Any],
+    mask_item: Any,
+    image_size: Sequence[int],
+    payload_cache: Dict[Path, np.lib.npyio.NpzFile],
+    min_token_weight: float,
+    max_frame_candidate_tokens: int,
+    rng: np.random.Generator,
+) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
+    feature = _read_feature_vector_cached(frame_bank_dir, str(frame_record["feat_path"]), payload_cache)
+    grid_h = int(geom_record["grid_h"])
+    grid_w = int(geom_record["grid_w"])
+    patch_size = int(geom_record["patch_size"])
+    token_matrix = _coerce_token_feature_matrix(feature, grid_h, grid_w)
+    if token_matrix is None:
+        return None
+    valid_mask = reconstruct_valid_token_mask_from_geometry(geom_record).astype(np.float32)
+    decoded_mask = _decode_mask_rle(mask_item, image_size)
+    projected_mask = _resize_pad_mask(
+        decoded_mask,
+        resized_h=int(geom_record["resized_h"]),
+        resized_w=int(geom_record["resized_w"]),
+        padded_h=int(geom_record["padded_h"]),
+        padded_w=int(geom_record["padded_w"]),
+    )
+    weights = _mask_to_token_weights(projected_mask, patch_size, grid_h, grid_w) * valid_mask
+    flat = weights.reshape(-1).astype(np.float64)
+    valid_idx = np.flatnonzero(flat > float(min_token_weight)) if float(min_token_weight) > 0 else np.flatnonzero(flat > 0)
+    if int(valid_idx.size) <= 0:
+        return None
+    cand_weights = flat[valid_idx].astype(np.float64)
+    denom = float(np.sum(cand_weights))
+    if denom <= 1.0e-12 or not np.isfinite(denom):
+        return None
+    cand_weights = cand_weights / denom
+    if int(max_frame_candidate_tokens or 0) > 0 and int(valid_idx.size) > int(max_frame_candidate_tokens):
+        cap = int(max_frame_candidate_tokens)
+        chosen_pos = rng.choice(int(valid_idx.size), size=cap, replace=False, p=cand_weights)
+        valid_idx = valid_idx[chosen_pos]
+        cand_weights = cand_weights[chosen_pos]
+        cand_weights = cand_weights / max(1.0e-12, float(np.sum(cand_weights)))
+    cand_tokens = np.asarray(token_matrix[valid_idx], dtype=np.float32)
+    return cand_tokens, cand_weights.astype(np.float64), denom
+
+
+def _sample_patch_carrier_for_row(
+    *,
+    row: Mapping[str, Any],
+    frame_bank_dir: Path,
+    frame_map: Mapping[Tuple[str, int], Mapping[str, Any]],
+    geom_map: Mapping[Tuple[str, int], Mapping[str, Any]],
+    payload_cache: Dict[Path, np.lib.npyio.NpzFile],
+    tokens_per_view: int,
+    min_token_weight: float,
+    max_frame_candidate_tokens: int,
+    seed: int,
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    traj = row.get("trajectory_record") if isinstance(row.get("trajectory_record"), Mapping) else {}
+    trajectory_id = str(row.get("trajectory_id", traj.get("trajectory_id", "")))
+    clip_id = str(row.get("clip_id", traj.get("clip_id", row.get("video_id", traj.get("video_id", "")))))
+    frame_indices = [int(x) for x in list(traj.get("frame_indices", []))]
+    masks_rle = list(traj.get("masks_rle", []))
+    image_size = list(traj.get("image_size", []))
+    if len(image_size) != 2:
+        for frame_index in frame_indices:
+            geom = geom_map.get((clip_id, int(frame_index)))
+            if geom is not None:
+                image_size = [int(geom["orig_h"]), int(geom["orig_w"])]
+                break
+    if not trajectory_id or not frame_indices or len(frame_indices) != len(masks_rle) or len(image_size) != 2:
+        return None, {"status": "SKIP", "reason": "malformed_trajectory_record"}
+
+    rng = np.random.default_rng(int(seed))
+    frame_candidates: List[Tuple[np.ndarray, np.ndarray, float, int]] = []
+    counters: Counter = Counter()
+    for frame_index, mask_item in zip(frame_indices, masks_rle):
+        key = (clip_id, int(frame_index))
+        frame_record = frame_map.get(key)
+        geom_record = geom_map.get(key)
+        if frame_record is None:
+            counters["missing_frame_record"] += 1
+            continue
+        if geom_record is None:
+            counters["missing_frame_geom_record"] += 1
+            continue
+        try:
+            cand = _frame_patch_candidates_for_aug(
+                frame_bank_dir=frame_bank_dir,
+                frame_record=frame_record,
+                geom_record=geom_record,
+                mask_item=mask_item,
+                image_size=image_size,
+                payload_cache=payload_cache,
+                min_token_weight=float(min_token_weight),
+                max_frame_candidate_tokens=int(max_frame_candidate_tokens or 0),
+                rng=rng,
+            )
+        except Exception:
+            counters["frame_candidate_failed"] += 1
+            continue
+        if cand is None:
+            counters["empty_token_occupancy"] += 1
+            continue
+        tokens, weights, denom = cand
+        frame_candidates.append((tokens, weights, float(denom), int(frame_index)))
+    if not frame_candidates:
+        return None, {"status": "SKIP", "reason": "no_valid_frames", "counters": dict(counters)}
+
+    frame_mass = np.asarray([x[2] for x in frame_candidates], dtype=np.float64)
+    frame_prob = frame_mass / float(np.sum(frame_mass)) if float(np.sum(frame_mass)) > 1.0e-12 else np.full((len(frame_candidates),), 1.0 / float(len(frame_candidates)), dtype=np.float64)
+    frame_draws = rng.choice(len(frame_candidates), size=int(tokens_per_view), replace=True, p=frame_prob)
+    pieces: List[np.ndarray] = []
+    for fidx in np.unique(frame_draws):
+        count = int(np.sum(frame_draws == fidx))
+        tokens, weights, _denom, _frame_index = frame_candidates[int(fidx)]
+        if int(tokens.shape[0]) <= 0 or count <= 0:
+            continue
+        chosen = rng.choice(int(tokens.shape[0]), size=count, replace=int(tokens.shape[0]) < count, p=weights)
+        pieces.append(np.asarray(tokens[chosen], dtype=np.float32))
+    if not pieces:
+        return None, {"status": "SKIP", "reason": "no_valid_sampled_tokens", "counters": dict(counters)}
+    sampled = np.concatenate(pieces, axis=0).astype(np.float32)
+    proto = _normalize_np_vec(np.mean(sampled, axis=0))
+    if proto is None:
+        return None, {"status": "SKIP", "reason": "zero_norm_sampled_carrier", "counters": dict(counters)}
+    return proto.astype(np.float32), {
+        "status": "PASS",
+        "valid_frame_count": int(len(frame_candidates)),
+        "tokens_per_view": int(sampled.shape[0]),
+        "token_candidate_count_sum": int(sum(int(x[0].shape[0]) for x in frame_candidates)),
+        "token_candidate_count_mean_per_frame": float(np.mean([int(x[0].shape[0]) for x in frame_candidates])),
+        "counters": dict(counters),
+    }
+
+
+def _patchsample_aug_seed(global_seed: int, epoch: int, clip_id: int, trajectory_id: str) -> int:
+    # Stable 32-bit seed without relying on Python's salted hash().
+    import hashlib
+    payload = f"{int(global_seed)}|{int(epoch)}|{int(clip_id)}|{trajectory_id}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little") % (2**32 - 1)
+
+
+def _maybe_patchsample_augment_clip_rows(
+    *,
+    clip_id: int,
+    pre_group: Sequence[Mapping[str, Any]],
+    dyn_rows: Sequence[Mapping[str, Any]],
+    epoch: int,
+    args: argparse.Namespace,
+    frame_bank_dir: Optional[Path],
+    frame_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]],
+    geom_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]],
+) -> Tuple[List[Mapping[str, Any]], List[Mapping[str, Any]], Dict[str, Any]]:
+    mode = str(getattr(args, "train_carrier_aug_mode", "none")).strip().lower()
+    prob = float(getattr(args, "patchsample_prob", 0.0))
+    if mode in {"", "none", "off", "false", "0"} or prob <= 0.0:
+        return [dict(x) for x in pre_group], [dict(x) for x in dyn_rows], {"train_carrier_aug_enabled": False, "train_carrier_aug_mode": "none"}
+    if mode != "patchsample_mixed":
+        raise ValueError(f"unsupported train_carrier_aug_mode={mode!r}")
+    if frame_bank_dir is None or frame_map is None or geom_map is None:
+        raise RuntimeError("patchsample_mixed requested but frame_bank maps are not loaded")
+
+    patch_prob = min(max(prob, 0.0), 1.0)
+    token_k = int(getattr(args, "patchsample_tokens_per_view", 64))
+    min_weight = float(getattr(args, "patchsample_min_token_weight", 0.0))
+    max_cand = int(getattr(args, "patchsample_max_frame_candidate_tokens", 4096))
+    base_seed = int(getattr(args, "patchsample_seed", getattr(args, "seed", 0)))
+
+    # One clip-local payload cache preserves the original clip-wise protocol while
+    # avoiding repeated opens of the same frame_bank .npz payload for trajectories
+    # within the clip.  It is deliberately released before the next clip.
+    payload_cache: Dict[Path, np.lib.npyio.NpzFile] = {}
+    replacements: Dict[str, np.ndarray] = {}
+    counters: Counter = Counter()
+    candidate_means: List[float] = []
+    try:
+        rows_by_tid: Dict[str, Mapping[str, Any]] = {}
+        for r in list(pre_group) + list(dyn_rows):
+            tid = str(r.get("trajectory_id", ""))
+            if tid and tid not in rows_by_tid:
+                rows_by_tid[tid] = r
+        for tid, row in rows_by_tid.items():
+            gate_seed = _patchsample_aug_seed(base_seed, int(epoch), int(clip_id), str(tid))
+            gate_rng = np.random.default_rng(gate_seed)
+            if float(gate_rng.random()) >= patch_prob:
+                counters["kept_mean_by_probability"] += 1
+                continue
+            counters["patchsample_attempted"] += 1
+            vec, st = _sample_patch_carrier_for_row(
+                row=row,
+                frame_bank_dir=frame_bank_dir,
+                frame_map=frame_map,
+                geom_map=geom_map,
+                payload_cache=payload_cache,
+                tokens_per_view=token_k,
+                min_token_weight=min_weight,
+                max_frame_candidate_tokens=max_cand,
+                seed=gate_seed,
+            )
+            if vec is None:
+                counters["patchsample_fallback_to_mean"] += 1
+                reason = str(st.get("reason", "unknown")) if isinstance(st, Mapping) else "unknown"
+                counters[f"patchsample_skip_{reason}"] += 1
+                continue
+            replacements[str(tid)] = np.asarray(vec, dtype=np.float32)
+            counters["patchsample_used"] += 1
+            if isinstance(st, Mapping) and st.get("token_candidate_count_mean_per_frame") is not None:
+                candidate_means.append(float(st.get("token_candidate_count_mean_per_frame", 0.0)))
+    finally:
+        for payload in payload_cache.values():
+            try:
+                payload.close()
+            except Exception:
+                pass
+
+    def apply(rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+        out: List[Mapping[str, Any]] = []
+        for r in rows:
+            rr = dict(r)
+            tid = str(rr.get("trajectory_id", ""))
+            if tid in replacements:
+                rr["carrier_vec"] = replacements[tid]
+                rr["carrier_aug_source"] = "patchsample_mixed"
+            else:
+                rr["carrier_aug_source"] = "mean_carrier"
+            out.append(rr)
+        return out
+
+    stats = {
+        "train_carrier_aug_enabled": True,
+        "train_carrier_aug_mode": "patchsample_mixed",
+        "patchsample_prob": float(patch_prob),
+        "patchsample_tokens_per_view": int(token_k),
+        "patchsample_unique_trajectories": int(len(set([str(r.get("trajectory_id", "")) for r in list(pre_group) + list(dyn_rows) if str(r.get("trajectory_id", ""))]))),
+        "patchsample_attempted": int(counters.get("patchsample_attempted", 0)),
+        "patchsample_used": int(counters.get("patchsample_used", 0)),
+        "patchsample_fallback_to_mean": int(counters.get("patchsample_fallback_to_mean", 0)),
+        "patchsample_kept_mean_by_probability": int(counters.get("kept_mean_by_probability", 0)),
+        "patchsample_token_candidate_count_mean_per_frame": float(np.mean(candidate_means)) if candidate_means else 0.0,
+        "patchsample_counters": dict(counters),
+        "payload_cache_scope": "clip_local",
+    }
+    return apply(pre_group), apply(dyn_rows), stats
+
+
 def _hungarian_maximize(score: np.ndarray) -> Tuple[np.ndarray, np.ndarray, str]:
     """Return row/col assignment for a score matrix.
 
@@ -806,6 +1116,26 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         seed=int(args.seed),
     )
 
+    train_aug_mode = str(args.train_carrier_aug_mode).strip().lower()
+    train_aug_enabled = bool(train_aug_mode == "patchsample_mixed" and float(args.patchsample_prob) > 0.0)
+    frame_bank_dir: Optional[Path] = None
+    frame_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]] = None
+    geom_map: Optional[Mapping[Tuple[str, int], Mapping[str, Any]]] = None
+    frame_bank_summary: Dict[str, Any] = {"status": "NOT_USED", "reason": "train_carrier_aug_disabled"}
+    if train_aug_enabled:
+        frame_bank_dir = asset_root / "frame_bank" / str(args.dataset_name)
+        frame_map_loaded, geom_map_loaded = _load_frame_maps(frame_bank_dir)
+        frame_map = frame_map_loaded
+        geom_map = geom_map_loaded
+        frame_bank_summary = {
+            "status": "PASS",
+            "frame_bank_dir": str(frame_bank_dir),
+            "frame_record_count": int(len(frame_map_loaded)),
+            "frame_geom_record_count": int(len(geom_map_loaded)),
+            "payload_cache_scope": "clip_local",
+            "runs_dinov2_encoder": False,
+        }
+
     setup = {
         "timestamp": _now(),
         "name": str(args.name),
@@ -822,6 +1152,20 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "lambda_prealign": float(args.lambda_prealign),
         "lambda_dynamic": float(args.lambda_dynamic),
         "lambda_graph_preserve": float(args.lambda_graph_preserve),
+        "train_carrier_aug": {
+            "enabled": bool(train_aug_enabled),
+            "mode": str(args.train_carrier_aug_mode),
+            "patchsample_prob": float(args.patchsample_prob),
+            "patchsample_tokens_per_view": int(args.patchsample_tokens_per_view),
+            "patchsample_seed": int(args.patchsample_seed),
+            "patchsample_min_token_weight": float(args.patchsample_min_token_weight),
+            "patchsample_max_frame_candidate_tokens": int(args.patchsample_max_frame_candidate_tokens),
+            "frame_bank": frame_bank_summary,
+            "uses_frame_bank_patch_token_cache": bool(train_aug_enabled),
+            "runs_dinov2_encoder": False,
+            "changes_inference_protocol": False,
+            "preserves_clip_wise_training_protocol": True,
+        },
         "graph_preserve": {
             k: v for k, v in graph_cache.items()
             if k not in {"scope_text_indices", "neighbor_idx", "target_prob"}
@@ -853,6 +1197,13 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "graph_preserve_uses_row_level_gt": False,
             "graph_preserve_uses_visual_prototype_target": False,
             "graph_preserve_changes_hungarian_assignment": False,
+            "uses_train_side_patchsample_carrier_augmentation": bool(train_aug_enabled),
+            "patchsample_aug_changes_inference_protocol": False,
+            "patchsample_aug_preserves_clip_wise_training_protocol": True,
+            "patchsample_aug_does_not_random_batch_trajectories": True,
+            "patchsample_aug_does_not_cross_clip_hungarian": True,
+            "patchsample_aug_prefetch_unit": "clip_payload_only",
+            "patchsample_aug_runs_dinov2_encoder": False,
         },
     }
     _write_json(out_root / "setup.json", setup)
@@ -867,6 +1218,10 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     all_pre: List[float] = []
     all_dyn: List[float] = []
     all_graph: List[float] = []
+    all_patch_attempted = 0
+    all_patch_used = 0
+    all_patch_fallback = 0
+    all_patch_kept_mean = 0
     epoch_rows: List[Dict[str, Any]] = []
     iterator = tqdm(range(int(args.epochs)), desc=f"a8_dyn_hun_{args.name}", dynamic_ncols=True) if bool(args.show_progress) and tqdm is not None else range(int(args.epochs))
     for epoch in iterator:
@@ -882,6 +1237,11 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         ep_dyn_margin: List[float] = []
         ep_dyn_person: List[float] = []
         ep_pre_mass: List[float] = []
+        ep_patch_attempted = 0
+        ep_patch_used = 0
+        ep_patch_fallback = 0
+        ep_patch_kept_mean = 0
+        ep_patch_candidate_mean: List[float] = []
         ep_solver = Counter()
         for cid in cur_clip_ids:
             pre_group = [dict(x) for x in all_by_clip.get(int(cid), [])]
@@ -895,6 +1255,26 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             y_ids = [int(x) for x in data.clip_y_base.get(int(cid), set()) if int(x) in base_col_by_raw_id]
             if not pre_group or not dyn_rows or not y_ids:
                 continue
+            pre_group, dyn_rows, patch_stats = _maybe_patchsample_augment_clip_rows(
+                clip_id=int(cid),
+                pre_group=pre_group,
+                dyn_rows=dyn_rows,
+                epoch=int(epoch) + 1,
+                args=args,
+                frame_bank_dir=frame_bank_dir,
+                frame_map=frame_map,
+                geom_map=geom_map,
+            )
+            ep_patch_attempted += int(patch_stats.get("patchsample_attempted", 0))
+            ep_patch_used += int(patch_stats.get("patchsample_used", 0))
+            ep_patch_fallback += int(patch_stats.get("patchsample_fallback_to_mean", 0))
+            ep_patch_kept_mean += int(patch_stats.get("patchsample_kept_mean_by_probability", 0))
+            all_patch_attempted += int(patch_stats.get("patchsample_attempted", 0))
+            all_patch_used += int(patch_stats.get("patchsample_used", 0))
+            all_patch_fallback += int(patch_stats.get("patchsample_fallback_to_mean", 0))
+            all_patch_kept_mean += int(patch_stats.get("patchsample_kept_mean_by_probability", 0))
+            if float(patch_stats.get("patchsample_token_candidate_count_mean_per_frame", 0.0)) > 0:
+                ep_patch_candidate_mean.append(float(patch_stats.get("patchsample_token_candidate_count_mean_per_frame", 0.0)))
             optimizer.zero_grad(set_to_none=True)
             pre_loss, pre_stats = _prealign_loss_for_clip(
                 clip_id=int(cid),
@@ -948,7 +1328,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             ep_pre_mass.append(float(pre_stats.get("mass_in_y_mean", 0.0)))
             ep_solver[str(dyn_stats.get("dynamic_assignment_solver", ""))] += 1
             if int(args.log_every_steps) > 0 and global_step % int(args.log_every_steps) == 0:
-                _append_jsonl(log_path, {"timestamp": _now(), "row_type": "step", "epoch": int(epoch) + 1, "global_step": global_step, "loss_total": tv, "loss_prealign": pv, "loss_dynamic": dv, "loss_graph_preserve": gv, **pre_stats, **dyn_stats, **graph_stats})
+                _append_jsonl(log_path, {"timestamp": _now(), "row_type": "step", "epoch": int(epoch) + 1, "global_step": global_step, "loss_total": tv, "loss_prealign": pv, "loss_dynamic": dv, "loss_graph_preserve": gv, **pre_stats, **dyn_stats, **graph_stats, **patch_stats})
         epoch_row = {
             "timestamp": _now(),
             "row_type": "epoch_summary",
@@ -961,6 +1341,12 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "prealign_mass_in_y_mean": _mean(ep_pre_mass),
             "dynamic_selected_margin_mean": _mean(ep_dyn_margin),
             "dynamic_person_raw773_assignment_rate_mean": _mean(ep_dyn_person),
+            "patchsample_attempted": int(ep_patch_attempted),
+            "patchsample_used": int(ep_patch_used),
+            "patchsample_fallback_to_mean": int(ep_patch_fallback),
+            "patchsample_kept_mean_by_probability": int(ep_patch_kept_mean),
+            "patchsample_used_rate_among_attempted": float(ep_patch_used / max(ep_patch_attempted, 1)),
+            "patchsample_token_candidate_count_mean_per_frame": _mean(ep_patch_candidate_mean),
             "epoch_prealign_rows": int(ep_pre_rows),
             "epoch_dynamic_rows": int(ep_dyn_rows),
             "epoch_dynamic_assigned_pairs": int(ep_pairs),
@@ -1018,6 +1404,11 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "loss_dynamic_mean": _mean(all_dyn),
             "loss_graph_preserve_mean": _mean(all_graph),
             "loss_total_last": all_total[-1] if all_total else 0.0,
+            "patchsample_attempted": int(all_patch_attempted),
+            "patchsample_used": int(all_patch_used),
+            "patchsample_fallback_to_mean": int(all_patch_fallback),
+            "patchsample_kept_mean_by_probability": int(all_patch_kept_mean),
+            "patchsample_used_rate_among_attempted": float(all_patch_used / max(all_patch_attempted, 1)),
         },
         "setup": setup,
         "headline_policy": "Use canonical visible525 rank@K only. Do not use retired row_gap micro_top1 as primary metric.",
@@ -1052,6 +1443,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--graph_preserve_tau", type=float, default=0.1)
     p.add_argument("--graph_preserve_every_n_steps", type=int, default=1)
     p.add_argument("--graph_preserve_visible_csv", default="", help="Optional base_641_visibility_by_class.csv; used when graph_preserve_scope=visible525.")
+    p.add_argument("--train_carrier_aug_mode", choices=["none", "patchsample_mixed"], default="none", help="Train-side carrier augmentation only; inference remains mean-carrier unless separately changed.")
+    p.add_argument("--patchsample_prob", type=float, default=0.0, help="Probability of replacing a trajectory mean carrier with one patch-token sampled carrier during training.")
+    p.add_argument("--patchsample_tokens_per_view", type=int, default=64, help="Number of mask-inside patch tokens sampled per augmented carrier.")
+    p.add_argument("--patchsample_seed", type=int, default=3407, help="Stable seed used for epoch/clip/trajectory patch sampling.")
+    p.add_argument("--patchsample_min_token_weight", type=float, default=0.0, help="Minimum projected mask token weight for sampled-token eligibility.")
+    p.add_argument("--patchsample_max_frame_candidate_tokens", type=int, default=4096, help="Optional per-frame cap on eligible mask tokens before weighted sampling; 0 disables cap.")
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--learning_rate", type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
