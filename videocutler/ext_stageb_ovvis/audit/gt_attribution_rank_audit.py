@@ -21,7 +21,7 @@ from videocutler.ext_stageb_ovvis.eval.g8_bridge import (
     canonical_checkpoint_relpath,
     load_json,
     load_projector_bundle,
-    load_text_vocab_with_names,
+    load_text_vocab_for_checkpoint,
     load_video_meta,
     resolve_inference_asset_roots,
     resolve_selected_for_infer,
@@ -303,8 +303,8 @@ def _match_predictions(
     return match_rows
 
 
-def _dataset_vocab(asset_root: Path, dataset_name: str, gt_payload: Mapping[str, Any]) -> Tuple[List[int], np.ndarray]:
-    raw_ids, _records, matrix, _class_name_map = load_text_vocab_with_names(asset_root, dataset_name)
+def _dataset_vocab(asset_root: Path, dataset_name: str, gt_payload: Mapping[str, Any], checkpoint_payload: Optional[Mapping[str, Any]] = None) -> Tuple[List[int], np.ndarray]:
+    raw_ids, _records, matrix, _class_name_map, _text_bank_summary = load_text_vocab_for_checkpoint(asset_root, dataset_name, checkpoint_payload or {})
     raw_ids = [int(x) for x in raw_ids]
     index_by_id = {raw_id: idx for idx, raw_id in enumerate(raw_ids)}
     dataset_ids = [int(cat["id"]) for cat in gt_payload.get("categories", [])]
@@ -856,13 +856,13 @@ def run_stage_gt_attribution_rank_audit(config: GTAttributionRankAuditConfig, st
     match_rows = _match_predictions(prediction_rows, gt_rows, videos_by_id, match_iou_threshold=0.5)
     matched_rows = [row for row in match_rows if bool(row.get("is_matched"))]
 
-    asset_roots = _resolve_asset_roots_for_dataset(config.output_root, config.dataset_name)
+    asset_roots = _resolve_asset_roots_for_dataset(config.output_root, config.dataset_name, ckpt_path=config.ckpt_path)
     infer_rows, _skipped, _asset_counts = build_infer_rows(asset_roots, dataset_name=config.dataset_name)
     infer_row_by_tid = {str(row["trajectory_id"]): row for row in infer_rows}
 
-    vocab_ids, vocab_matrix = _dataset_vocab(asset_roots.asset_root, config.dataset_name, gt_payload)
-    vocab_index = {raw_id: idx for idx, raw_id in enumerate(vocab_ids)}
     bundle = load_projector_bundle(checkpoint_path, device=config.device)
+    vocab_ids, vocab_matrix = _dataset_vocab(asset_roots.asset_root, config.dataset_name, gt_payload, bundle.checkpoint_payload)
+    vocab_index = {raw_id: idx for idx, raw_id in enumerate(vocab_ids)}
 
     score_rows: List[Dict[str, Any]] = []
     score_gt_indices: List[int] = []
@@ -987,6 +987,10 @@ def run_stage_all_gt_attribution_rank_audit(
     base_vocab_ids = list(prepared["base_vocab_ids"])
 
     bundle = load_projector_bundle(checkpoint_path, device=config.device)
+    # Re-resolve vocab from the actual checkpoint for external-text-bank A8 runs.
+    # The shared prepared vocab is canonical CLIP because it is built before a
+    # stage checkpoint is known.
+    full_vocab_ids, vocab_matrix = _dataset_vocab(asset_roots.asset_root, config.dataset_name, gt_payload, bundle.checkpoint_payload)
 
     def _progress_callback(processed_rows: int, total_rows: int) -> None:
         _write_all_gt_progress(

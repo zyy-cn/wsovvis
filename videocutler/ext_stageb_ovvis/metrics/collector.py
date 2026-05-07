@@ -12,7 +12,7 @@ from videocutler.ext_stageb_ovvis.eval.g8_bridge import (
     build_infer_rows,
     build_pred_rows,
     load_projector_bundle,
-    load_text_vocab_with_names,
+    load_text_vocab_for_checkpoint,
     load_video_meta,
     materialize_scored_rows_from_matrix,
     resolve_inference_asset_roots,
@@ -49,7 +49,7 @@ def run_inference(*, output_root: Path, dataset_name: str, device: str, seed: in
         asset_roots = resolve_inference_asset_roots(output_root, dataset_name=dataset_name, trajectory_source_branch='mainline', resolution=resolution)
         device_obj = torch.device(device)
         bundle = load_projector_bundle(resolution.checkpoint_path, device=device_obj)
-        text_vocab_ids, _text_records, text_matrix, class_name_map = load_text_vocab_with_names(asset_roots.asset_root, dataset_name)
+        text_vocab_ids, _text_records, text_matrix, class_name_map, text_bank_summary = load_text_vocab_for_checkpoint(asset_roots.asset_root, dataset_name, bundle.checkpoint_payload)
         video_meta = load_video_meta(dataset_name)
         if stage_bar is not None:
             stage_bar.set_postfix_str('resolve assets/model')
@@ -133,6 +133,7 @@ def run_inference(*, output_root: Path, dataset_name: str, device: str, seed: in
             'vocab_size': int(len(text_vocab_ids)),
             'carrier_matrix_shape': [int(x) for x in pack['carrier_matrix'].shape],
             'score_matrix_shape': [int(x) for x in scores['fused_logits'].shape],
+            'text_bank': text_bank_summary,
         }
     finally:
         if stage_bar is not None:

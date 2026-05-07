@@ -34,7 +34,7 @@ GTCEIL = _load_gtceil_module()
 
 from videocutler.ext_stageb_ovvis.eval.g8_bridge import (  # noqa: E402
     load_projector_bundle,
-    load_text_vocab_with_names,
+    load_text_vocab_for_checkpoint,
     score_infer_rows_matrix,
 )
 
@@ -80,6 +80,75 @@ def _raw_name(raw_id: int, class_name_map: Mapping[Any, Any]) -> str:
         if k in class_name_map:
             return str(class_name_map[k])
     return ""
+
+
+def _load_npz_first_array(path: Path) -> tuple[np.ndarray, str]:
+    z = np.load(path)
+    keys = list(z.keys())
+    if not keys:
+        raise RuntimeError(f"empty npz payload: {path}")
+    for key in ("protos", "features", "arr_0", "llama_hidden_mean", "clip_of_llm_mean", "llama_direct_concept_mean"):
+        if key in z:
+            return np.asarray(z[key]), str(key)
+    key0 = str(keys[0])
+    return np.asarray(z[key0]), key0
+
+
+def _load_external_text_bank_from_checkpoint(checkpoint_payload: Mapping[str, Any]) -> tuple[list[int], np.ndarray, dict[int, str], dict[str, Any]] | None:
+    tb = checkpoint_payload.get("text_bank", {}) if isinstance(checkpoint_payload.get("text_bank", {}), Mapping) else {}
+    variant = str(tb.get("variant", "clip_current"))
+    if variant == "clip_current" or not variant:
+        return None
+    root = Path(str(tb.get("root", ""))).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"checkpoint requested external text bank root but it is missing: {root}")
+    class_path = root / "lvvis_class_names.json"
+    if not class_path.is_file():
+        raise FileNotFoundError(class_path)
+    payload = json.loads(class_path.read_text(encoding="utf-8"))
+    rows = payload.get("classes", payload if isinstance(payload, list) else [])
+    ids: list[int] = []
+    names: dict[int, str] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        rid = _safe_int(row.get("raw_id"))
+        if rid is None:
+            continue
+        ids.append(int(rid))
+        names[int(rid)] = str(row.get("name", row.get("class_name", rid)))
+    if not ids or ids != sorted(ids):
+        raise RuntimeError(f"invalid external text bank class ids: {class_path}")
+    payload_path = Path(str(tb.get("payload_path", ""))).expanduser().resolve()
+    if not payload_path.is_file():
+        fallback = {
+            "clip_of_llm_mean": root / "payload" / "clip_of_llm_mean.fp16.npz",
+            "llama_hidden_mean": root / "payload" / "llama_hidden_mean.fp16.npz",
+            "llama_direct_concept_mean": root / "payload" / "llama_direct_concept_mean.fp16.npz",
+        }.get(variant)
+        if fallback is None or not fallback.is_file():
+            raise FileNotFoundError(f"missing external text bank payload for {variant}: {payload_path}")
+        payload_path = fallback
+    arr, arr_key = _load_npz_first_array(payload_path)
+    if arr.ndim != 2 or int(arr.shape[0]) != len(ids):
+        raise RuntimeError(f"invalid external text bank payload shape={arr.shape}; class_count={len(ids)}")
+    arr = np.asarray(arr, dtype=np.float32)
+    if not np.isfinite(arr).all():
+        raise RuntimeError(f"non-finite external text bank payload: {payload_path}")
+    arr = arr / np.maximum(np.linalg.norm(arr, axis=1, keepdims=True), 1e-12)
+    summary = dict(tb)
+    summary.update({
+        "status": "PASS",
+        "loaded_by_visible525_audit": True,
+        "variant": variant,
+        "root": str(root),
+        "payload_path": str(payload_path),
+        "payload_array_key": str(arr_key),
+        "feature_dim": int(arr.shape[1]),
+        "class_count": int(len(ids)),
+        "replaces_only_text_anchor_source": True,
+    })
+    return ids, arr, names, summary
 
 
 def _load_visible_ids(path: Path) -> set[int]:
@@ -177,7 +246,13 @@ def main() -> int:
 
     device = torch.device(args.device if str(args.device).startswith("cuda") and torch.cuda.is_available() else "cpu")
     bundle = load_projector_bundle(checkpoint_path, device=device)
-    text_vocab_ids, _text_records, text_matrix, class_name_map = load_text_vocab_with_names(asset_root, dataset_name)
+    text_vocab_ids, _text_records, text_matrix, class_name_map, text_bank_eval_summary = load_text_vocab_for_checkpoint(
+        asset_root,
+        dataset_name,
+        bundle.checkpoint_payload,
+    )
+    text_bank_eval_summary = dict(text_bank_eval_summary)
+    text_bank_eval_summary["loaded_by_visible525_audit"] = bool(text_bank_eval_summary.get("variant") != "clip_current")
 
     raw_to_idx = {int(raw): int(i) for i, raw in enumerate(text_vocab_ids)}
     visible_sorted = [rid for rid in sorted(visible_ids) if rid in raw_to_idx]
@@ -255,6 +330,7 @@ def main() -> int:
         "checkpoint_path": str(checkpoint_path),
         "visible_csv": str(visible_csv),
         "score_mode": str(args.score_mode),
+        "text_bank": text_bank_eval_summary,
         "candidate_scope": "train_visible_525",
         "candidate_count": 525,
         "source_row_count_before_vector_load": int(len(rows0)),

@@ -28,3 +28,8 @@ Prompt profiles are stored in:
 ```text
 third_party/uvlt_llama3/prompts/prompt_profiles.json
 ```
+
+
+## FairScale fallback
+
+This overlay vendors a minimal single-process `fairscale.nn.model_parallel` compatibility layer under `third_party/uvlt_llama3/fairscale/`. It is used only for MP=1 Llama3 inference with a single checkpoint shard. It avoids requiring an external `fairscale` installation on the wsovvis environment. For multi-shard / MP>1 checkpoints, install real FairScale and run distributed inference instead.

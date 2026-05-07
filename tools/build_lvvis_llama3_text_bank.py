@@ -34,6 +34,26 @@ import torch
 Record = Dict[str, Any]
 
 
+
+def _reset_torch_default_tensor_type_after_llama() -> None:
+    """Undo the official Llama loader's global HalfTensor default before auxiliary encoders.
+
+    Meta's reference Llama.build() sets torch's global default tensor type to
+    CUDA HalfTensor. That is fine for the Llama model, but it leaks into later
+    OpenAI-CLIP text encoding in this tool and can create half activations with
+    float LayerNorm weights. Resetting the process-wide default here does not
+    modify the already-loaded Llama parameters; it only prevents downstream
+    auxiliary modules from inheriting the half default.
+    """
+    torch.set_default_dtype(torch.float32)
+    try:
+        torch.set_default_tensor_type(torch.FloatTensor)
+    except Exception:
+        # Older PyTorch supports set_default_tensor_type; keep this defensive so
+        # feature extraction does not fail on minor version differences.
+        pass
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -315,6 +335,28 @@ def _load_clip_encoder(repo_root: Path, device: str):
     return OpenAIClipTextEncoder(ClipTextEncoderConfig(clip_ckpt="openai_clip_vit_b16", device=device))
 
 
+def _force_clip_tokenize_truncate(encoder: Any) -> None:
+    """Make the existing OpenAI CLIP wrapper use CLIP's official truncation path.
+
+    Llama3 full-sentence descriptions can exceed CLIP's fixed context length 77.
+    We keep the full response for Llama hidden features, but CLIP-of-LLM must use
+    CLIP's tokenizer with truncate=True. This function monkey-patches only the
+    encoder instance used by this tool and does not modify project-wide CLIP code.
+    """
+    clip_mod = getattr(encoder, "_clip", None)
+    tokenize = getattr(clip_mod, "tokenize", None)
+    if clip_mod is None or tokenize is None:
+        return
+    if getattr(clip_mod, "_wsovvis_truncate_patch", False):
+        return
+
+    def _tokenize_with_truncate(texts, context_length: int = 77, truncate: bool = False):
+        return tokenize(texts, context_length=context_length, truncate=True)
+
+    setattr(clip_mod, "tokenize", _tokenize_with_truncate)
+    setattr(clip_mod, "_wsovvis_truncate_patch", True)
+
+
 def _write_text_records(path: Path, class_items: Sequence[Tuple[int, str]], payload_rel: str) -> None:
     records: List[Record] = []
     for slot, (raw_id, class_name) in enumerate(class_items):
@@ -455,7 +497,10 @@ def _build_description_bank(
         )
 
     if args.build_clip_of_llm:
+        _reset_torch_default_tensor_type_after_llama()
         encoder = _load_clip_encoder(repo_root, args.clip_device)
+        if args.clip_truncate_long_text:
+            _force_clip_tokenize_truncate(encoder)
         flat_texts: List[str] = []
         view_counts: List[int] = []
         for texts in text_views:
@@ -488,6 +533,8 @@ def _build_description_bank(
                 "clip_of_llm_views_shape": list(clip_views_arr.shape),
                 "clip_of_llm_dim": int(clip_mean.shape[1]),
                 "clip_of_llm_mean_sha256": _sha256_file(clip_mean_path),
+                "clip_tokenize_truncate_long_text": bool(args.clip_truncate_long_text),
+                "clip_context_length": 77,
             }
         )
 
@@ -561,7 +608,10 @@ def _build_clip_single_template_bank(
 ) -> Dict[str, Any]:
     template = str(profile.get("clip_template", "a photo of a {cls}."))
     texts = [template.format(cls=class_name) for _, class_name in class_items]
+    _reset_torch_default_tensor_type_after_llama()
     encoder = _load_clip_encoder(repo_root, args.clip_device)
+    if args.clip_truncate_long_text:
+        _force_clip_tokenize_truncate(encoder)
     features = encoder.encode_texts(texts, batch_size=int(args.clip_batch_size)).astype(np.float32)
     features = _l2_normalize_rows(features)
     mean_path = output_dir / "payload" / "clip_single_template_mean.fp16.npz"
@@ -618,6 +668,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build_clip_of_llm", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--clip_device", default="cuda:0")
     parser.add_argument("--clip_batch_size", type=int, default=256)
+    parser.add_argument("--clip_truncate_long_text", action=argparse.BooleanOptionalAction, default=True, help="Use CLIP tokenizer truncate=True for CLIP-of-LLM / CLIP text encoding. Keeps full Llama3 responses for llama_hidden features.")
 
     parser.add_argument("--log_every_classes", type=int, default=20)
     parser.add_argument("--print_progress", action="store_true")

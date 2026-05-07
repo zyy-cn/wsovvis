@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -328,6 +329,170 @@ def _load_ytvis2019_annotation_json() -> Dict[str, Any]:
     checked = [str(path) for path in candidates]
     raise FileNotFoundError(f"YTVIS2019 annotation json not found; checked: {checked}")
 
+
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _load_npz_first_array(path: Path) -> Tuple[np.ndarray, str]:
+    z = np.load(path)
+    keys = list(z.keys())
+    if not keys:
+        raise RuntimeError(f"empty npz payload: {path}")
+    for key in ("protos", "features", "arr_0", "llama_hidden_mean", "clip_of_llm_mean", "llama_direct_concept_mean"):
+        if key in z:
+            return np.asarray(z[key]), str(key)
+    key0 = str(keys[0])
+    return np.asarray(z[key0]), key0
+
+
+def _safe_int_for_text_bank(x: Any, default: int | None = None) -> int | None:
+    try:
+        if x is None or x == "":
+            return default
+        return int(x)
+    except Exception:
+        try:
+            return int(float(x))
+        except Exception:
+            return default
+
+
+def _load_external_text_bank_from_checkpoint_payload(
+    checkpoint_payload: Mapping[str, Any],
+) -> Tuple[List[int], np.ndarray, Dict[int, str], Dict[str, Any]] | None:
+    """Load the external A8 text bank declared by a checkpoint.
+
+    This is intentionally checkpoint-driven: inference/evaluation must not accept
+    a separate text-bank CLI value that could drift from the trained projector.
+    It verifies payload/manifest hashes recorded at train time when present.
+    """
+    tb_raw = checkpoint_payload.get("text_bank", {})
+    tb = tb_raw if isinstance(tb_raw, Mapping) else {}
+    variant = str(tb.get("variant", "clip_current") or "clip_current")
+    if variant == "clip_current":
+        return None
+
+    root_s = str(tb.get("root", "")).strip()
+    if not root_s:
+        raise RuntimeError(f"checkpoint text_bank variant={variant!r} has empty root")
+    root = Path(root_s).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"checkpoint requested external text bank root but it is missing: {root}")
+
+    class_path = root / "lvvis_class_names.json"
+    if not class_path.is_file():
+        raise FileNotFoundError(class_path)
+    payload = json.loads(class_path.read_text(encoding="utf-8"))
+    rows = payload.get("classes", payload if isinstance(payload, list) else [])
+    ids: List[int] = []
+    names: Dict[int, str] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        rid = _safe_int_for_text_bank(row.get("raw_id"))
+        if rid is None:
+            continue
+        ids.append(int(rid))
+        names[int(rid)] = str(row.get("name", row.get("class_name", rid)))
+    if not ids:
+        raise RuntimeError(f"no class ids in external text bank: {class_path}")
+    if ids != sorted(ids):
+        raise RuntimeError(f"external text bank raw ids are not ascending: {class_path}")
+
+    payload_path_s = str(tb.get("payload_path", "")).strip()
+    payload_path = Path(payload_path_s).expanduser().resolve() if payload_path_s else Path()
+    if not payload_path.is_file():
+        fallback = {
+            "clip_of_llm_mean": root / "payload" / "clip_of_llm_mean.fp16.npz",
+            "llama_hidden_mean": root / "payload" / "llama_hidden_mean.fp16.npz",
+            "llama_direct_concept_mean": root / "payload" / "llama_direct_concept_mean.fp16.npz",
+        }.get(variant)
+        if fallback is None or not fallback.is_file():
+            raise FileNotFoundError(f"missing external text bank payload for {variant}: {payload_path}")
+        payload_path = fallback
+
+    expected_payload_sha = str(tb.get("payload_sha256", "")).strip()
+    actual_payload_sha = _sha256_file(payload_path)
+    if expected_payload_sha and actual_payload_sha != expected_payload_sha:
+        raise RuntimeError(
+            f"external text bank payload sha256 mismatch for {variant}: "
+            f"expected={expected_payload_sha} actual={actual_payload_sha} path={payload_path}"
+        )
+
+    manifest_path_s = str(tb.get("manifest_path", "")).strip()
+    manifest_path = Path(manifest_path_s).expanduser().resolve() if manifest_path_s else (root / "manifest.json")
+    expected_manifest_sha = str(tb.get("manifest_sha256", "")).strip()
+    actual_manifest_sha = ""
+    if manifest_path.is_file():
+        actual_manifest_sha = _sha256_file(manifest_path)
+        if expected_manifest_sha and actual_manifest_sha != expected_manifest_sha:
+            raise RuntimeError(
+                f"external text bank manifest sha256 mismatch for {variant}: "
+                f"expected={expected_manifest_sha} actual={actual_manifest_sha} path={manifest_path}"
+            )
+
+    arr, arr_key = _load_npz_first_array(payload_path)
+    if arr.ndim != 2 or int(arr.shape[0]) != len(ids):
+        raise RuntimeError(f"invalid external text bank payload shape={arr.shape}; class_count={len(ids)}")
+    arr = np.asarray(arr, dtype=np.float32)
+    if not np.isfinite(arr).all():
+        raise RuntimeError(f"non-finite external text bank payload: {payload_path}")
+    arr = arr / np.maximum(np.linalg.norm(arr, axis=1, keepdims=True), 1e-12)
+
+    summary = dict(tb)
+    summary.update({
+        "status": "PASS",
+        "loaded_by_checkpoint_text_bank_loader": True,
+        "variant": variant,
+        "root": str(root),
+        "payload_path": str(payload_path),
+        "payload_array_key": str(arr_key),
+        "payload_sha256": actual_payload_sha,
+        "payload_sha256_verified_against_checkpoint": bool(expected_payload_sha),
+        "manifest_path": str(manifest_path) if manifest_path else "",
+        "manifest_sha256": actual_manifest_sha or expected_manifest_sha,
+        "manifest_sha256_verified_against_checkpoint": bool(expected_manifest_sha and actual_manifest_sha),
+        "feature_dim": int(arr.shape[1]),
+        "class_count": int(len(ids)),
+        "replaces_only_text_anchor_source": True,
+    })
+    return ids, arr, names, summary
+
+
+def load_text_vocab_for_checkpoint(
+    asset_root: Path,
+    dataset_name: str,
+    checkpoint_payload: Mapping[str, Any],
+) -> Tuple[List[int], List[Record], np.ndarray, Dict[int, str], Dict[str, Any]]:
+    """Load the exact text vocab/matrix that must be paired with a checkpoint.
+
+    For normal CLIP checkpoints this returns the canonical text bank.  For A8
+    external-text-bank checkpoints it loads the checkpoint-declared payload and
+    verifies train-time hashes, preventing AP/rank audits from silently falling
+    back to the current CLIP text bank.
+    """
+    external = _load_external_text_bank_from_checkpoint_payload(checkpoint_payload)
+    if external is None:
+        raw_ids, records, matrix, class_name_map = load_text_vocab_with_names(asset_root, dataset_name)
+        return raw_ids, records, matrix, class_name_map, {
+            "variant": "clip_current",
+            "status": "PASS",
+            "loaded_by_checkpoint_text_bank_loader": False,
+        }
+    ids, matrix, names, summary = external
+    _canon_ids, records, _canon_matrix, class_name_map = load_text_vocab_with_names(asset_root, dataset_name)
+    class_name_map = dict(class_name_map)
+    class_name_map.update({int(k): str(v) for k, v in names.items()})
+    # Preserve record shape for callers that only need ids/names; external matrix
+    # is authoritative for scoring.
+    return ids, records, matrix, class_name_map, summary
 
 def load_class_name_map(dataset_name: str) -> Dict[int, str]:
     if dataset_name == "lvvis_val":

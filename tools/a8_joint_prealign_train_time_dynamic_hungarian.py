@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import hashlib
 import random
 import subprocess
 import sys
@@ -270,6 +271,166 @@ def _mean(xs: Sequence[float]) -> float:
     return float(np.mean(np.asarray(list(xs), dtype=np.float64)))
 
 
+def _sha256_file(path: Path, block: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            b = f.read(block)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def _load_npz_first_array(path: Path) -> Tuple[np.ndarray, str]:
+    obj = np.load(path)
+    keys = list(obj.keys())
+    if not keys:
+        raise RuntimeError(f"empty npz payload: {path}")
+    for key in ("protos", "features", "arr_0", "llama_hidden_mean", "clip_of_llm_mean", "llama_direct_concept_mean"):
+        if key in obj:
+            return np.asarray(obj[key]), str(key)
+    key0 = str(keys[0])
+    return np.asarray(obj[key0]), key0
+
+
+def _load_lvvis_text_bank_classes(bank_root: Path) -> Tuple[List[int], Dict[int, str], Dict[str, Any]]:
+    class_path = bank_root / "lvvis_class_names.json"
+    if not class_path.is_file():
+        raise FileNotFoundError(f"missing lvvis_class_names.json under text bank root: {class_path}")
+    payload = json.loads(class_path.read_text(encoding="utf-8"))
+    rows = payload.get("classes", payload if isinstance(payload, list) else [])
+    if not isinstance(rows, list):
+        raise RuntimeError(f"invalid lvvis_class_names.json schema: {class_path}")
+    ids: List[int] = []
+    names: Dict[int, str] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        rid = _as_int(row.get("raw_id"))
+        if rid is None:
+            continue
+        name = str(row.get("name", row.get("class_name", rid)))
+        ids.append(int(rid))
+        names[int(rid)] = name
+    if not ids:
+        raise RuntimeError(f"no class ids found in {class_path}")
+    if ids != sorted(ids):
+        raise RuntimeError(f"text bank raw ids are not ascending: {class_path}")
+    return ids, names, payload if isinstance(payload, dict) else {"classes": rows}
+
+
+def _resolve_text_bank_payload_path(bank_root: Path, variant: str) -> Path:
+    payload = bank_root / "payload"
+    candidates = {
+        "clip_of_llm_mean": payload / "clip_of_llm_mean.fp16.npz",
+        "llama_hidden_mean": payload / "llama_hidden_mean.fp16.npz",
+        "llama_direct_concept_mean": payload / "llama_direct_concept_mean.fp16.npz",
+    }
+    if variant not in candidates:
+        raise ValueError(f"unsupported external text_bank_variant={variant!r}; expected one of {sorted(candidates)}")
+    path = candidates[variant]
+    if not path.is_file():
+        raise FileNotFoundError(f"missing text bank payload for {variant}: {path}")
+    return path
+
+
+def _resolve_training_text_bank(args: argparse.Namespace, data: Any) -> Dict[str, Any]:
+    """Resolve the text feature matrix used as train-time class anchors.
+
+    clip_current preserves the historical CLIP text bank from load_text_vocab().
+    Other variants load canonical LV-VIS text-bank assets under wsovvis_asserts
+    and replace only the text anchor matrix / raw-id mapping.  The clip-wise
+    Hungarian protocol, candidate set, trajectory source, and losses are not
+    changed by this function.
+    """
+    variant = str(getattr(args, "text_bank_variant", "clip_current")).strip() or "clip_current"
+    if variant == "clip_current":
+        mat = np.asarray(data.text_matrix, dtype=np.float32)
+        inferred_dim = int(mat.shape[1]) if mat.ndim == 2 else 0
+        requested_dim = int(getattr(args, "text_feature_dim", 0) or 0)
+        if requested_dim and requested_dim != inferred_dim:
+            raise RuntimeError(f"--text_feature_dim={requested_dim} does not match clip_current dim={inferred_dim}")
+        return {
+            "status": "PASS",
+            "variant": "clip_current",
+            "root": "canonical_asset_text_bank",
+            "feature_dim": int(inferred_dim),
+            "projector_input_dim": int(inferred_dim),
+            "class_count": int(len(data.text_ids)),
+            "raw_id_order": "from_canonical_text_bank",
+            "payload_path": "",
+            "payload_sha256": "",
+            "manifest_path": "",
+            "manifest_sha256": "",
+            "records_path": "",
+            "replaces_only_text_anchor_source": True,
+            "same_dynamic_hungarian_protocol": True,
+            "same_clip_wise_training_protocol": True,
+            "same_candidate_set": True,
+        }
+
+    bank_root_arg = str(getattr(args, "text_bank_root", "")).strip()
+    if not bank_root_arg:
+        raise RuntimeError(f"--text_bank_root is required when --text_bank_variant={variant}")
+    bank_root = Path(bank_root_arg).expanduser().resolve()
+    manifest_path = bank_root / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"missing text bank manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if str(manifest.get("status", "")).upper() != "PASS":
+        raise RuntimeError(f"text bank manifest status is not PASS: {manifest_path}")
+    ids, names, classes_payload = _load_lvvis_text_bank_classes(bank_root)
+    payload_path = _resolve_text_bank_payload_path(bank_root, variant)
+    arr, arr_key = _load_npz_first_array(payload_path)
+    if arr.ndim != 2:
+        raise RuntimeError(f"text bank payload must be 2D [class_count, dim], got shape={arr.shape} from {payload_path}")
+    if int(arr.shape[0]) != len(ids):
+        raise RuntimeError(f"text bank class count mismatch: payload rows={arr.shape[0]} class ids={len(ids)}")
+    arr = np.asarray(arr, dtype=np.float32)
+    if not np.isfinite(arr).all():
+        raise RuntimeError(f"non-finite values in text bank payload: {payload_path}")
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    arr = arr / np.maximum(norms, 1e-12)
+    feature_dim = int(arr.shape[1])
+    requested_dim = int(getattr(args, "text_feature_dim", 0) or 0)
+    if requested_dim and requested_dim != feature_dim:
+        raise RuntimeError(f"--text_feature_dim={requested_dim} does not match loaded feature_dim={feature_dim} from {payload_path}")
+
+    data.text_ids = [int(x) for x in ids]
+    data.raw_to_text_idx = {int(rid): idx for idx, rid in enumerate(ids)}
+    data.text_matrix = arr
+    merged_names = dict(getattr(data, "class_names", {}) or {})
+    merged_names.update({int(k): str(v) for k, v in names.items()})
+    data.class_names = merged_names
+
+    return {
+        "status": "PASS",
+        "variant": variant,
+        "root": str(bank_root),
+        "feature_dim": int(feature_dim),
+        "projector_input_dim": int(feature_dim),
+        "class_count": int(len(ids)),
+        "raw_id_order": str((classes_payload or {}).get("raw_id_order", "ascending")),
+        "payload_path": str(payload_path),
+        "payload_array_key": str(arr_key),
+        "payload_sha256": _sha256_file(payload_path),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": _sha256_file(manifest_path),
+        "manifest_profile_id": str(manifest.get("profile_id", "")),
+        "manifest_profile_type": str(manifest.get("profile_type", "")),
+        "uses_old_corr_feats": bool(manifest.get("uses_old_corr_feats", False)),
+        "token_feature_alignment": str(manifest.get("token_feature_alignment", "")),
+        "all_vectors_finite": bool(manifest.get("all_vectors_finite", True)),
+        "all_mean_vectors_l2_normalized": bool(manifest.get("all_mean_vectors_l2_normalized", True)),
+        "records_path": str(bank_root / "records" / f"{variant}_text_prototype_records.jsonl"),
+        "replaces_only_text_anchor_source": True,
+        "same_dynamic_hungarian_protocol": True,
+        "same_clip_wise_training_protocol": True,
+        "same_candidate_set": True,
+    }
+
+
 def _save_checkpoint(
     path: Path,
     *,
@@ -278,18 +439,19 @@ def _save_checkpoint(
     epoch: int,
     global_step: int,
     payload: Mapping[str, Any],
+    text_projector_config: Optional[Mapping[str, Any]] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "text_projector_state_dict": projector.state_dict(),
-            "text_projector_config": {
-                "input_dim": 512,
-                "hidden_dim": 1024,
-                "output_dim": 768,
-                "dropout": 0.0,
-                "use_layernorm": True,
-            },
+            "text_projector_config": dict(text_projector_config or {
+                "input_dim": int(getattr(getattr(projector, "config", None), "input_dim", 512)),
+                "hidden_dim": int(getattr(getattr(projector, "config", None), "hidden_dim", 1024)),
+                "output_dim": int(getattr(getattr(projector, "config", None), "output_dim", 768)),
+                "dropout": float(getattr(getattr(projector, "config", None), "dropout", 0.0)),
+                "use_layernorm": bool(getattr(getattr(projector, "config", None), "use_layernorm", True)),
+            }),
             "theta_T": float(theta_t.detach().cpu().item()),
             "stage_id": "a8_joint_train_time_dynamic_hungarian",
             "loss": "joint_prealign_train_time_dynamic_hungarian",
@@ -1170,6 +1332,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         args.output_dir = ""
 
     data = _prepare_data(args)
+    text_bank_summary = _resolve_training_text_bank(args, data)
     all_by_clip = _group_by_clip(data.examples)
     example_by_tid = _example_by_tid(data.examples)
     base_raw_ids = sorted(int(x) for x in data.base_ids if int(x) in data.raw_to_text_idx)
@@ -1193,7 +1356,14 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     if not clip_ids:
         raise RuntimeError("no train clips selected")
 
-    projector = Projector(ProjectorConfig()).to(device)
+    text_projector_config = {
+        "input_dim": int(text_bank_summary["projector_input_dim"]),
+        "hidden_dim": int(args.text_projector_hidden_dim),
+        "output_dim": int(args.text_projector_out_dim),
+        "dropout": 0.0,
+        "use_layernorm": True,
+    }
+    projector = Projector(ProjectorConfig(**text_projector_config)).to(device)
     theta_t = torch.nn.Parameter(torch.tensor(_inverse_softplus(max(float(args.t_dis_init) - 1.0e-4, 1.0e-6)), device=device, dtype=torch.float32))
     init = str(args.init_checkpoint).strip()
     ckpt = _auto_find_checkpoint(repo_root, str(args.dataset_name)) if init == "auto" else init
@@ -1269,6 +1439,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "lambda_prealign": float(args.lambda_prealign),
         "lambda_dynamic": float(args.lambda_dynamic),
         "lambda_graph_preserve": float(args.lambda_graph_preserve),
+        "text_bank": text_bank_summary,
+        "text_projector_config": dict(text_projector_config),
         "train_carrier_aug": {
             "enabled": bool(train_aug_enabled),
             "mode": str(args.train_carrier_aug_mode),
@@ -1300,6 +1472,12 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "materialization_summary": data.materialization_summary,
         "base_vocab_count": len(base_raw_ids),
         "policy": {
+            "uses_external_text_bank_variant": bool(str(args.text_bank_variant) != "clip_current"),
+            "text_bank_replaces_only_text_anchor_source": True,
+            "text_bank_changes_dynamic_hungarian_protocol": False,
+            "text_bank_changes_clip_wise_training_protocol": False,
+            "text_bank_changes_candidate_set": False,
+            "text_bank_changes_trajectory_source": False,
             "uses_current_prealign_loss": True,
             "prealign_loss_symbol": "run_stageb_train_hungarian_prealign._prealign_loss_for_clip",
             "uses_train_time_dynamic_hungarian": True,
@@ -1480,10 +1658,10 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         if bool(args.print_epoch_summary):
             print(json.dumps(epoch_row, ensure_ascii=False), flush=True)
         if int(args.save_every_epochs) > 0 and ((int(epoch) + 1) % int(args.save_every_epochs) == 0):
-            _save_checkpoint(train_dir / f"a8_joint_train_time_dynamic_epoch_{int(epoch)+1:03d}.pth", projector=projector, theta_t=theta_t, epoch=int(epoch)+1, global_step=global_step, payload=setup)
+            _save_checkpoint(train_dir / f"a8_joint_train_time_dynamic_epoch_{int(epoch)+1:03d}.pth", projector=projector, theta_t=theta_t, epoch=int(epoch)+1, global_step=global_step, payload=setup, text_projector_config=text_projector_config)
 
     ckpt_out = train_dir / "a8_joint_train_time_dynamic_last.pth"
-    _save_checkpoint(ckpt_out, projector=projector, theta_t=theta_t, epoch=int(args.epochs), global_step=global_step, payload=setup)
+    _save_checkpoint(ckpt_out, projector=projector, theta_t=theta_t, epoch=int(args.epochs), global_step=global_step, payload=setup, text_projector_config=text_projector_config)
     _write_csv(train_dir / "epoch_metrics.csv", epoch_rows)
 
     canonical_eval: Dict[str, Any] = {"status": "SKIPPED"}
@@ -1550,6 +1728,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_root", default="")
     p.add_argument("--repo_root", default="/mnt/sda/zyy/code/wsovvis")
     p.add_argument("--asset_root", default="/home/zyy/code/wsovvis_asserts")
+    p.add_argument("--text_bank_variant", choices=["clip_current", "clip_of_llm_mean", "llama_hidden_mean", "llama_direct_concept_mean"], default="clip_current", help="Text anchor source. clip_current preserves the canonical CLIP text bank; other variants load LV-VIS Llama3/CLIP-of-LLM banks.")
+    p.add_argument("--text_bank_root", default="", help="Root directory of an external text bank profile, e.g. $ASSERT_ROOT/text_bank_llama3/lvvis/lvvis_visual_only_v1.")
+    p.add_argument("--text_feature_dim", type=int, default=0, help="Optional guard for loaded text feature dimension. 0 means infer.")
+    p.add_argument("--text_projector_hidden_dim", type=int, default=1024)
+    p.add_argument("--text_projector_out_dim", type=int, default=768)
     p.add_argument("--annotation_json", default="")
     p.add_argument("--split_json", default="")
     p.add_argument("--output_dir", default="")

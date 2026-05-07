@@ -77,6 +77,21 @@ def _load_clip_encoder(repo_root: Path, device: str):
     return OpenAIClipTextEncoder(ClipTextEncoderConfig(clip_ckpt="openai_clip_vit_b16", device=device))
 
 
+def _force_clip_tokenize_truncate(encoder: Any) -> None:
+    clip_mod = getattr(encoder, "_clip", None)
+    tokenize = getattr(clip_mod, "tokenize", None)
+    if clip_mod is None or tokenize is None:
+        return
+    if getattr(clip_mod, "_wsovvis_truncate_patch", False):
+        return
+
+    def _tokenize_with_truncate(texts, context_length: int = 77, truncate: bool = False):
+        return tokenize(texts, context_length=context_length, truncate=True)
+
+    setattr(clip_mod, "tokenize", _tokenize_with_truncate)
+    setattr(clip_mod, "_wsovvis_truncate_patch", True)
+
+
 def _write_records(path: Path, classes: List[Dict[str, Any]], payload_rel: str) -> None:
     rows = []
     for slot, item in enumerate(classes):
@@ -97,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bank_root", required=True, help="Existing profile directory containing llama3_responses.jsonl and lvvis_class_names.json")
     p.add_argument("--clip_device", default="cuda:0")
     p.add_argument("--clip_batch_size", type=int, default=256)
+    p.add_argument("--clip_truncate_long_text", action=argparse.BooleanOptionalAction, default=True, help="Use CLIP tokenizer truncate=True for generated descriptions longer than context length 77.")
     p.add_argument("--overwrite", action="store_true")
     return p.parse_args()
 
@@ -130,6 +146,8 @@ def main() -> int:
         texts.extend(cur)
 
     encoder = _load_clip_encoder(repo_root, args.clip_device)
+    if args.clip_truncate_long_text:
+        _force_clip_tokenize_truncate(encoder)
     flat = encoder.encode_texts(texts, batch_size=int(args.clip_batch_size)).astype(np.float32)
     flat = _l2_rows(flat)
     views: List[np.ndarray] = []
@@ -163,6 +181,8 @@ def main() -> int:
             "clip_of_llm_views_shape": list(view_arr.shape),
             "clip_of_llm_dim": int(mean.shape[1]),
             "clip_of_llm_mean_sha256": _sha256(mean_path),
+            "clip_tokenize_truncate_long_text": bool(args.clip_truncate_long_text),
+            "clip_context_length": 77,
         }
     )
     manifest.update(
