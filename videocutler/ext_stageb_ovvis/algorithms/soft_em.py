@@ -311,10 +311,77 @@ def _compute_t_dis(theta_t: torch.nn.Parameter) -> torch.Tensor:
 
 
 def _infer_text_projector_config_from_state_dict(state_dict: Mapping[str, Any]) -> Dict[str, Any]:
-    """Infer the historical text projector config from an exact saved state dict."""
+    """Infer the text projector config from an exact saved state dict.
+
+    Historical checkpoints use the MLP layout.  A8 projector-ablation checkpoints
+    may use a pure linear layout; keep inference strict so a missing explicit
+    config never silently loads into the wrong architecture.
+    """
     if not isinstance(state_dict, Mapping) or not state_dict:
         raise RuntimeError("cannot infer text_projector_config from empty or invalid state_dict")
     keys = set(str(k) for k in state_dict.keys())
+
+    # Pure linear layout from ProjectorConfig(projector_type="linear"):
+    #   net.0: Linear(input_dim -> output_dim)
+    if keys == {"net.0.weight", "net.0.bias"}:
+        weight = state_dict["net.0.weight"]
+        bias = state_dict["net.0.bias"]
+        if not hasattr(weight, "shape") or not hasattr(bias, "shape"):
+            raise RuntimeError(
+                "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+                "and linear projector parameters are not tensor-like"
+            )
+        output_dim = int(weight.shape[0])
+        input_dim = int(weight.shape[1])
+        if tuple(bias.shape) != (output_dim,):
+            raise RuntimeError(
+                "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+                "and linear projector bias shape is incompatible with the inferred output_dim"
+            )
+        return {
+            "input_dim": input_dim,
+            "hidden_dim": 0,
+            "output_dim": output_dim,
+            "dropout": 0.0,
+            "use_layernorm": False,
+            "projector_type": "linear",
+            "config_source": "inferred_from_linear_text_projector_state_dict",
+        }
+
+    # LayerNorm + linear layout from ProjectorConfig(projector_type="linear_ln"):
+    #   net.0: LayerNorm(input_dim), net.1: Linear(input_dim -> output_dim)
+    if keys == {"net.0.weight", "net.0.bias", "net.1.weight", "net.1.bias"}:
+        ln_weight = state_dict["net.0.weight"]
+        ln_bias = state_dict["net.0.bias"]
+        weight = state_dict["net.1.weight"]
+        bias = state_dict["net.1.bias"]
+        if not all(hasattr(t, "shape") for t in (ln_weight, ln_bias, weight, bias)):
+            raise RuntimeError(
+                "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+                "and linear_ln projector parameters are not tensor-like"
+            )
+        output_dim = int(weight.shape[0])
+        input_dim = int(weight.shape[1])
+        if tuple(ln_weight.shape) != (input_dim,) or tuple(ln_bias.shape) != (input_dim,):
+            raise RuntimeError(
+                "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+                "and linear_ln layernorm shapes are incompatible with the inferred input_dim"
+            )
+        if tuple(bias.shape) != (output_dim,):
+            raise RuntimeError(
+                "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+                "and linear_ln bias shape is incompatible with the inferred output_dim"
+            )
+        return {
+            "input_dim": input_dim,
+            "hidden_dim": 0,
+            "output_dim": output_dim,
+            "dropout": 0.0,
+            "use_layernorm": True,
+            "projector_type": "linear_ln",
+            "config_source": "inferred_from_linear_ln_text_projector_state_dict",
+        }
+
     linear_keys = {"net.1.weight", "net.1.bias", "net.3.weight", "net.3.bias"}
     layernorm_keys = {"net.0.weight", "net.0.bias"}
     if not linear_keys.issubset(keys):
@@ -377,6 +444,7 @@ def _infer_text_projector_config_from_state_dict(state_dict: Mapping[str, Any]) 
         "output_dim": output_dim,
         "dropout": 0.0,
         "use_layernorm": True,
+        "projector_type": "mlp",
         "config_source": "inferred_from_text_projector_state_dict",
     }
 
@@ -401,6 +469,7 @@ def _load_projector_from_checkpoint(
             output_dim=int(config_payload.get('output_dim', 768)),
             dropout=float(config_payload.get('dropout', 0.0)),
             use_layernorm=bool(config_payload.get('use_layernorm', True)),
+            projector_type=str(config_payload.get('projector_type', 'mlp') or 'mlp'),
         )
     ).to(device)
     projector.load_state_dict(checkpoint['text_projector_state_dict'])

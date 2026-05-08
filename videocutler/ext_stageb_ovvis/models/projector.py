@@ -21,20 +21,30 @@ class ProjectorConfig:
     output_dim: int = 768
     dropout: float = 0.0
     use_layernorm: bool = True
+    projector_type: str = "mlp"
 
 
 class Projector(nn.Module):
     def __init__(self, config: ProjectorConfig) -> None:
         super().__init__()
         self.config = config
+        projector_type = str(getattr(config, "projector_type", "mlp") or "mlp").strip().lower()
+        if projector_type not in {"mlp", "linear", "linear_ln"}:
+            raise ValueError(f"unsupported projector_type={projector_type!r}; expected mlp, linear, or linear_ln")
         layers: list[nn.Module] = []
-        if bool(config.use_layernorm):
+        if projector_type == "mlp":
+            if bool(config.use_layernorm):
+                layers.append(nn.LayerNorm(int(config.input_dim)))
+            layers.append(nn.Linear(int(config.input_dim), int(config.hidden_dim)))
+            layers.append(nn.GELU())
+            if float(config.dropout) > 0.0:
+                layers.append(nn.Dropout(float(config.dropout)))
+            layers.append(nn.Linear(int(config.hidden_dim), int(config.output_dim)))
+        elif projector_type == "linear_ln":
             layers.append(nn.LayerNorm(int(config.input_dim)))
-        layers.append(nn.Linear(int(config.input_dim), int(config.hidden_dim)))
-        layers.append(nn.GELU())
-        if float(config.dropout) > 0.0:
-            layers.append(nn.Dropout(float(config.dropout)))
-        layers.append(nn.Linear(int(config.hidden_dim), int(config.output_dim)))
+            layers.append(nn.Linear(int(config.input_dim), int(config.output_dim)))
+        else:
+            layers.append(nn.Linear(int(config.input_dim), int(config.output_dim)))
         self.net = nn.Sequential(*layers)
         self.reset_parameters()
 

@@ -451,6 +451,7 @@ def _save_checkpoint(
                 "output_dim": int(getattr(getattr(projector, "config", None), "output_dim", 768)),
                 "dropout": float(getattr(getattr(projector, "config", None), "dropout", 0.0)),
                 "use_layernorm": bool(getattr(getattr(projector, "config", None), "use_layernorm", True)),
+                "projector_type": str(getattr(getattr(projector, "config", None), "projector_type", "mlp") or "mlp"),
             }),
             "theta_T": float(theta_t.detach().cpu().item()),
             "stage_id": "a8_joint_train_time_dynamic_hungarian",
@@ -502,20 +503,34 @@ def _build_graph_preserve_cache(
     """Precompute local raw-text graph targets for structure-preserving loss.
 
     The loss is intentionally a text-prototype-only regularizer: it does not use
-    row-level GT, dynamic Hungarian assignments, or visual prototype targets.  It
-    preserves the local raw CLIP text neighborhood after projection:
+    row-level GT, dynamic Hungarian assignments, or visual prototype targets.
 
-      KL(softmax(S_raw[i, N_i]/tau) || softmax(S_proj[i, N_i]/tau)).
+    Supported modes:
+      * raw_text_topk: legacy KL local-neighborhood preservation
+        KL(softmax(S_raw[i, N_i]/tau) || softmax(S_proj[i, N_i]/tau)).
+      * topk_local / topk_local_mse / raw_text_topk_mse: local edge cosine MSE
+        mean_j (S_proj[i, j] - S_raw[i, j])^2 over raw-text topK neighbors.
+      * random_*: same targets on randomized neighborhoods, for a control.
 
-    `random_text_topk` keeps the same implementation surface but randomizes the
-    neighborhood set as a control for "just adding a regularizer".
+    The MSE mode is the intended A8 Llama-hidden + linear projector ablation: it
+    directly penalizes distortion of the useful raw-text local manifold without
+    changing dynamic Hungarian, the candidate set, or trajectory source.
     """
     mode = str(mode).strip().lower()
     if mode in {"", "none", "off", "false", "0"}:
         return {"enabled": False, "mode": "none", "reason": "graph_preserve_mode_disabled"}
 
-    if mode not in {"raw_text_topk", "random_text_topk"}:
-        raise ValueError(f"unsupported graph_preserve_mode={mode!r}")
+    aliases = {
+        "topk_local": "topk_local_mse",
+        "raw_text_topk_mse": "topk_local_mse",
+        "random_topk_local": "random_topk_local_mse",
+        "random_text_topk_mse": "random_topk_local_mse",
+    }
+    mode = aliases.get(mode, mode)
+    supported_modes = {"raw_text_topk", "random_text_topk", "topk_local_mse", "random_topk_local_mse"}
+    if mode not in supported_modes:
+        raise ValueError(f"unsupported graph_preserve_mode={mode!r}; expected one of {sorted(supported_modes)}")
+    loss_type = "edge_mse" if mode in {"topk_local_mse", "random_topk_local_mse"} else "kl"
     scope = str(scope).strip().lower()
     if scope not in {"visible525", "base_vocab"}:
         raise ValueError(f"unsupported graph_preserve_scope={scope!r}")
@@ -548,7 +563,7 @@ def _build_graph_preserve_cache(
         T = F.normalize(text_tensor.index_select(0, torch.tensor(text_indices_np, device=device, dtype=torch.long)), p=2.0, dim=-1)
         sim = torch.matmul(T, T.t())
         sim.fill_diagonal_(-float("inf"))
-        if mode == "raw_text_topk":
+        if mode in {"raw_text_topk", "topk_local_mse"}:
             neighbor_idx = torch.topk(sim, k=int(k), dim=1, largest=True, sorted=True).indices
         else:
             rng = np.random.default_rng(int(seed))
@@ -558,9 +573,10 @@ def _build_graph_preserve_cache(
                 choices = all_idx[all_idx != i]
                 neigh_rows.append(rng.choice(choices, size=int(k), replace=False))
             neighbor_idx = torch.tensor(np.stack(neigh_rows, axis=0), device=device, dtype=torch.long)
-        raw_neighbor_sim = torch.gather(sim, 1, neighbor_idx)
+        raw_neighbor_sim = torch.gather(sim, 1, neighbor_idx).detach()
         # Random neighbors may include mostly low-similarity pairs; keep the real
-        # raw-sim target distribution over the chosen neighbors for a fair control.
+        # raw-sim target distribution/edge values over the chosen neighbors for a
+        # fair control.
         target_prob = torch.softmax(raw_neighbor_sim / max(float(tau), 1.0e-6), dim=1).detach()
 
     return {
@@ -573,10 +589,12 @@ def _build_graph_preserve_cache(
         "class_count": int(len(raw_ids)),
         "topk": int(k),
         "tau": float(tau),
+        "loss_type": loss_type,
         "raw_ids_head": [int(x) for x in raw_ids[:20]],
         "scope_text_indices": torch.tensor(text_indices_np, device=device, dtype=torch.long),
         "neighbor_idx": neighbor_idx,
         "target_prob": target_prob,
+        "raw_neighbor_sim": raw_neighbor_sim,
     }
 
 
@@ -592,25 +610,42 @@ def _graph_preserve_loss(
     scope_text_indices = cache["scope_text_indices"]
     neighbor_idx = cache["neighbor_idx"]
     target_prob = cache["target_prob"]
+    raw_neighbor_sim = cache.get("raw_neighbor_sim")
+    loss_type = str(cache.get("loss_type", "kl")).strip().lower()
     P = F.normalize(text_proj_all.index_select(0, scope_text_indices), p=2.0, dim=-1)
     sim_proj = torch.matmul(P, P.t())
     proj_neighbor_sim = torch.gather(sim_proj, 1, neighbor_idx)
-    log_prob = torch.log_softmax(proj_neighbor_sim / max(float(tau), 1.0e-6), dim=1)
-    tgt = target_prob.to(device=log_prob.device, dtype=log_prob.dtype)
-    cross_entropy = -(tgt * log_prob).sum(dim=1).mean()
-    target_entropy = -(tgt * torch.log(torch.clamp(tgt, min=1.0e-12))).sum(dim=1).mean().detach()
-    loss = cross_entropy - target_entropy
+    raw_sim_t = raw_neighbor_sim.to(device=proj_neighbor_sim.device, dtype=proj_neighbor_sim.dtype) if torch.is_tensor(raw_neighbor_sim) else None
+    if loss_type == "edge_mse":
+        if raw_sim_t is None:
+            raise RuntimeError("graph preserve edge_mse requires raw_neighbor_sim in cache")
+        edge_mse = F.mse_loss(proj_neighbor_sim, raw_sim_t)
+        loss = edge_mse
+        cross_entropy = proj_neighbor_sim.sum() * 0.0
+        target_entropy = proj_neighbor_sim.sum() * 0.0
+    else:
+        log_prob = torch.log_softmax(proj_neighbor_sim / max(float(tau), 1.0e-6), dim=1)
+        tgt = target_prob.to(device=log_prob.device, dtype=log_prob.dtype)
+        cross_entropy = -(tgt * log_prob).sum(dim=1).mean()
+        target_entropy = -(tgt * torch.log(torch.clamp(tgt, min=1.0e-12))).sum(dim=1).mean().detach()
+        loss = cross_entropy - target_entropy
+        edge_mse = F.mse_loss(proj_neighbor_sim, raw_sim_t) if raw_sim_t is not None else proj_neighbor_sim.sum() * 0.0
     with torch.no_grad():
+        abs_err = torch.mean(torch.abs(proj_neighbor_sim - raw_sim_t)) if raw_sim_t is not None else proj_neighbor_sim.sum() * 0.0
         stats = {
             "graph_preserve_enabled": True,
             "graph_preserve_mode": str(cache.get("mode", "")),
+            "graph_preserve_loss_type": str(loss_type),
             "graph_preserve_scope": str(cache.get("resolved_scope", cache.get("scope", ""))),
             "graph_preserve_class_count": int(cache.get("class_count", 0)),
             "graph_preserve_topk": int(cache.get("topk", 0)),
             "graph_preserve_loss": float(loss.detach().cpu().item()),
+            "graph_preserve_edge_mse": float(edge_mse.detach().cpu().item()),
+            "graph_preserve_abs_err_mean": float(abs_err.detach().cpu().item()),
             "graph_preserve_cross_entropy": float(cross_entropy.detach().cpu().item()),
             "graph_preserve_target_entropy": float(target_entropy.detach().cpu().item()),
             "graph_preserve_proj_neighbor_sim_mean": float(proj_neighbor_sim.detach().mean().cpu().item()),
+            "graph_preserve_raw_neighbor_sim_mean": float(raw_sim_t.detach().mean().cpu().item()) if raw_sim_t is not None else 0.0,
         }
     return loss, stats
 
@@ -1356,12 +1391,16 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     if not clip_ids:
         raise RuntimeError("no train clips selected")
 
+    text_projector_type = str(getattr(args, "text_projector_type", "mlp") or "mlp").strip().lower()
+    if text_projector_type not in {"mlp", "linear", "linear_ln"}:
+        raise RuntimeError(f"unsupported --text_projector_type={text_projector_type!r}")
     text_projector_config = {
         "input_dim": int(text_bank_summary["projector_input_dim"]),
-        "hidden_dim": int(args.text_projector_hidden_dim),
+        "hidden_dim": int(args.text_projector_hidden_dim) if text_projector_type == "mlp" else 0,
         "output_dim": int(args.text_projector_out_dim),
         "dropout": 0.0,
-        "use_layernorm": True,
+        "use_layernorm": bool(text_projector_type in {"mlp", "linear_ln"}),
+        "projector_type": text_projector_type,
     }
     projector = Projector(ProjectorConfig(**text_projector_config)).to(device)
     theta_t = torch.nn.Parameter(torch.tensor(_inverse_softplus(max(float(args.t_dis_init) - 1.0e-4, 1.0e-6)), device=device, dtype=torch.float32))
@@ -1460,7 +1499,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         },
         "graph_preserve": {
             k: v for k, v in graph_cache.items()
-            if k not in {"scope_text_indices", "neighbor_idx", "target_prob"}
+            if k not in {"scope_text_indices", "neighbor_idx", "target_prob", "raw_neighbor_sim"}
         },
         "dynamic_loss": str(args.dynamic_loss),
         "dynamic_row_source": str(args.dynamic_row_source),
@@ -1474,6 +1513,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "policy": {
             "uses_external_text_bank_variant": bool(str(args.text_bank_variant) != "clip_current"),
             "text_bank_replaces_only_text_anchor_source": True,
+            "text_projector_type": str(text_projector_type),
+            "uses_linear_text_projector": bool(text_projector_type in {"linear", "linear_ln"}),
             "text_bank_changes_dynamic_hungarian_protocol": False,
             "text_bank_changes_clip_wise_training_protocol": False,
             "text_bank_changes_candidate_set": False,
@@ -1731,6 +1772,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--text_bank_variant", choices=["clip_current", "clip_of_llm_mean", "llama_hidden_mean", "llama_direct_concept_mean"], default="clip_current", help="Text anchor source. clip_current preserves the canonical CLIP text bank; other variants load LV-VIS Llama3/CLIP-of-LLM banks.")
     p.add_argument("--text_bank_root", default="", help="Root directory of an external text bank profile, e.g. $ASSERT_ROOT/text_bank_llama3/lvvis/lvvis_visual_only_v1.")
     p.add_argument("--text_feature_dim", type=int, default=0, help="Optional guard for loaded text feature dimension. 0 means infer.")
+    p.add_argument("--text_projector_type", choices=["mlp", "linear", "linear_ln"], default="mlp", help="Text projector family. mlp preserves the historical LayerNorm+Linear+GELU+Linear mapper; linear uses one Linear(D->out)+L2 normalize; linear_ln adds input LayerNorm before that single linear map.")
     p.add_argument("--text_projector_hidden_dim", type=int, default=1024)
     p.add_argument("--text_projector_out_dim", type=int, default=768)
     p.add_argument("--annotation_json", default="")
@@ -1742,7 +1784,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lambda_prealign", type=float, default=1.0)
     p.add_argument("--lambda_dynamic", type=float, default=1.0)
     p.add_argument("--lambda_graph_preserve", type=float, default=0.0)
-    p.add_argument("--graph_preserve_mode", choices=["none", "raw_text_topk", "random_text_topk"], default="none")
+    p.add_argument("--graph_preserve_mode", choices=["none", "raw_text_topk", "random_text_topk", "topk_local", "topk_local_mse", "raw_text_topk_mse", "random_topk_local", "random_topk_local_mse", "random_text_topk_mse"], default="none", help="Text-only local graph regularizer. raw_text_topk is legacy KL; topk_local/topk_local_mse uses local edge cosine MSE; random_* are controls.")
     p.add_argument("--graph_preserve_scope", choices=["visible525", "base_vocab"], default="visible525")
     p.add_argument("--graph_preserve_topk", type=int, default=20)
     p.add_argument("--graph_preserve_tau", type=float, default=0.1)
