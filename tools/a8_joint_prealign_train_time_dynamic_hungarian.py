@@ -1346,6 +1346,58 @@ def _write_takeover(out_root: Path, payload: Mapping[str, Any]) -> None:
     (out_root / "A8_JOINT_TRAIN_TIME_DYNAMIC_HUNGARIAN_TAKEOVER.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _resolve_projector_constraint(args: argparse.Namespace) -> Dict[str, Any]:
+    constraint = str(getattr(args, "projector_constraint", "none") or "none").strip().lower()
+    if constraint not in {"none", "hard_semi_orth", "orth_penalty"}:
+        raise RuntimeError(f"unsupported --projector_constraint={constraint!r}")
+    requested_type = str(getattr(args, "text_projector_type", "mlp") or "mlp").strip().lower()
+    if constraint == "hard_semi_orth":
+        effective_type = "semi_orthogonal_linear"
+    elif constraint == "orth_penalty":
+        effective_type = "linear"
+    else:
+        effective_type = requested_type
+    if effective_type not in {"mlp", "linear", "linear_ln", "semi_orthogonal_linear"}:
+        raise RuntimeError(f"unsupported effective text projector type={effective_type!r}")
+    weight = float(getattr(args, "orth_penalty_weight", 0.0) or 0.0)
+    every = max(int(getattr(args, "orth_penalty_every_n_steps", 1) or 1), 1)
+    return {
+        "constraint": constraint,
+        "requested_text_projector_type": requested_type,
+        "effective_text_projector_type": effective_type,
+        "orth_penalty_weight": float(weight),
+        "orth_penalty_every_n_steps": int(every),
+        "hard_orth_project_every_n_steps": max(int(getattr(args, "hard_orth_project_every_n_steps", 1) or 1), 1),
+        "forces_text_projector_type": bool(constraint in {"hard_semi_orth", "orth_penalty"}),
+        "hard_constraint": bool(constraint == "hard_semi_orth"),
+        "soft_penalty": bool(constraint == "orth_penalty" and weight > 0.0),
+    }
+
+
+def _orthogonality_loss_for_step(
+    *,
+    projector: Projector,
+    text_proj_all: torch.Tensor,
+    projector_constraint: Mapping[str, Any],
+    global_step: int,
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    constraint = str(projector_constraint.get("constraint", "none"))
+    weight = float(projector_constraint.get("orth_penalty_weight", 0.0) or 0.0)
+    every = max(int(projector_constraint.get("orth_penalty_every_n_steps", 1) or 1), 1)
+    report: Dict[str, Any]
+    try:
+        report = dict(projector.orthogonality_report())
+    except Exception as exc:
+        report = {"orthogonality_applicable": False, "orthogonality_error": repr(exc)}
+    if constraint == "orth_penalty" and weight > 0.0 and (int(global_step) % every == 0):
+        loss = projector.orthogonality_penalty()
+        report.update({"orth_penalty_applied_this_step": True, "orth_penalty_loss": float(loss.detach().cpu().item())})
+        return loss, report
+    zero = text_proj_all.sum() * 0.0
+    report.update({"orth_penalty_applied_this_step": False, "orth_penalty_loss": 0.0})
+    return zero, report
+
+
 def train(args: argparse.Namespace) -> Dict[str, Any]:
     run_root = Path(args.run_root).expanduser().resolve()
     repo_root = Path(args.repo_root).expanduser().resolve()
@@ -1391,9 +1443,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     if not clip_ids:
         raise RuntimeError("no train clips selected")
 
-    text_projector_type = str(getattr(args, "text_projector_type", "mlp") or "mlp").strip().lower()
-    if text_projector_type not in {"mlp", "linear", "linear_ln"}:
-        raise RuntimeError(f"unsupported --text_projector_type={text_projector_type!r}")
+    projector_constraint = _resolve_projector_constraint(args)
+    text_projector_type = str(projector_constraint["effective_text_projector_type"])
     text_projector_config = {
         "input_dim": int(text_bank_summary["projector_input_dim"]),
         "hidden_dim": int(args.text_projector_hidden_dim) if text_projector_type == "mlp" else 0,
@@ -1401,12 +1452,19 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "dropout": 0.0,
         "use_layernorm": bool(text_projector_type in {"mlp", "linear_ln"}),
         "projector_type": text_projector_type,
+        "projector_constraint": str(projector_constraint["constraint"]),
+        "requested_projector_type": str(projector_constraint["requested_text_projector_type"]),
+        "orth_penalty_weight": float(projector_constraint["orth_penalty_weight"]),
+        "orth_penalty_every_n_steps": int(projector_constraint["orth_penalty_every_n_steps"]),
+        "hard_orth_project_every_n_steps": int(projector_constraint["hard_orth_project_every_n_steps"]),
     }
     projector = Projector(ProjectorConfig(**text_projector_config)).to(device)
     theta_t = torch.nn.Parameter(torch.tensor(_inverse_softplus(max(float(args.t_dis_init) - 1.0e-4, 1.0e-6)), device=device, dtype=torch.float32))
     init = str(args.init_checkpoint).strip()
     ckpt = _auto_find_checkpoint(repo_root, str(args.dataset_name)) if init == "auto" else init
     checkpoint_summary = _load_checkpoint_if_requested(projector, theta_t, ckpt, device)
+    if str(projector_constraint["constraint"]) == "hard_semi_orth" and hasattr(projector, "project_semi_orthogonal_"):
+        projector.project_semi_orthogonal_()
 
     graph_visible_csv = Path(args.graph_preserve_visible_csv).expanduser().resolve() if str(args.graph_preserve_visible_csv).strip() else _default_visible_csv(run_root)
     graph_cache = _build_graph_preserve_cache(
@@ -1478,6 +1536,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "lambda_prealign": float(args.lambda_prealign),
         "lambda_dynamic": float(args.lambda_dynamic),
         "lambda_graph_preserve": float(args.lambda_graph_preserve),
+        "projector_constraint": dict(projector_constraint),
         "text_bank": text_bank_summary,
         "text_projector_config": dict(text_projector_config),
         "train_carrier_aug": {
@@ -1514,7 +1573,11 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "uses_external_text_bank_variant": bool(str(args.text_bank_variant) != "clip_current"),
             "text_bank_replaces_only_text_anchor_source": True,
             "text_projector_type": str(text_projector_type),
-            "uses_linear_text_projector": bool(text_projector_type in {"linear", "linear_ln"}),
+            "requested_text_projector_type": str(projector_constraint["requested_text_projector_type"]),
+            "projector_constraint": str(projector_constraint["constraint"]),
+            "uses_hard_semi_orthogonal_projector": bool(projector_constraint["constraint"] == "hard_semi_orth"),
+            "uses_soft_orthogonality_penalty": bool(projector_constraint["constraint"] == "orth_penalty" and float(projector_constraint["orth_penalty_weight"]) > 0.0),
+            "uses_linear_text_projector": bool(text_projector_type in {"linear", "linear_ln", "semi_orthogonal_linear"}),
             "text_bank_changes_dynamic_hungarian_protocol": False,
             "text_bank_changes_clip_wise_training_protocol": False,
             "text_bank_changes_candidate_set": False,
@@ -1558,6 +1621,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
     all_pre: List[float] = []
     all_dyn: List[float] = []
     all_graph: List[float] = []
+    all_orth: List[float] = []
     all_patch_attempted = 0
     all_patch_used = 0
     all_patch_fallback = 0
@@ -1571,6 +1635,7 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         ep_pre: List[float] = []
         ep_dyn: List[float] = []
         ep_graph: List[float] = []
+        ep_orth: List[float] = []
         ep_pre_rows = 0
         ep_dyn_rows = 0
         ep_pairs = 0
@@ -1651,25 +1716,43 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
                 )
             else:
                 graph_loss, graph_stats = (text_proj_all.sum() * 0.0), {"graph_preserve_enabled": bool(graph_cache.get("enabled", False)), "graph_preserve_loss": 0.0, "graph_preserve_skipped_this_step": True}
-            total_loss = float(args.lambda_prealign) * pre_loss + float(args.lambda_dynamic) * dyn_loss + float(args.lambda_graph_preserve) * graph_loss
+            orth_loss, orth_stats = _orthogonality_loss_for_step(
+                projector=projector,
+                text_proj_all=text_proj_all,
+                projector_constraint=projector_constraint,
+                global_step=int(global_step),
+            )
+            total_loss = (
+                float(args.lambda_prealign) * pre_loss
+                + float(args.lambda_dynamic) * dyn_loss
+                + float(args.lambda_graph_preserve) * graph_loss
+                + float(projector_constraint["orth_penalty_weight"]) * orth_loss
+            )
             total_loss.backward()
             if float(args.grad_clip_norm) > 0:
                 torch.nn.utils.clip_grad_norm_([*projector.parameters(), theta_t], max_norm=float(args.grad_clip_norm))
             optimizer.step()
+            if (
+                str(projector_constraint["constraint"]) == "hard_semi_orth"
+                and hasattr(projector, "project_semi_orthogonal_")
+                and ((int(global_step) + 1) % int(projector_constraint["hard_orth_project_every_n_steps"]) == 0)
+            ):
+                projector.project_semi_orthogonal_()
             global_step += 1
             tv = float(total_loss.detach().cpu().item())
             pv = float(pre_loss.detach().cpu().item())
             dv = float(dyn_loss.detach().cpu().item())
             gv = float(graph_loss.detach().cpu().item())
-            all_total.append(tv); all_pre.append(pv); all_dyn.append(dv); all_graph.append(gv)
-            ep_total.append(tv); ep_pre.append(pv); ep_dyn.append(dv); ep_graph.append(gv)
+            ov = float(orth_loss.detach().cpu().item())
+            all_total.append(tv); all_pre.append(pv); all_dyn.append(dv); all_graph.append(gv); all_orth.append(ov)
+            ep_total.append(tv); ep_pre.append(pv); ep_dyn.append(dv); ep_graph.append(gv); ep_orth.append(ov)
             ep_pre_rows += int(pre_stats.get("rows", 0)); ep_dyn_rows += int(dyn_stats.get("dynamic_rows", 0)); ep_pairs += int(dyn_stats.get("dynamic_assigned_pairs", 0))
             ep_dyn_margin.append(float(dyn_stats.get("dynamic_selected_margin_mean", 0.0)))
             ep_dyn_person.append(float(dyn_stats.get("dynamic_person_raw773_assignment_rate", 0.0)))
             ep_pre_mass.append(float(pre_stats.get("mass_in_y_mean", 0.0)))
             ep_solver[str(dyn_stats.get("dynamic_assignment_solver", ""))] += 1
             if int(args.log_every_steps) > 0 and global_step % int(args.log_every_steps) == 0:
-                _append_jsonl(log_path, {"timestamp": _now(), "row_type": "step", "epoch": int(epoch) + 1, "global_step": global_step, "loss_total": tv, "loss_prealign": pv, "loss_dynamic": dv, "loss_graph_preserve": gv, **pre_stats, **dyn_stats, **graph_stats, **patch_stats})
+                _append_jsonl(log_path, {"timestamp": _now(), "row_type": "step", "epoch": int(epoch) + 1, "global_step": global_step, "loss_total": tv, "loss_prealign": pv, "loss_dynamic": dv, "loss_graph_preserve": gv, "loss_orthogonality": ov, **pre_stats, **dyn_stats, **graph_stats, **orth_stats, **patch_stats})
         epoch_row = {
             "timestamp": _now(),
             "row_type": "epoch_summary",
@@ -1679,6 +1762,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "loss_prealign_mean": _mean(ep_pre),
             "loss_dynamic_mean": _mean(ep_dyn),
             "loss_graph_preserve_mean": _mean(ep_graph),
+            "loss_orthogonality_mean": _mean(ep_orth),
+            "orthogonality_report": projector.orthogonality_report(),
             "prealign_mass_in_y_mean": _mean(ep_pre_mass),
             "dynamic_selected_margin_mean": _mean(ep_dyn_margin),
             "dynamic_person_raw773_assignment_rate_mean": _mean(ep_dyn_person),
@@ -1744,6 +1829,8 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
             "loss_prealign_mean": _mean(all_pre),
             "loss_dynamic_mean": _mean(all_dyn),
             "loss_graph_preserve_mean": _mean(all_graph),
+            "loss_orthogonality_mean": _mean(all_orth),
+            "orthogonality_report": projector.orthogonality_report(),
             "loss_total_last": all_total[-1] if all_total else 0.0,
             "patchsample_attempted": int(all_patch_attempted),
             "patchsample_used": int(all_patch_used),
@@ -1772,7 +1859,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--text_bank_variant", choices=["clip_current", "clip_of_llm_mean", "llama_hidden_mean", "llama_direct_concept_mean"], default="clip_current", help="Text anchor source. clip_current preserves the canonical CLIP text bank; other variants load LV-VIS Llama3/CLIP-of-LLM banks.")
     p.add_argument("--text_bank_root", default="", help="Root directory of an external text bank profile, e.g. $ASSERT_ROOT/text_bank_llama3/lvvis/lvvis_visual_only_v1.")
     p.add_argument("--text_feature_dim", type=int, default=0, help="Optional guard for loaded text feature dimension. 0 means infer.")
-    p.add_argument("--text_projector_type", choices=["mlp", "linear", "linear_ln"], default="mlp", help="Text projector family. mlp preserves the historical LayerNorm+Linear+GELU+Linear mapper; linear uses one Linear(D->out)+L2 normalize; linear_ln adds input LayerNorm before that single linear map.")
+    p.add_argument("--text_projector_type", choices=["mlp", "linear", "linear_ln", "semi_orthogonal_linear"], default="mlp", help="Text projector family. mlp preserves the historical LayerNorm+Linear+GELU+Linear mapper; linear uses one Linear(D->out)+L2 normalize; linear_ln adds input LayerNorm before that single linear map. semi_orthogonal_linear is normally activated via --projector_constraint hard_semi_orth.")
+    p.add_argument("--projector_constraint", choices=["none", "hard_semi_orth", "orth_penalty"], default="none", help="A8 text-bank projector constraint ablation. none preserves historical behavior; hard_semi_orth forces a QR semi-orthogonal linear projector; orth_penalty uses a linear projector plus an orthogonality penalty.")
+    p.add_argument("--orth_penalty_weight", type=float, default=0.0, help="Weight for --projector_constraint orth_penalty. Ignored by hard_semi_orth and none.")
+    p.add_argument("--orth_penalty_every_n_steps", type=int, default=1, help="Apply the soft orthogonality penalty every N optimizer steps.")
+    p.add_argument("--hard_orth_project_every_n_steps", type=int, default=1, help="For --projector_constraint hard_semi_orth, project the semi-orthogonal weight back to the Stiefel set every N optimizer steps. Use 1 for exact step-wise retraction; larger values are a pragmatic Llama3-cost control.")
     p.add_argument("--text_projector_hidden_dim", type=int, default=1024)
     p.add_argument("--text_projector_out_dim", type=int, default=768)
     p.add_argument("--annotation_json", default="")

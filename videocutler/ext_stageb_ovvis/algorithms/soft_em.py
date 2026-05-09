@@ -321,6 +321,25 @@ def _infer_text_projector_config_from_state_dict(state_dict: Mapping[str, Any]) 
         raise RuntimeError("cannot infer text_projector_config from empty or invalid state_dict")
     keys = set(str(k) for k in state_dict.keys())
 
+    # Semi-orthogonal linear layout from ProjectorConfig(projector_type="semi_orthogonal_linear"):
+    #   orth_raw: free QR parameter [output_dim, input_dim]
+    if keys == {"orth_raw"}:
+        weight = state_dict["orth_raw"]
+        if not hasattr(weight, "shape"):
+            raise RuntimeError(
+                "checkpoint has text_projector_state_dict but no explicit text_projector_config, "
+                "and semi_orthogonal_linear parameter is not tensor-like"
+            )
+        return {
+            "input_dim": int(weight.shape[1]),
+            "hidden_dim": 0,
+            "output_dim": int(weight.shape[0]),
+            "dropout": 0.0,
+            "use_layernorm": False,
+            "projector_type": "semi_orthogonal_linear",
+            "config_source": "inferred_from_semi_orthogonal_text_projector_state_dict",
+        }
+
     # Pure linear layout from ProjectorConfig(projector_type="linear"):
     #   net.0: Linear(input_dim -> output_dim)
     if keys == {"net.0.weight", "net.0.bias"}:
