@@ -1458,7 +1458,18 @@ def train(args: argparse.Namespace) -> Dict[str, Any]:
         "orth_penalty_every_n_steps": int(projector_constraint["orth_penalty_every_n_steps"]),
         "hard_orth_project_every_n_steps": int(projector_constraint["hard_orth_project_every_n_steps"]),
     }
-    projector = Projector(ProjectorConfig(**text_projector_config)).to(device)
+    # ProjectorConfig is intentionally model-only.  Keep ablation/runtime
+    # metadata in text_projector_config for checkpoints and summaries, but do
+    # not pass those extra keys into the dataclass constructor.
+    _projector_model_config = {
+        "input_dim": int(text_projector_config["input_dim"]),
+        "hidden_dim": int(text_projector_config["hidden_dim"]),
+        "output_dim": int(text_projector_config["output_dim"]),
+        "dropout": float(text_projector_config["dropout"]),
+        "use_layernorm": bool(text_projector_config["use_layernorm"]),
+        "projector_type": str(text_projector_config["projector_type"]),
+    }
+    projector = Projector(ProjectorConfig(**_projector_model_config)).to(device)
     theta_t = torch.nn.Parameter(torch.tensor(_inverse_softplus(max(float(args.t_dis_init) - 1.0e-4, 1.0e-6)), device=device, dtype=torch.float32))
     init = str(args.init_checkpoint).strip()
     ckpt = _auto_find_checkpoint(repo_root, str(args.dataset_name)) if init == "auto" else init

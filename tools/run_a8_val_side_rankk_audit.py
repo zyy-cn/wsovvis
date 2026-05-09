@@ -49,7 +49,7 @@ GTCEIL = _load_gtceil_module()
 
 from videocutler.ext_stageb_ovvis.eval.g8_bridge import (  # noqa: E402
     load_projector_bundle,
-    load_text_vocab_with_names,
+    load_text_vocab_for_checkpoint,
     score_infer_rows_matrix,
 )
 
@@ -222,7 +222,13 @@ def main() -> int:
 
     device = torch.device(args.device if str(args.device).startswith("cuda") and torch.cuda.is_available() else "cpu")
     bundle = load_projector_bundle(checkpoint_path, device=device)
-    text_vocab_ids, _text_records, text_matrix, class_name_map = load_text_vocab_with_names(asset_root, dataset_name)
+    text_vocab_ids, _text_records, text_matrix, class_name_map, text_bank_eval_summary = load_text_vocab_for_checkpoint(
+        asset_root,
+        dataset_name,
+        bundle.checkpoint_payload,
+    )
+    text_bank_eval_summary = dict(text_bank_eval_summary)
+    text_bank_eval_summary["loaded_by_val_side_rankk_audit"] = bool(text_bank_eval_summary.get("variant") != "clip_current")
     raw_to_idx = {int(raw): int(i) for i, raw in enumerate(text_vocab_ids)}
     scores = score_infer_rows_matrix(
         carrier_matrix=carrier_matrix,
@@ -358,6 +364,7 @@ def main() -> int:
         "annotation_json": str(annotation_json),
         "split_json": str(split_json),
         "score_mode": str(args.score_mode),
+        "text_bank": text_bank_eval_summary,
         "vocab_size": int(len(text_vocab_ids)),
         "base_id_count": int(len(base_ids)),
         "novel_id_count": int(len(novel_ids)),
