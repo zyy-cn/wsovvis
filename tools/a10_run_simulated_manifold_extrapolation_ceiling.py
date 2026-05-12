@@ -18,6 +18,7 @@ import json
 import math
 import sys
 import time
+import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -112,6 +113,22 @@ def _as_int(x: Any, default: Optional[int] = None) -> Optional[int]:
         return int(float(str(x)))
     except Exception:
         return default
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Robust getter for row-like objects returned by upstream helpers.
+
+    Normal A8 rows are mappings.  Some older candidate-source paths can
+    surface list/tuple rows; for A10 row-level audit we only need mapping
+    rows, so non-mapping rows safely return defaults instead of crashing.
+    """
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    return default
+
+
+def _coerce_mapping(obj: Any) -> Dict[str, Any]:
+    return dict(obj) if isinstance(obj, Mapping) else {}
 
 
 def _safe_float(x: Any, default: float = float("nan")) -> float:
@@ -614,7 +631,7 @@ def _evaluate_row_level(
     by_class: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     scanned = 0
     for i, row in enumerate(val_rows):
-        rid = _as_int(row.get("raw_category_id"))
+        rid = _as_int(_row_get(row, "raw_category_id"))
         if rid is None or int(rid) not in heldout_set or int(rid) not in id_to_idx:
             continue
         if i >= int(val_carrier.shape[0]):
@@ -653,9 +670,9 @@ def _evaluate_row_level(
             margins_person.append(m_person)
         rec = {
             **case_meta,
-            "trajectory_id": str(row.get("trajectory_id", row.get("track_id", ""))),
-            "video_id": row.get("video_id", ""),
-            "clip_id": row.get("clip_id", row.get("video_id", "")),
+            "trajectory_id": str(_row_get(row, "trajectory_id", _row_get(row, "track_id", ""))),
+            "video_id": _row_get(row, "video_id", ""),
+            "clip_id": row.get("clip_id", _row_get(row, "video_id", "")),
             "gt_raw_id": int(rid),
             "gt_name": names.get(int(rid), f"raw_id_{rid}"),
             "rank": rank,
@@ -704,8 +721,52 @@ def _evaluate_row_level(
     return summary, per_row, per_class
 
 
+def _load_external_text_bank_robust(a8: Any, root: Path, variant: str) -> Tuple[List[int], np.ndarray, Dict[int, str], Dict[str, Any]]:
+    ids, names = a8._load_lvvis_classes(root)
+    payload = a8._payload_for_variant(root, variant)
+    arr, key = a8._load_npz_first(payload)
+    if arr.ndim != 2 or int(arr.shape[0]) != len(ids):
+        raise RuntimeError(f"bad text-bank payload shape={arr.shape} ids={len(ids)} variant={variant}")
+    arr = _l2(np.asarray(arr, dtype=np.float32))
+    manifest_path = root / "manifest.json"
+    manifest_obj = a8._read_json(manifest_path) if manifest_path.is_file() else {}
+    manifest = _coerce_mapping(manifest_obj)
+    meta = {
+        "source": "external_text_bank",
+        "variant": variant,
+        "root": str(root),
+        "payload_path": str(payload),
+        "payload_array_key": key,
+        "payload_sha256": a8._sha256(payload),
+        "manifest_path": str(manifest_path) if manifest_path.is_file() else "",
+        "manifest_sha256": a8._sha256(manifest_path) if manifest_path.is_file() else "",
+        "manifest_type": type(manifest_obj).__name__,
+        "feature_dim": int(arr.shape[1]),
+        "class_count": int(len(ids)),
+        "profile_id": manifest.get("profile_id"),
+        "profile_type": manifest.get("profile_type"),
+        "token_feature_alignment": manifest.get("token_feature_alignment"),
+        "uses_old_corr_feats": manifest.get("uses_old_corr_feats"),
+    }
+    return list(map(int, ids)), arr, names, meta
+
+
+def _load_all_text_banks_robust(a8: Any, asset_root: Path, dataset_name: str, visual_root: Path, direct_root: Path, variants: Sequence[str]) -> Dict[str, Tuple[List[int], np.ndarray, Dict[int, str], Dict[str, Any]]]:
+    out: Dict[str, Tuple[List[int], np.ndarray, Dict[int, str], Dict[str, Any]]] = {}
+    for v in variants:
+        if v == "clip_current":
+            out[v] = a8._load_current_clip_text_bank(asset_root, dataset_name)
+        elif v in {"clip_of_llm_mean", "llama_hidden_mean"}:
+            out[v] = _load_external_text_bank_robust(a8, visual_root, v)
+        elif v == "llama_direct_concept_mean":
+            out[v] = _load_external_text_bank_robust(a8, direct_root, v)
+        else:
+            raise ValueError(f"unsupported variant: {v}")
+    return out
+
+
 def _build_real_feature_cases(a8: Any, asset_root: Path, dataset_name: str, visual_root: Path, direct_root: Path, variants: Sequence[str], ids: Sequence[int]) -> List[Dict[str, Any]]:
-    text_banks = a8._load_all_text_banks(asset_root, dataset_name, visual_root, direct_root, variants)
+    text_banks = _load_all_text_banks_robust(a8, asset_root, dataset_name, visual_root, direct_root, variants)
     cases: List[Dict[str, Any]] = []
     for variant, (t_ids, t_mat, names, meta) in text_banks.items():
         mat = a8._submatrix_for_ids(t_ids, t_mat, ids)
@@ -715,7 +776,7 @@ def _build_real_feature_cases(a8: Any, asset_root: Path, dataset_name: str, visu
             "transform": "real_text",
             "text_matrix": _l2(np.asarray(mat, dtype=np.float32)),
             "names": names,
-            "meta": dict(meta),
+            "meta": _coerce_mapping(meta),
         })
     return cases
 
@@ -1315,6 +1376,7 @@ def main() -> int:
     except Exception as exc:
         result["status"] = "FAIL"
         result["error"] = str(exc)
+        result["traceback"] = traceback.format_exc()
         _write_json(analysis_root / "A10_simulated_manifold_summary.json", result)
         make_takeover(output_root, {**result, "analysis_root": str(analysis_root)})
         if not args.continue_on_error:
