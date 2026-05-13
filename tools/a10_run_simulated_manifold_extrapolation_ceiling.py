@@ -856,7 +856,7 @@ def run_fixed_split_ceiling(ctx: Mapping[str, Any]) -> Dict[str, Any]:
     val_valid = np.asarray(ctx["val_valid"], dtype=bool)
     val_rows = ctx["val_rows"]
     val_carrier = np.asarray(ctx["val_carrier"], dtype=np.float32)
-    per_class = ctx["per_class_meta"]
+    per_class_meta = ctx["per_class_meta"]
     train_counts = ctx["train_counts"]
     cases = ctx["feature_cases"]
     forced_hubs = [int(x) for x in str(args.forced_hubs).split(",") if str(x).strip()]
@@ -876,7 +876,7 @@ def run_fixed_split_ceiling(ctx: Mapping[str, Any]) -> Dict[str, Any]:
     split_rows: List[Dict[str, Any]] = []
     sanity_rows: List[Dict[str, Any]] = []
     for seed in seeds:
-        train_ids, calib_ids, heldout_ids, split_meta = _stratified_split(ids, train_counts, per_class, seed, float(args.anchor_train_fraction), float(args.anchor_calib_fraction), float(args.heldout_fraction))
+        train_ids, calib_ids, heldout_ids, split_meta = _stratified_split(ids, train_counts, per_class_meta, seed, float(args.anchor_train_fraction), float(args.anchor_calib_fraction), float(args.heldout_fraction))
         for br in split_meta["bucket_rows"]:
             split_rows.append({"seed": seed, **br})
         for case in cases:
@@ -918,11 +918,11 @@ def run_fixed_split_ceiling(ctx: Mapping[str, Any]) -> Dict[str, Any]:
                 for scope in candidate_scopes:
                     cand = _candidate_ids_for_scope(scope, ids, heldout_ids, forced_hubs)
                     case_meta = {**best_meta, "candidate_scope": scope}
-                    summ, per_row, per_class = _evaluate_row_level(projected, ids, val_rows, val_carrier, heldout_ids, cand, names, int(args.row_max_rows), case_meta)
+                    summ, row_records, class_records = _evaluate_row_level(projected, ids, val_rows, val_carrier, heldout_ids, cand, names, int(args.row_max_rows), case_meta)
                     row_summary_rows.append(summ)
                     if not args.no_per_row:
-                        per_row_rows.extend(per_row)
-                    per_class_rows.extend(per_class)
+                        per_row_rows.extend(row_records)
+                    per_class_rows.extend(class_records)
             # Explicit sanity rows for canonical expected-success cases.
             if case["feature_kind"] == "synthetic" and case.get("transform") in {"S0_identity", "S1_orthogonal"}:
                 expected = "identity" if case.get("transform") == "S0_identity" else "orthogonal_procrustes"
