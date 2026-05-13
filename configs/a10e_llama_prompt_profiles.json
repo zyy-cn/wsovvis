@@ -1,0 +1,101 @@
+{
+  "version": "a10e_prompt_manifold_search_20260513_v1",
+  "default_profile": "a10e_P0_baseline_visual_only_v1",
+  "profiles": {
+    "a10e_P0_baseline_visual_only_v1": {
+      "profile_id": "a10e_P0_baseline_visual_only_v1",
+      "description": "A10E P0 baseline equivalent to lvvis_visual_only_v1; kept as non-overwriting baseline inside A10E prompt search.",
+      "profile_type": "description_generation",
+      "system_prompt": "You describe object categories for visual recognition. Use only observable visual attributes. Do not mention typical locations, usage, care, people, or co-occurring objects unless they are physically part of the object.",
+      "user_prompts": [
+        {
+          "prompt_id": "visual_appearance_v1",
+          "prompt": "Describe the visual appearance of [CLS] in one concise sentence. Focus on shape, parts, material, texture, color, and distinctive visual cues.",
+          "source": "current lvvis_visual_only_v1 baseline copied for A10E non-overwriting search"
+        }
+      ],
+      "class_placeholder_style": "plain_upper",
+      "generation_defaults": {"temperature": 0.0, "top_p": 1.0, "max_gen_len": 0, "repeat": 1},
+      "feature_pooling": "mean over generated assistant token hidden states per response; mean over prompt/repeat views per class; L2 normalize after view mean",
+      "a10e_metadata": {"family": "baseline", "target_hypothesis": "current visual-only baseline", "expected_metric_gain": []}
+    },
+    "a10e_P1_crop_morphology": {
+      "profile_id": "a10e_P1_crop_morphology",
+      "description": "Segmented-object-crop morphology prompt: suppress scene/context and describe visible crop attributes only.",
+      "profile_type": "description_generation",
+      "system_prompt": "You generate visual attribute phrases for object recognition from segmented object crops. Describe only visible appearance. Do not mention scene, location, function, usage, people, habitat, taxonomy, or co-occurring objects.",
+      "user_prompts": [
+        {"prompt_id": "crop_morphology_v1", "prompt": "For [CLS], write 4 to 6 short visual attribute phrases only. Focus on silhouette, major parts, material, texture, color pattern, and distinctive visible cues. No full sentence.", "source": "A10E profile P1"}
+      ],
+      "class_placeholder_style": "plain_upper",
+      "generation_defaults": {"temperature": 0.0, "top_p": 1.0, "max_gen_len": 0, "repeat": 1},
+      "feature_pooling": "mean over generated assistant token hidden states per response; mean over prompt/repeat views per class; L2 normalize after view mean",
+      "a10e_metadata": {"family": "crop_morphology", "target_hypothesis": "increase DINO-compatible local object-crop kNN structure", "expected_metric_gain": ["knn_overlap@10", "triplet_agreement"]}
+    },
+    "a10e_P2_local_global": {
+      "profile_id": "a10e_P2_local_global",
+      "description": "Local-global visual cues prompt: combine whole-object shape with patch-level texture and repeated local patterns.",
+      "profile_type": "description_generation",
+      "system_prompt": "You describe object categories using only visual evidence that could be observed from image patches and an object crop. Ignore background, function, location, and semantic associations.",
+      "user_prompts": [
+        {"prompt_id": "local_global_v1", "prompt": "Describe [CLS] with compact visual cues: overall shape, contour, part layout, repeated local patterns, surface texture, material, and color distribution. Output short phrases only.", "source": "A10E profile P2"}
+      ],
+      "class_placeholder_style": "plain_upper",
+      "generation_defaults": {"temperature": 0.0, "top_p": 1.0, "max_gen_len": 0, "repeat": 1},
+      "feature_pooling": "mean over generated assistant token hidden states per response; mean over prompt/repeat views per class; L2 normalize after view mean",
+      "a10e_metadata": {"family": "local_global", "target_hypothesis": "match DINOv2 mixed global-object and local-patch structure", "expected_metric_gain": ["knn_overlap@10", "triplet_agreement"]}
+    },
+    "a10e_P3_discriminative": {
+      "profile_id": "a10e_P3_discriminative",
+      "description": "Fine-grained discriminative visual cues prompt: reduce full-vocabulary distractor suppression.",
+      "profile_type": "description_generation",
+      "system_prompt": "You create visual recognition cues that distinguish an object from visually similar categories. Use only observable appearance, never context, function, habitat, or co-occurring objects.",
+      "user_prompts": [
+        {"prompt_id": "discriminative_v1", "prompt": "For [CLS], list the most discriminative visible cues: shape, part geometry, texture, material, color pattern, and details that separate it from similar-looking objects. Short phrases only.", "source": "A10E profile P3"}
+      ],
+      "class_placeholder_style": "plain_upper",
+      "generation_defaults": {"temperature": 0.0, "top_p": 1.0, "max_gen_len": 0, "repeat": 1},
+      "feature_pooling": "mean over generated assistant token hidden states per response; mean over prompt/repeat views per class; L2 normalize after view mean",
+      "a10e_metadata": {"family": "discriminative", "target_hypothesis": "improve full_available t2v ranking by reducing visually similar suppressors", "expected_metric_gain": ["t2v_rank@1", "t2v_rank@5"]}
+    },
+    "a10e_P4_shape_first": {
+      "profile_id": "a10e_P4_shape_first",
+      "description": "Shape-first prompt: isolate silhouette, outline, aspect ratio, and part geometry.",
+      "profile_type": "description_generation",
+      "system_prompt": "You describe object categories by visible geometry only. Avoid function, scene, location, symbolic meaning, and co-occurrence.",
+      "user_prompts": [
+        {"prompt_id": "shape_first_v1", "prompt": "For [CLS], describe only silhouette, outline, aspect ratio, main parts, part arrangement, and geometric details. Use short visual phrases.", "source": "A10E profile P4"}
+      ],
+      "class_placeholder_style": "plain_upper",
+      "generation_defaults": {"temperature": 0.0, "top_p": 1.0, "max_gen_len": 0, "repeat": 1},
+      "feature_pooling": "mean over generated assistant token hidden states per response; mean over prompt/repeat views per class; L2 normalize after view mean",
+      "a10e_metadata": {"family": "shape_first", "target_hypothesis": "test whether DINOv2 class manifold is primarily shape/geometry aligned", "expected_metric_gain": ["knn_overlap@10"]}
+    },
+    "a10e_P5_texture_material": {
+      "profile_id": "a10e_P5_texture_material",
+      "description": "Texture/material-first prompt: emphasize surface evidence, patterns, markings, reflectance, and fine detail.",
+      "profile_type": "description_generation",
+      "system_prompt": "You describe only visible surface evidence for object recognition. Avoid context, usage, location, people, and associated objects.",
+      "user_prompts": [
+        {"prompt_id": "texture_material_v1", "prompt": "For [CLS], describe material, surface texture, color pattern, markings, reflectance, and fine visual details. Use short phrases only.", "source": "A10E profile P5"}
+      ],
+      "class_placeholder_style": "plain_upper",
+      "generation_defaults": {"temperature": 0.0, "top_p": 1.0, "max_gen_len": 0, "repeat": 1},
+      "feature_pooling": "mean over generated assistant token hidden states per response; mean over prompt/repeat views per class; L2 normalize after view mean",
+      "a10e_metadata": {"family": "texture_material", "target_hypothesis": "test whether DINOv2 local-patch texture/material evidence improves alignment", "expected_metric_gain": ["knn_overlap@10", "triplet_agreement"]}
+    },
+    "a10e_P6_balanced_metric": {
+      "profile_id": "a10e_P6_balanced_metric",
+      "description": "Balanced metric prompt: fixed order of object-crop visual attributes for DINO-compatible self-supervised visual manifold alignment.",
+      "profile_type": "description_generation",
+      "system_prompt": "You produce compact visual feature descriptions for aligning language features to self-supervised vision features. Use only observable object appearance. Exclude scene, location, function, usage, people, habitat, taxonomy, and co-occurring objects.",
+      "user_prompts": [
+        {"prompt_id": "balanced_metric_v1", "prompt": "For [CLS], output 5 compact visual phrases in this order: overall shape; part layout; material or surface; texture or color pattern; distinctive visual cue. Do not use field names.", "source": "A10E profile P6"}
+      ],
+      "class_placeholder_style": "plain_upper",
+      "generation_defaults": {"temperature": 0.0, "top_p": 1.0, "max_gen_len": 0, "repeat": 1},
+      "feature_pooling": "mean over generated assistant token hidden states per response; mean over prompt/repeat views per class; L2 normalize after view mean",
+      "a10e_metadata": {"family": "balanced_metric", "target_hypothesis": "balanced fixed-order visual attributes should improve kNN/triplet and endpoint t2v without increasing hubness", "expected_metric_gain": ["knn_overlap@10", "triplet_agreement", "t2v_rank@5"]}
+    }
+  }
+}

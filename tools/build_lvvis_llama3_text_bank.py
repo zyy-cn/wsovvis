@@ -155,14 +155,17 @@ def _select_classes(class_map: Sequence[Tuple[int, str]], max_classes: int) -> L
     return list(class_map)
 
 
-def _load_profiles(repo_root: Path) -> Dict[str, Any]:
-    path = repo_root / "third_party" / "uvlt_llama3" / "prompts" / "prompt_profiles.json"
+def _load_profiles(repo_root: Path, prompt_profiles_path: Optional[str] = None) -> Dict[str, Any]:
+    if prompt_profiles_path:
+        path = Path(prompt_profiles_path).expanduser().resolve()
+    else:
+        path = repo_root / "third_party" / "uvlt_llama3" / "prompts" / "prompt_profiles.json"
     payload = _load_json(path)
     return payload
 
 
-def _resolve_profile(repo_root: Path, profile_id: str) -> Dict[str, Any]:
-    profiles = _load_profiles(repo_root)
+def _resolve_profile(repo_root: Path, profile_id: str, prompt_profiles_path: Optional[str] = None) -> Dict[str, Any]:
+    profiles = _load_profiles(repo_root, prompt_profiles_path)
     if profile_id not in profiles.get("profiles", {}):
         raise KeyError(f"unknown profile_id={profile_id}; available={sorted(profiles.get('profiles', {}).keys())}")
     return dict(profiles["profiles"][profile_id])
@@ -643,7 +646,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--assert_root", default=None, help="wsovvis_asserts root; default: $WSOVVIS_ASSERT_ROOT or /home/zyy/code/wsovvis_asserts")
     parser.add_argument("--output_root", default=None, help="default: <assert_root>/text_bank_llama3/lvvis")
     parser.add_argument("--output_name", default=None, help="profile output directory name; default profile_id, with _smokeN suffix when --max_classes is set")
-    parser.add_argument("--profile", default="lvvis_visual_only_v1", help="profile id in third_party/uvlt_llama3/prompts/prompt_profiles.json")
+    parser.add_argument("--profile", default="lvvis_visual_only_v1", help="profile id in prompt_profiles.json")
+    parser.add_argument("--prompt_profiles_path", default=None, help="optional external prompt_profiles.json; default preserves the original third_party/uvlt_llama3/prompts/prompt_profiles.json")
     parser.add_argument("--train_annotation_json", default=None)
     parser.add_argument("--val_annotation_json", default=None)
     parser.add_argument("--max_classes", type=int, default=0, help="smoke subset: first N raw-id-sorted classes")
@@ -680,7 +684,7 @@ def main() -> int:
     repo_root = Path(args.repo_root).expanduser().resolve() if args.repo_root else _repo_root()
     assert_root = _resolve_assert_root(repo_root, args.assert_root)
     output_root = Path(args.output_root).expanduser().resolve() if args.output_root else (assert_root / "text_bank_llama3" / "lvvis").resolve()
-    profile = _resolve_profile(repo_root, args.profile)
+    profile = _resolve_profile(repo_root, args.profile, args.prompt_profiles_path)
     profile_id = str(profile["profile_id"])
     output_name = args.output_name
     if not output_name:
